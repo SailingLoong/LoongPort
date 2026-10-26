@@ -1891,7 +1891,7 @@ fn lifecycle_missing_or_unknown_state_never_infers_from_legacy_flags() {
             .unwrap();
             let value = json!({"version":1,"future_mode_owner":true,"apps":{}});
             let bytes = file
-                .encode(
+                .encode_storage(
                     &fixture.state.db.secret_session().read().unwrap(),
                     &serde_json::to_vec(&value).unwrap(),
                 )
@@ -3814,7 +3814,7 @@ fn listener_reconfiguration_preserves_unattached_and_unknown_modes() {
                 .unwrap();
                 let value = json!({"version":1,"future_mode_owner":true,"apps":{}});
                 let bytes = file
-                    .encode(
+                    .encode_storage(
                         &fixture.state.db.secret_session().read().unwrap(),
                         &serde_json::to_vec(&value).unwrap(),
                     )

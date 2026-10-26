@@ -323,6 +323,25 @@ fn sync_dir(path: &Path) -> Result<(), AppError> {
         .map_err(|e| AppError::io(path, e))?;
     Ok(())
 }
+// This legacy reset may archive an unreadable vault.json verbatim. Preserve
+// that behavior, but never let a readable new-format owner enter random-key
+// reset. ProtectionRecord parsing remains strict, independently of vault.json.
+fn ensure_legacy_reset_scope(root: &Path) -> Result<(), AppError> {
+    super::transition::ensure_legacy_generation_owner(root)?;
+    if let Ok(saved) = session::read_metadata(root) {
+        super::transition::ensure_legacy_metadata(&saved.metadata)?;
+    }
+    let path = root.join(crate::config::DB_FILE_NAME);
+    if regular(&path)? {
+        // Opening the original even read-only can create SQLite sidecars. Use
+        // the existing passive reader before admitting any original DB access.
+        let captured = crate::database::inspection::capture(&path)?.ok_or_else(invalid)?;
+        if let Some(metadata) = vault::stored_metadata(&captured.image)? {
+            super::transition::ensure_legacy_metadata(&metadata)?;
+        }
+    }
+    Ok(())
+}
 fn snapshot(root: &Path) -> Result<Connection, AppError> {
     let path = root.join(crate::config::DB_FILE_NAME);
     let mut memory = Connection::open_in_memory()?;
@@ -408,6 +427,7 @@ fn fingerprint_with_device(
     Ok(hex::encode(digest.finalize()))
 }
 pub(crate) fn preview(root: &Path) -> Result<ResetPreview, AppError> {
+    ensure_legacy_reset_scope(root)?;
     if regular(&intent_path(root)?)? {
         return Err(AppError::Config("secret.recovery_required".into()));
     }
@@ -539,6 +559,7 @@ fn reset_with_hook(
     password: &str,
     hook: &mut dyn FnMut(Checkpoint) -> Result<(), AppError>,
 ) -> Result<PathBuf, AppError> {
+    ensure_legacy_reset_scope(root)?;
     super::owned_file::ensure_zcode_reset_allowed(root)?;
     let journal = intent_path(root)?;
     if regular(&journal)? {
@@ -554,6 +575,7 @@ fn reset_with_hook(
     let next = VaultContext::generate()
         .and_then(|v| v.with_password(password))
         .map_err(inventory::secret_error)?;
+    super::transition::ensure_legacy_metadata(next.metadata())?;
     let id = uuid::Uuid::new_v4().to_string();
     let (stage, _, archive_path) = locations(root, &id)?;
     crate::config::ensure_private_directory(&stage)?;
@@ -607,6 +629,8 @@ fn publish_intent(
     manifest: &Manifest,
     next: &VaultContext,
 ) -> Result<Intent, AppError> {
+    ensure_legacy_reset_scope(root)?;
+    super::transition::ensure_legacy_metadata(next.metadata())?;
     let encode = |manifest: &Manifest| -> Result<(Intent, Vec<u8>), AppError> {
         let body = next
             .seal(
@@ -670,11 +694,17 @@ fn finish(
     next: &VaultContext,
     hook: &mut dyn FnMut(Checkpoint) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
+    ensure_legacy_reset_scope(root)?;
+    super::transition::ensure_legacy_metadata(&intent.metadata)?;
+    super::transition::ensure_legacy_metadata(next.metadata())?;
     super::owned_file::ensure_zcode_reset_allowed(root)?;
     if let Some(device) = &manifest.device {
         device.validate_binding(root)?;
     }
     let (stage, previous, archive_path) = locations(root, &intent.id)?;
+    // The original source can already have moved to previous on re-entry.
+    ensure_legacy_reset_scope(&stage)?;
+    ensure_legacy_reset_scope(&previous)?;
     let archive_bytes = read_optional(&archive_path)?;
     if hash(&archive_bytes) != manifest.archive_hash {
         return Err(invalid());
@@ -815,6 +845,7 @@ fn recover_record(
     password: Option<&str>,
     expected: Option<&[u8]>,
 ) -> Result<(), AppError> {
+    ensure_legacy_reset_scope(root)?;
     let Some(bytes) = pending_record(root)? else {
         return if expected.is_some() {
             Err(AppError::Config("upgrade.source_changed".into()))
@@ -828,8 +859,9 @@ fn recover_record(
     if bytes.is_empty() {
         return Err(invalid());
     }
-    let password = password.ok_or_else(|| AppError::Config("secret.locked".into()))?;
     let intent: Intent = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    super::transition::ensure_legacy_metadata(&intent.metadata)?;
+    let password = password.ok_or_else(|| AppError::Config("secret.locked".into()))?;
     let next = VaultContext::from_password(intent.metadata.clone(), password)
         .map_err(inventory::secret_error)?;
     let plaintext = next
@@ -900,7 +932,7 @@ mod tests {
                 _home: home,
                 old,
                 root,
-                original_key,
+                original_key: original_key.encrypted().unwrap().clone(),
             }
         }
         fn assert_reset(&self) {
@@ -926,7 +958,7 @@ mod tests {
                 b"retained plain content"
             );
             assert_ne!(
-                db.secrets.read().unwrap().metadata().vault_id,
+                db.secrets.read().unwrap().encrypted().unwrap().metadata().vault_id,
                 self.original_key.metadata().vault_id
             );
         }
@@ -999,7 +1031,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                reopened.read().unwrap().metadata(),
+                reopened.read().unwrap().encrypted().unwrap().metadata(),
                 fixture.original_key.metadata()
             );
         }
@@ -1259,3 +1291,19 @@ pub(crate) use device_tests::verify_review_cases as verify_device_reset_review;
 
 #[cfg(feature = "test-hooks")]
 pub(crate) use device_tests::verify_pending_stage as verify_device_reset_staging;
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "reset_legacy_fence_tests.rs"]
+mod legacy_fence_tests;
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_legacy_reset_fence_case(case: &str) {
+    legacy_fence_tests::verify(case);
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "reset_cleanup_fence_tests.rs"]
+mod cleanup_fence_tests;
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_legacy_reset_cleanup_case(case: &str) {
+    cleanup_fence_tests::verify(case);
+}

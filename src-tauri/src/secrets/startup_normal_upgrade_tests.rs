@@ -15,7 +15,7 @@ fn source17_with_password(store: &MemoryKeyStore, password: Option<&str>) -> Arc
     Database::create_tables_on_conn(&conn).unwrap();
     Database::apply_upgrade_source_migrations_on_conn(&conn).unwrap();
     database::loongport_schema::apply(&conn).unwrap();
-    database::vault::stamp(&conn, &session.read().unwrap()).unwrap();
+    database::vault::stamp(&conn, session.read().unwrap().encrypted().unwrap()).unwrap();
     session.complete_migration().unwrap();
     let db = Database::from_connection(conn, session.clone());
     db.save_provider("claude", &crate::Provider::with_id(
@@ -189,8 +189,8 @@ pub(super) fn failed_database_publication_keeps_recovery_and_restarts() {
     let original_stage =
         rusqlite::Connection::open_with_flags(&stage, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
-    database::vault::check_identity(&original_stage, &session.read().unwrap()).unwrap();
-    crate::secrets::inventory::validate_database(&original_stage, &session.read().unwrap())
+    database::vault::check_identity(&original_stage, session.read().unwrap().encrypted().unwrap()).unwrap();
+    crate::secrets::inventory::validate_database(&original_stage, session.read().unwrap().encrypted().unwrap())
         .unwrap();
     drop(original_stage);
     let valid_stage = std::fs::read(&stage).unwrap();

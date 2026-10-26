@@ -4,19 +4,21 @@ use super::core::{CredentialDocument, OAuthFamily, TransactionPhase};
 use super::native::tests::{native_document, replace, TEST_SECRET};
 use super::native::NativeCipher;
 use super::recovery::{DispositionKind, JournalEvidence, RecoveryConfirmation, RecoveryLedger};
-use crate::secrets::{owned_file::RECOVERY_FILE, VaultContext};
+use crate::secrets::owned_file::RECOVERY_FILE;
+use crate::secrets::storage::StorageContext;
+use crate::secrets::VaultContext;
 use std::path::Path;
 
 fn read_document(path: &Path) -> CredentialDocument {
     CredentialDocument::parse(&std::fs::read(path).unwrap()).unwrap()
 }
 
-fn reopen_vault(vault: VaultContext) -> VaultContext {
+fn reopen_vault(vault: StorageContext) -> StorageContext {
     // Synthetic test custody only: the key remains in memory, never in a keychain/file.
-    let metadata = vault.metadata().clone();
-    let key = vault.export_key();
+    let metadata = vault.encrypted().unwrap().metadata().clone();
+    let key = vault.encrypted().unwrap().export_key();
     drop(vault);
-    VaultContext::from_key(metadata, key).unwrap()
+    StorageContext::Encrypted(VaultContext::from_key(metadata, key).unwrap())
 }
 
 fn merge_synthetic_refresh(
@@ -37,7 +39,7 @@ fn encrypted_roundtrip_a_b_a_reopens_and_retains_both_latest_refreshes() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         let native = NativeCipher::new(root.to_str().unwrap(), TEST_SECRET).unwrap();
-        let mut vault = VaultContext::generate().unwrap();
+        let mut vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
         let path = root.join("synthetic-credentials.json");
         let a0 = native_document(family, "a", "initial");
         let a_prime = native_document(family, "a", "refreshed-a");
@@ -174,7 +176,7 @@ fn encrypted_roundtrip_archive_preserves_old_catalog_and_both_native_publish_out
                 let directory = tempfile::tempdir().unwrap();
                 let root = directory.path();
                 let native = NativeCipher::new(root.to_str().unwrap(), TEST_SECRET).unwrap();
-                let vault = VaultContext::generate().unwrap();
+                let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
                 let path = root.join("synthetic-credentials.json");
                 let mut source = native_document(OAuthFamily::Zai, "a", "refreshed");
                 let target = native
@@ -280,7 +282,7 @@ fn encrypted_roundtrip_all_archived_phases_leave_mixed_refreshed_and_third_accou
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     let native = NativeCipher::new(root.to_str().unwrap(), TEST_SECRET).unwrap();
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let source = native_document(OAuthFamily::Zai, "a", "fresh");
     let target_doc = native_document(OAuthFamily::Zai, "b", "initial");
     let target = native.inspect(&target_doc).unwrap();
@@ -351,7 +353,7 @@ fn encrypted_roundtrip_bad_envelope_and_wrong_bound_root_leave_files_unchanged()
     let other = tempfile::tempdir().unwrap();
     let root = directory.path();
     let native = NativeCipher::new(root.to_str().unwrap(), TEST_SECRET).unwrap();
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let source = native_document(OAuthFamily::BigModel, "a", "fresh");
     let target = native
         .inspect(&native_document(OAuthFamily::BigModel, "b", "fresh"))

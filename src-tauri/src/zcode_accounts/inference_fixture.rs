@@ -14,9 +14,7 @@ use std::{
 struct Seal {
     root: PathBuf,
     context: LibraryContext,
-    vault_id: String,
-    key_id: String,
-    vault_revision: u64,
+    storage: crate::secrets::storage::StorageIdentity,
     epoch: u64,
     accounts: Vec<(String, [u8; 32], String)>,
     _home: tempfile::TempDir,
@@ -118,13 +116,10 @@ impl FixtureTransport {
             .map_err(|_| Failure::StorageUnavailable)?;
         crate::config_file_io::write_durable(&root.join(PROFILE_FILE), sealed.as_bytes())
             .map_err(|_| Failure::StorageUnavailable)?;
-        let meta = vault.metadata();
         Ok(FixtureOwner(Arc::new(Seal {
             root,
             context,
-            vault_id: meta.vault_id.clone(),
-            key_id: meta.key_id.clone(),
-            vault_revision: meta.revision,
+            storage: vault.identity(),
             epoch: session.lifecycle_epoch(),
             accounts,
             _home: home,
@@ -182,11 +177,7 @@ impl FixtureTransport {
             return Err(Failure::StaleIdentity);
         }
         let vault = session.read().map_err(|_| Failure::StaleIdentity)?;
-        let meta = vault.metadata();
-        if meta.vault_id != self.seal.vault_id
-            || meta.key_id != self.seal.key_id
-            || meta.revision != self.seal.vault_revision
-        {
+        if vault.identity() != self.seal.storage {
             return Err(Failure::StaleIdentity);
         }
         Ok(())

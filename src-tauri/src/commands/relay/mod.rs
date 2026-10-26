@@ -105,7 +105,10 @@ fn managed_meta(
 
 fn with_conn<T>(
     state: &AppState,
-    f: impl FnOnce(&rusqlite::Connection, &crate::secrets::VaultContext) -> Result<T, AppError>,
+    f: impl FnOnce(
+        &rusqlite::Connection,
+        &crate::secrets::storage::StorageContext,
+    ) -> Result<T, AppError>,
 ) -> Result<T, AppError> {
     let vault = state.db.secrets.read()?;
     let conn = state

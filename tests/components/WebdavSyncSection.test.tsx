@@ -224,7 +224,9 @@ describe("WebdavSyncSection", () => {
           }),
         ),
       );
-      expect(toastErrorMock.mock.lastCall?.[1].description).toContain(
+      // The retired manual-protection settings page is no longer a destination.
+      // Keep the real pause explanation without sending users to that old route.
+      expect(toastErrorMock.mock.lastCall?.[1].description).not.toContain(
         "startupUpgrade.syncReviewHint",
       );
       expect(operation).toHaveBeenCalledTimes(1);

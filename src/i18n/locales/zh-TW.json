@@ -95,6 +95,7 @@
     "windowClose": "關閉視窗"
   },
   "provider": {
+    "readFailed": "設定列表讀取失敗，既有資料未被清空；如有顯示，為上次成功讀取的結果。",
     "connectivityCheck": "檢測連通",
     "tabProvider": "供應商",
     "tabUniversal": "通用供應商",
@@ -206,7 +207,7 @@
       "invalidFormat": "設定格式不正確，請返回編輯。",
       "readOnly": "相關檔案為唯讀，目前無法儲存。",
       "sourceChanged": "設定或檔案已變更，請重新產生預覽。",
-      "vaultLocked": "憑據儲存已鎖定，請先解鎖。",
+      "vaultLocked": "已儲存的憑據資料目前無法讀取；既有資料保留，此操作暫不可用。",
       "pendingOperation": "有待核對的原操作，請先重新檢查原操作。",
       "ownerUnavailable": "現有設定或驗證資訊的歸屬無法證實本次寫入，請返回檢查。",
       "credentialConflict": "無法同時刪除與替換金鑰，請先清空金鑰輸入欄。",
@@ -4267,7 +4268,7 @@
       "invalidFormat": "端點不支援此設定格式或所選思考方式。",
       "readOnly": "目前無法編輯此設定。",
       "sourceChanged": "設定已變更，請重新開啟後核對。",
-      "vaultLocked": "請先解鎖憑證庫。",
+      "vaultLocked": "已儲存的憑據資料目前無法讀取；既有資料保留，此操作暫不可用。",
       "pendingOperation": "仍有未完成的設定操作。",
       "ownerUnavailable": "設定管理器暫時無法使用。",
       "credentialConflict": "現有憑證有衝突，請至進階設定核對。",
@@ -4302,6 +4303,7 @@
     }
   },
   "secrets": {
+    "runtimeUnavailable": "已儲存的憑據資料目前無法讀取。既有資料保留，依賴這些資料的操作暫不可用。",
     "recoveryTitle": "繼續復原",
     "recoveryDescription": "資料保護操作尚未完成。請輸入復原密碼以繼續。",
     "resumeRecovery": "繼續復原",
@@ -4742,7 +4744,7 @@
         "writer_state_unknown": "無法驗證 ZCode 處理程序狀態。請確認 ZCode 和其他寫入處理程序已停止。",
         "context_changed": "所選來源已變化。請重新檢查並查看最新帳號狀態。",
         "target_scope_mismatch": "請選擇與已檢查來源屬於同一帳號體系的個人帳號。",
-        "vault_unavailable": "請解鎖 LoongPort 本機保險庫，然後重新整理帳號狀態。",
+        "vault_unavailable": "已儲存的憑據資料目前無法讀取；既有資料保留，此操作暫不可用。",
         "operation_failed": "無法驗證帳號操作。請重新檢查所選來源並重新整理狀態。",
         "committed_recovery_required": "帳號切換已經提交，但復原仍需處理。繼續前請檢查本機復原。",
         "pending_or_locked": "請正常結束 ZCode，然後檢查並保留待處理的本機復原。",
@@ -5022,7 +5024,7 @@
       "invalidFormat": "TOML 格式無效，請修改後重新預覽。",
       "sourceChanged": "來源檔案已變更，請重新讀取或重新預覽。",
       "ownerUnavailable": "目前設定無法使用，暫時無法儲存共用設定。",
-      "vaultLocked": "憑據庫已鎖定，請解鎖後重新讀取。",
+      "vaultLocked": "已儲存的憑據資料目前無法讀取；既有資料保留，此操作暫不可用。",
       "pendingOperation": "已有操作待確認，請先查詢原儲存結果。",
       "legacyDisabled": "舊共用片段已停用，無法匯入。"
     },
@@ -5237,5 +5239,57 @@
     "inferenceUnverified": "實際推理消費尚未驗收。領取成功、授權就緒或模型探索均不等於已完成實際推理消費。",
     "authorizationSaved": "帳號授權已儲存；不代表推理消費已驗收",
     "reauthorize": "需要重新授權"
+  },
+  "storageProtection": {
+    "title": "儲存保護方式",
+    "manage": "管理儲存保護",
+    "description": "自行選擇使用您提供的金鑰加密，或將 LoongPort 資料儲存為明文。應用程式不會自動產生金鑰。",
+    "mode": {
+      "unconfigured": "尚未選擇儲存保護方式",
+      "encrypted": "目前方式：使用者金鑰加密",
+      "plaintext": "目前方式：明文儲存"
+    },
+    "status": {
+      "needs_configuration": "請選擇儲存方式。",
+      "available": "目前設定可用。",
+      "key_required": "暫時無法從系統金鑰儲存區取得原金鑰，原有加密檔案保持不變。",
+      "blocked": "目前無法確認設定可安全使用。原始檔案保持不變，請先排除設定問題。"
+    },
+    "chooseEncrypted": "使用我自己的金鑰",
+    "choosePlaintext": "使用明文儲存",
+    "skipPlaintext": "略過金鑰，使用明文",
+    "applyEncrypted": "儲存並啟用金鑰保護",
+    "applyPlaintext": "確認使用明文儲存",
+    "unlock": "使用原金鑰解鎖",
+    "keyLabel": "設定金鑰",
+    "confirmKeyLabel": "再次輸入金鑰",
+    "keyFormat": "依原文使用您輸入的內容，不限制字元種類或數量。空格、大小寫和字元原樣保留，再次輸入必須完全一致。",
+    "keepKeyCopy": "請在安全位置另行保管您輸入的金鑰原文。系統金鑰儲存區保留同一份原文；系統儲存區遺失後仍需輸入相同內容。",
+    "localOnlyNotice": "金鑰僅儲存於本機，LoongPort 不會自動同步到其他裝置。沒有同一把金鑰的其他裝置無法解密這些資料；這不表示本機所有程式都無法讀取資料。",
+    "sameKeyRequired": "請輸入最初用來加密這些資料的同一把金鑰。新金鑰無法解鎖舊檔案；成功解鎖後才能變更保護方式。",
+    "plaintextRisk": "明文不加密：能讀取本機 LoongPort 資料檔案的人或程式，可直接取得其中的 API 金鑰、權杖等憑證。",
+    "plaintextConversion": "這會將目前可解密的資料轉為明文。只有原資料可完整解密並通過驗證後才會執行。",
+    "acknowledgePlaintext": "我了解本機檔案會直接暴露憑證，並選擇使用明文。",
+    "createSeparate": "保留原始檔案，建立獨立新設定",
+    "originalsPreserved": "將在另一個位置建立新設定，保留原始檔案。新設定不會解鎖或復原原有加密資料，切換設定需要重新啟動。",
+    "cancelSeparate": "返回原設定",
+    "actionFailed": "操作未完成。原金鑰可能不符，或設定暫不可用。請檢查後重試；不會自動改成明文。",
+    "statusFailed": "無法讀取儲存保護狀態，暫不允許修改。",
+    "saved": "儲存保護操作已完成。",
+    "restartRequired": "選擇已儲存，請重新啟動 LoongPort 後使用新設定。目前工作階段的可用狀態並未因此改變。",
+    "keyCacheUnavailable": "本次工作階段已可用，但同一把金鑰未能儲存或驗證於系統儲存區。請保留金鑰，下次啟動可能需要重新輸入。",
+    "backupIndependent": "備份檔案的加密密碼與此金鑰獨立，原有備份密碼設定不會變更。",
+    "promptTitle": "設定您的儲存金鑰",
+    "promptDescription": "您可以自行提供金鑰並重複輸入確認，也可以明確略過並使用明文。關閉此視窗不會變更目前保護方式，之後仍可在設定中選擇。",
+    "forgotKey": "忘記金鑰？查看本機復原方法",
+    "recovery": {
+      "mac": "開啟「鑰匙圈存取」，選擇「登入」鑰匙圈，搜尋 LoongPort credential vault，核對目前設定對應的項目。開啟項目，勾選「顯示密碼」，依系統提示驗證身分。請勿修改或刪除項目。",
+      "windows": "開啟「認證管理員 → Windows 認證 → 一般認證」，尋找包含 LoongPort credential vault 的項目並核對目前設定。此處可確認項目是否仍在，但不是本應用程式原始金鑰的「顯示密碼」入口。請勿修改或刪除項目。",
+      "linux": "金鑰儲存於目前登入工作階段的 Secret Service。若使用 GNOME Keyring 且已安裝「密碼與金鑰」（Passwords and Keys），請開啟並解鎖對應鑰匙圈，搜尋 LoongPort credential vault，在項目內容中查看。其他桌面沒有統一介面。請勿修改或刪除項目。",
+      "unknown": "無法確認目前作業系統。請尋找自行保管的原金鑰，或在系統金鑰儲存工具中核對 LoongPort credential vault 項目。請勿修改或刪除項目。",
+      "binaryNotice": "系統工具能否顯示金鑰原文，取決於目前平台與項目格式；舊版二進位項目或帶有版本標記的儲存記錄不一定能直接作為金鑰重新輸入。此說明不會讀取、顯示或匯出系統金鑰。請保留原先輸入的內容；無法取得原金鑰時保留原檔案，新金鑰無法代替原金鑰解密。"
+    },
+    "keyPlaceholder": "輸入您的金鑰原文",
+    "confirmKeyPlaceholder": "再次輸入完全相同的內容"
   }
 }

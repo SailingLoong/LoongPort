@@ -21,7 +21,7 @@ impl Fixture {
         // Frozen deployed v24 shape, not a current database with an old stamp.
         conn.execute_batch(include_str!("test_fixtures/authenticated_v24.sql"))
             .unwrap();
-        database::vault::stamp(&conn, &vault).unwrap();
+        database::vault::stamp(&conn, vault.encrypted().unwrap()).unwrap();
         conn.execute(
             "INSERT INTO settings(key,value) VALUES ('synthetic-upgrade','checkpoint-canary')",
             [],
@@ -32,7 +32,7 @@ impl Fixture {
             _temporary: temporary,
             root,
             device,
-            vault,
+            vault: vault.encrypted().unwrap().clone(),
         }
     }
 }

@@ -1,7 +1,7 @@
 //! One encrypted document, using the original SecretSession/OwnedFile lifecycle.
-use crate::secrets::{session::SecretSession, VaultMetadata};
+use crate::secrets::{session::SecretSession, storage::StorageIdentity};
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 use std::sync::Arc;
 use std::{
     sync::{Mutex, OnceLock},
@@ -137,7 +137,7 @@ impl Default for Document {
 }
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct Binding {
-    pub vault: VaultMetadata,
+    pub vault: StorageIdentity,
     pub epoch: u64,
     pub runtime: u64,
 }
@@ -226,7 +226,7 @@ pub(super) async fn access<R>(
         return Err(Failure::Retired);
     }
     let binding = Binding {
-        vault: vault.metadata().clone(),
+        vault: vault.identity(),
         epoch: session.lifecycle_epoch(),
         runtime: r.epoch,
     };
@@ -236,10 +236,12 @@ pub(super) async fn access<R>(
     let before = io::read_regular_file(&path, 4 * 1024 * 1024).map_err(|_| Failure::Storage)?;
     let mut doc = match &before {
         None => Document::default(),
-        Some(raw) => {
-            serde_json::from_slice(&file.decode(&vault, raw).map_err(|_| Failure::Storage)?)
-                .map_err(|_| Failure::Storage)?
-        }
+        Some(raw) => serde_json::from_slice(
+            &file
+                .decode_storage(&vault, raw)
+                .map_err(|_| Failure::Storage)?,
+        )
+        .map_err(|_| Failure::Storage)?,
     };
     validate(&doc)?;
     let (out, dirty) = f(&mut doc, &binding)?;
@@ -248,7 +250,9 @@ pub(super) async fn access<R>(
         doc.revision = doc.revision.checked_add(1).ok_or(Failure::Storage)?;
         let plain =
             zeroize::Zeroizing::new(serde_json::to_vec(&doc).map_err(|_| Failure::Storage)?);
-        let sealed = file.encode(&vault, &plain).map_err(|_| Failure::Storage)?;
+        let sealed = file
+            .encode_storage(&vault, &plain)
+            .map_err(|_| Failure::Storage)?;
         if sealed.len() > 4 * 1024 * 1024
             || io::read_regular_file(&path, 4 * 1024 * 1024).map_err(|_| Failure::Storage)?
                 != before
@@ -275,7 +279,7 @@ pub(super) async fn access<R>(
         let after = super::tests::readback(&path, after);
         if after != sealed
             || file
-                .decode(&vault, &after)
+                .decode_storage(&vault, &after)
                 .map_err(|_| Failure::PublicationUnknown)?
                 .as_slice()
                 != plain.as_slice()
@@ -423,7 +427,7 @@ pub(crate) async fn lookup(
         .into_iter()
         .find(|a| a.id == id && a.realm == realm))
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub(super) async fn fixture_guard() -> tokio::sync::OwnedMutexGuard<()> {
     static S: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
     let g = S
@@ -435,4 +439,66 @@ pub(super) async fn fixture_guard() -> tokio::sync::OwnedMutexGuard<()> {
     r.epoch += 1;
     r.stopped = false;
     g
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) mod plaintext_tests {
+    use super::*;
+    use crate::secrets::storage::{PlaintextIdentity, StorageContext};
+
+    #[cfg(test)]
+    #[tokio::test]
+    async fn plaintext_owner_keeps_original_cas_and_epoch_admission() {
+        plaintext_owner_keeps_original_cas_and_epoch_admission_body().await;
+    }
+
+    async fn plaintext_owner_keeps_original_cas_and_epoch_admission_body() {
+        let _serial = fixture_guard().await;
+        let root = tempfile::tempdir().unwrap();
+        let session = SecretSession::from_storage_context(
+            root.path().into(),
+            StorageContext::Plaintext(PlaintextIdentity {
+                format_version: 1,
+                store_id: "11111111-1111-4111-8111-111111111111".into(),
+                generation_id: "22222222-2222-4222-8222-222222222222".into(),
+                revision: 1,
+            }),
+        );
+        let binding = access(&session, None, |document, binding| {
+            document.accounts.push(super::super::test_fixtures::account(
+                "synthetic-plaintext",
+                Realm::Cn,
+            ));
+            Ok((binding.clone(), true))
+        })
+        .await
+        .unwrap();
+        let path = root.path().join(crate::secrets::owned_file::TRAE_FILE);
+        let bytes = std::fs::read(&path).unwrap();
+        let document: Document = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            document.accounts[0].grant.as_ref().unwrap().access,
+            "synthetic-access"
+        );
+        assert!(!root.path().join("vault.json").exists());
+        let mut changed = binding.clone();
+        let StorageIdentity::Plaintext(identity) = &mut changed.vault else {
+            panic!("fixture must use actual plaintext identity");
+        };
+        identity.generation_id = "33333333-3333-4333-8333-333333333333".into();
+        assert!(access(&session, Some(&changed), |_, _| Ok(((), true)))
+            .await
+            .is_err());
+        session.set_blocked(true);
+        session.set_blocked(false);
+        assert!(access(&session, Some(&binding), |_, _| Ok(((), true)))
+            .await
+            .is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub(crate) async fn run() {
+        plaintext_owner_keeps_original_cas_and_epoch_admission_body().await;
+    }
 }

@@ -5,7 +5,7 @@
 use super::{lock_conn, Database};
 use crate::config::get_app_config_dir;
 use crate::error::AppError;
-use crate::secrets::{VaultContext, VaultMetadata};
+use crate::secrets::{storage::StorageContext, VaultContext, VaultMetadata};
 use chrono::{Local, Utc};
 use rusqlite::backup::{Backup, StepResult};
 use rusqlite::types::ValueRef;
@@ -235,20 +235,24 @@ impl Database {
         skip_tables: &[&str],
         password_error: &str,
     ) -> Result<(String, VaultMetadata), AppError> {
-        let vault = self.secrets.read()?;
+        let context = self.secrets.read()?;
+        let vault = context.encrypted()?;
         let snapshot = self.snapshot_to_memory()?;
-        super::vault::check_identity(&snapshot, &vault)?;
-        crate::secrets::inventory::validate_database(&snapshot, &vault)?;
+        super::vault::check_identity(&snapshot, vault)?;
+        crate::secrets::inventory::validate_database(&snapshot, vault)?;
         let metadata = super::vault::stored_metadata(&snapshot)?
             .ok_or_else(|| AppError::Config("sync.vault_metadata_required".into()))?;
-        if metadata.wrapped_key.is_none() {
+        if !metadata
+            .recovery_input_available()
+            .map_err(crate::secrets::inventory::secret_error)?
+        {
             return Err(AppError::Config(password_error.into()));
         }
         Ok((Self::dump_sql(&snapshot, skip_tables)?, metadata))
     }
 
-    /// Explicit file restore authenticates the source password, then keeps this
-    /// device's active generation instead of adopting an older backup key.
+    /// Explicit file restore authenticates the source's declared recovery input,
+    /// then keeps this device's generation instead of adopting an older key.
     pub(crate) fn prepare_backup_content(
         &self,
         sql: &str,
@@ -275,7 +279,7 @@ impl Database {
             let password = password
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| AppError::Config("backup.password_required".into()))?;
-            let source = VaultContext::from_password(metadata, password)
+            let source = VaultContext::from_recovery_input(metadata, password)
                 .map_err(crate::secrets::inventory::secret_error)?;
             super::vault::upgrade_staging_for_target(&connection, &source, target)?;
             crate::secrets::inventory::transform_database(&connection, Some(&source), current)?;
@@ -340,7 +344,7 @@ impl Database {
     ) -> Result<ValidatedSyncSnapshot, AppError> {
         let current = self.secrets.read()?;
         let conn = self.conn.lock()?;
-        super::vault::check_identity(&conn, &current)?;
+        super::vault::check_identity(&conn, current.encrypted()?)?;
         let version = Self::get_user_version(&conn)?;
         let loongport = super::loongport_schema::read_stored_version(&conn)?;
         if version <= super::UPSTREAM4_SOURCE_SCHEMA_VERSION {
@@ -438,7 +442,12 @@ impl Database {
             current_conn,
             &incoming.connection,
         )?;
-        Self::preserve_qoder_states_on_restore(current_conn, &incoming.connection, current, next)?;
+        Self::preserve_qoder_states_on_restore(
+            current_conn,
+            &incoming.connection,
+            &StorageContext::from(current.clone()),
+            &StorageContext::from(next.clone()),
+        )?;
         crate::secrets::inventory::validate_database(&incoming.connection, next)?;
         Ok(incoming.connection)
     }
@@ -452,12 +461,28 @@ impl Database {
         if &staged.destination != vault.metadata() {
             return Err(AppError::Config("sync.vault_metadata_conflict".into()));
         }
-        self.replace_from_staging(staged.connection, SYNC_PRESERVE_TABLES, vault)
+        self.replace_from_staging(
+            staged.connection,
+            SYNC_PRESERVE_TABLES,
+            &StorageContext::from(vault.clone()),
+        )
     }
 
     /// 导出为 SQLite 兼容的 SQL 文本
     pub fn export_sql(&self, target_path: &Path) -> Result<(), AppError> {
-        let (dump, _) = self.export_portable_snapshot(&[], "backup.recovery_password_required")?;
+        let context = self.secrets.read()?;
+        let dump = if context.is_plaintext() {
+            let snapshot = self.snapshot_to_memory()?;
+            super::storage::check_identity(&snapshot, &context)?;
+            crate::secrets::inventory::validate_storage_database(&snapshot, &context)?;
+            Self::dump_sql(&snapshot, &[])?
+        } else {
+            // The existing encrypted export owner acquires its own guard. Do
+            // not recursively acquire a read lock behind a waiting transition.
+            drop(context);
+            self.export_portable_snapshot(&[], "backup.recovery_password_required")?
+                .0
+        };
 
         if let Some(parent) = target_path.parent() {
             fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
@@ -513,7 +538,7 @@ impl Database {
     {
         let vault = self.secrets.read()?;
         let staged = Self::stage_import_sql(sql_raw, false)?;
-        super::vault::upgrade_staging(&staged, &vault)?;
+        super::storage::upgrade_staging(&staged, &vault)?;
         self.replace_prepared_staging(staged, preserve_tables, &vault, prepare)
     }
 
@@ -549,7 +574,7 @@ impl Database {
     {
         let vault = self.secrets.read()?;
         let temp_conn = Self::stage_import_sql(sql_raw, strict_schema)?;
-        super::vault::upgrade_staging(&temp_conn, &vault)?;
+        super::storage::upgrade_staging(&temp_conn, &vault)?;
         on_staging_ready()?;
         self.replace_from_staging(temp_conn, preserve_tables, &vault)
     }
@@ -613,7 +638,7 @@ impl Database {
         &self,
         temp_conn: Connection,
         preserve_tables: &[&str],
-        vault: &VaultContext,
+        vault: &StorageContext,
     ) -> Result<String, AppError> {
         self.replace_prepared_staging(temp_conn, preserve_tables, vault, |_| Ok(()))
     }
@@ -624,7 +649,7 @@ impl Database {
         &self,
         temp_conn: Connection,
         preserve_tables: &[&str],
-        vault: &VaultContext,
+        vault: &StorageContext,
         prepare: F,
     ) -> Result<String, AppError>
     where
@@ -633,7 +658,7 @@ impl Database {
         // DAOs may acquire their own vault read guard. Give the unpublished
         // staging database a snapshot of the already pinned generation so a
         // waiting key rotation cannot deadlock a recursive read of the live lock.
-        let staged_secrets = crate::secrets::session::SecretSession::from_context(
+        let staged_secrets = crate::secrets::session::SecretSession::from_storage_context(
             self.secrets.root().to_path_buf(),
             vault.clone(),
         );
@@ -644,7 +669,7 @@ impl Database {
         // device-local rows can miss writes that arrived during staging.
         let backup_path = {
             let mut main_conn = lock_conn!(self.conn);
-            super::vault::check_identity(&main_conn, vault)?;
+            super::storage::check_identity(&main_conn, vault)?;
             if !preserve_tables.is_empty() {
                 let staged_conn = lock_conn!(staged.conn);
                 Self::restore_tables(&main_conn, &staged_conn, preserve_tables)?;
@@ -673,7 +698,7 @@ impl Database {
                 return Err(AppError::Config("qoder.local_operations_changed".into()));
             }
             Self::preserve_qoder_states_on_restore(&main_conn, &temp_conn, vault, vault)?;
-            crate::secrets::inventory::validate_database(&temp_conn, vault)?;
+            crate::secrets::inventory::validate_storage_database(&temp_conn, vault)?;
             let backup_path = Self::backup_database_file_from_conn(
                 &backup_file_guard,
                 &main_conn,
@@ -949,7 +974,7 @@ impl Database {
             &backup_file_guard,
             source,
             self.secrets.root(),
-            vault,
+            &StorageContext::from(vault.clone()),
             &[],
             Some(checkpoint_id),
             |_, _| Ok(()),
@@ -988,7 +1013,7 @@ impl Database {
             &backup_file_guard,
             &current,
             self.secrets.root(),
-            vault,
+            &StorageContext::from(vault.clone()),
             &[],
         )?;
         crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(device)?;
@@ -1046,7 +1071,7 @@ impl Database {
     fn backup_database_file_locked(
         &self,
         backup_file_guard: &BackupFileOperationGuard,
-        vault: &VaultContext,
+        vault: &StorageContext,
     ) -> Result<Option<PathBuf>, AppError> {
         let conn = lock_conn!(self.conn);
         Self::backup_database_file_from_conn(
@@ -1064,7 +1089,7 @@ impl Database {
         backup_file_guard: &BackupFileOperationGuard,
         source_conn: &Connection,
         root: &Path,
-        vault: &VaultContext,
+        vault: &StorageContext,
         protected_paths: &[&Path],
     ) -> Result<Option<PathBuf>, AppError> {
         Self::backup_database_file_from_conn_with_hook(
@@ -1081,7 +1106,7 @@ impl Database {
         backup_file_guard: &BackupFileOperationGuard,
         source_conn: &Connection,
         root: &Path,
-        vault: &VaultContext,
+        vault: &StorageContext,
         protected_paths: &[&Path],
         before_publish: F,
     ) -> Result<Option<PathBuf>, AppError>
@@ -1103,7 +1128,7 @@ impl Database {
         _backup_file_guard: &BackupFileOperationGuard,
         source_conn: &Connection,
         root: &Path,
-        vault: &VaultContext,
+        vault: &StorageContext,
         protected_paths: &[&Path],
         upgrade_id: Option<&str>,
         before_publish: F,
@@ -1111,6 +1136,9 @@ impl Database {
     where
         F: FnOnce(&Path, &Path) -> Result<(), AppError>,
     {
+        if upgrade_id.is_some() {
+            vault.encrypted()?;
+        }
         let db_path = root.join(crate::config::DB_FILE_NAME);
         if !db_path.exists() {
             return Ok(None);
@@ -1123,8 +1151,8 @@ impl Database {
             let backup = Backup::new(source_conn, &mut snapshot)?;
             Self::complete_backup(&backup, "创建安全备份内存快照")?;
         }
-        super::vault::check_identity(&snapshot, vault)?;
-        crate::secrets::inventory::validate_database(&snapshot, vault)?;
+        super::storage::check_identity(&snapshot, vault)?;
+        crate::secrets::inventory::validate_storage_database(&snapshot, vault)?;
 
         let backup_dir = db_path
             .parent()
@@ -1137,7 +1165,7 @@ impl Database {
             let path = backup_dir.join(format!("upgrade_{id}.db"));
             match fs::symlink_metadata(&path) {
                 Ok(_) => {
-                    Self::finish_upgrade_archive(&path, &snapshot, vault)?;
+                    Self::finish_upgrade_archive(&path, &snapshot, vault.encrypted()?)?;
                     return Ok(Some(path));
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -1181,7 +1209,7 @@ impl Database {
                 Ok(()) => break,
                 Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
                     if upgrade_id.is_some() {
-                        Self::finish_upgrade_archive(&backup_path, &snapshot, vault)?;
+                        Self::finish_upgrade_archive(&backup_path, &snapshot, vault.encrypted()?)?;
                         return Ok(Some(backup_path));
                     }
                     temp_path = error.path;
@@ -1194,7 +1222,7 @@ impl Database {
 
         crate::config::ensure_private_file(&backup_path)?;
         if upgrade_id.is_some() {
-            Self::finish_upgrade_archive(&backup_path, &snapshot, vault)?;
+            Self::finish_upgrade_archive(&backup_path, &snapshot, vault.encrypted()?)?;
             return Ok(Some(backup_path));
         }
 
@@ -1745,7 +1773,7 @@ impl Database {
         Self::validate_sqlite_integrity(&staging_conn)?;
         Self::validate_imported_schema(&staging_conn)?;
         Self::ensure_incremental_auto_vacuum_on_conn(&staging_conn)?;
-        super::vault::upgrade_staging(&staging_conn, &vault)?;
+        super::storage::upgrade_staging(&staging_conn, &vault)?;
         Self::ensure_model_pricing_seeded_on_conn(&staging_conn)?;
         Self::validate_sqlite_integrity(&staging_conn)?;
 
@@ -1991,17 +2019,17 @@ mod tests {
         let before = Database::content_digest(&*db.conn.lock()?)?;
         let vault = db.secret_session().read()?;
         assert!(db
-            .migrate_released_checkpoint_schema(&device, &vault)
+            .migrate_released_checkpoint_schema(&device, vault.encrypted().unwrap())
             .is_err());
         assert_eq!(Database::content_digest(&*db.conn.lock()?)?, before);
         std::fs::remove_file(checkpoint).unwrap();
-        db.migrate_released_checkpoint_schema(&device, &vault)?;
+        db.migrate_released_checkpoint_schema(&device, vault.encrypted().unwrap())?;
         assert_eq!(
             super::super::loongport_schema::read_stored_version(&*db.conn.lock()?)?,
             super::super::loongport_schema::LOONGPORT_SCHEMA_VERSION
         );
         crate::paperclip::bindings::read_rows(&*db.conn.lock()?)?;
-        db.migrate_released_checkpoint_schema(&device, &vault)?;
+        db.migrate_released_checkpoint_schema(&device, vault.encrypted().unwrap())?;
         Ok(())
     }
 
@@ -2057,7 +2085,7 @@ mod tests {
             let before = Database::content_digest(&*db.conn.lock()?)?;
             let vault = db.secret_session().read()?;
             assert!(db
-                .migrate_released_checkpoint_schema(&device, &vault)
+                .migrate_released_checkpoint_schema(&device, vault.encrypted().unwrap())
                 .is_err());
             assert_eq!(Database::content_digest(&*db.conn.lock()?)?, before);
             assert_eq!(
@@ -2073,7 +2101,7 @@ mod tests {
                 .execute_batch("CREATE TABLE qoder_campaign_operations_v27(value TEXT)")?;
             let before_failed_migration = Database::content_digest(&*db.conn.lock()?)?;
             assert!(db
-                .migrate_released_checkpoint_schema(&device, &vault)
+                .migrate_released_checkpoint_schema(&device, vault.encrypted().unwrap())
                 .is_err());
             assert_eq!(
                 Database::content_digest(&*db.conn.lock()?)?,
@@ -2090,7 +2118,7 @@ mod tests {
             db.conn
                 .lock()?
                 .execute_batch("DROP TABLE qoder_campaign_operations_v27")?;
-            db.migrate_released_checkpoint_schema(&device, &vault)?;
+            db.migrate_released_checkpoint_schema(&device, vault.encrypted().unwrap())?;
             assert_eq!(
                 super::super::loongport_schema::read_stored_version(&*db.conn.lock()?)?,
                 super::super::loongport_schema::LOONGPORT_SCHEMA_VERSION
@@ -2099,7 +2127,7 @@ mod tests {
                 crate::database::read_qoder_campaign_operation_rows(&*db.conn.lock()?)?,
                 rows
             );
-            db.migrate_released_checkpoint_schema(&device, &vault)?;
+            db.migrate_released_checkpoint_schema(&device, vault.encrypted().unwrap())?;
             assert_eq!(
                 crate::database::read_qoder_campaign_operation_rows(&*db.conn.lock()?)?,
                 rows
@@ -2183,7 +2211,10 @@ mod tests {
 
     fn same_vault_database(source: &Database) -> Result<Database, AppError> {
         let vault = source.secrets.read()?;
-        Ok(sync_test_database(&vault, source.secrets.root()))
+        Ok(sync_test_database(
+            vault.encrypted()?,
+            source.secrets.root(),
+        ))
     }
 
     // Existing SQL fixtures describe logical data. Seal them once before testing
@@ -2191,7 +2222,7 @@ mod tests {
     fn seal_fixture_rows(db: &Database) -> Result<(), AppError> {
         let vault = db.secrets.read()?;
         let conn = crate::database::lock_conn!(db.conn);
-        crate::secrets::inventory::transform_database(&conn, None, &vault)
+        crate::secrets::inventory::transform_database(&conn, None, vault.encrypted().unwrap())
     }
 
     #[test]
@@ -2327,14 +2358,17 @@ mod tests {
             .set_setting("local-sentinel", "keep-before-apply")
             .unwrap();
         let vault = destination.secrets.read().unwrap();
-        let staged = Database::validate_sync_snapshot(&sql, &metadata, &vault).unwrap();
+        let staged =
+            Database::validate_sync_snapshot(&sql, &metadata, vault.encrypted().unwrap()).unwrap();
         assert_eq!(
             super::super::vault::stored_metadata(&staged.connection)
                 .unwrap()
                 .as_ref(),
             Some(current.metadata())
         );
-        destination.apply_sync_snapshot(staged, &vault).unwrap();
+        destination
+            .apply_sync_snapshot(staged, vault.encrypted().unwrap())
+            .unwrap();
         drop(vault);
         assert_eq!(
             destination
@@ -2384,22 +2418,54 @@ mod tests {
             .unwrap()
             .with_password("foreign-source-password")
             .unwrap();
-        assert!(Database::validate_sync_snapshot(&sql, foreign.metadata(), &vault).is_err());
+        assert!(Database::validate_sync_snapshot(
+            &sql,
+            foreign.metadata(),
+            vault.encrypted().unwrap()
+        )
+        .is_err());
         let newer = current.with_password("newer-source-password").unwrap();
-        assert!(Database::validate_sync_snapshot(&sql, newer.metadata(), &vault).is_err());
+        assert!(Database::validate_sync_snapshot(
+            &sql,
+            newer.metadata(),
+            vault.encrypted().unwrap()
+        )
+        .is_err());
         let mut forged = metadata.clone();
         forged.revision -= 1;
-        assert!(Database::validate_sync_snapshot(&sql, &forged, &vault).is_err());
+        assert!(
+            Database::validate_sync_snapshot(&sql, &forged, vault.encrypted().unwrap()).is_err()
+        );
         let rotated = current.rotate_key().unwrap();
-        assert!(Database::validate_sync_snapshot(&sql, rotated.metadata(), &vault).is_err());
+        assert!(Database::validate_sync_snapshot(
+            &sql,
+            rotated.metadata(),
+            vault.encrypted().unwrap()
+        )
+        .is_err());
         let wrong_stamp = sql.replace(&metadata.key_id, &foreign.metadata().key_id);
-        assert!(Database::validate_sync_snapshot(&wrong_stamp, &metadata, &vault).is_err());
+        assert!(Database::validate_sync_snapshot(
+            &wrong_stamp,
+            &metadata,
+            vault.encrypted().unwrap()
+        )
+        .is_err());
         let plaintext = format!(
             "{sql}\nUPDATE settings SET value='legacy-plaintext' WHERE key='common_config_claude';"
         );
-        assert!(Database::validate_sync_snapshot(&plaintext, &metadata, &vault).is_err());
+        assert!(Database::validate_sync_snapshot(
+            &plaintext,
+            &metadata,
+            vault.encrypted().unwrap()
+        )
+        .is_err());
         let missing_stamp = format!("{sql}\nDELETE FROM loongport_vault;");
-        assert!(Database::validate_sync_snapshot(&missing_stamp, &metadata, &vault).is_err());
+        assert!(Database::validate_sync_snapshot(
+            &missing_stamp,
+            &metadata,
+            vault.encrypted().unwrap()
+        )
+        .is_err());
         assert_eq!(
             destination
                 .export_sql_string()
@@ -3691,8 +3757,12 @@ mod tests {
         let sql = Database::dump_sql(&source, &[])?;
         let before = Database::content_digest(&*db.conn.lock()?)?;
         assert!(
-            db.validate_sync_snapshot_for_current(&sql, vault.metadata(), &vault)
-                .is_err(),
+            db.validate_sync_snapshot_for_current(
+                &sql,
+                vault.encrypted()?.metadata(),
+                vault.encrypted().unwrap()
+            )
+            .is_err(),
             "an authenticated old snapshot cannot silently replace the schema20 shape"
         );
         assert_eq!(Database::content_digest(&*db.conn.lock()?)?, before);
@@ -3711,7 +3781,7 @@ mod tests {
         Database::create_tables_on_conn(&source)?;
         Database::apply_upgrade_source_migrations_on_conn(&source)?;
         super::super::loongport_schema::apply(&source)?;
-        super::super::vault::stamp(&source, &vault)?;
+        super::super::vault::stamp(&source, vault.encrypted().unwrap())?;
         let ciphertext = crate::secrets::inventory::seal_db(
             &vault,
             "settings",
@@ -3728,7 +3798,7 @@ mod tests {
             assert_eq!(Database::get_user_version(&conn)?, 20);
         }
         let id = uuid::Uuid::new_v4().to_string();
-        let path = db.archive_upgrade_database(&source, &id, &vault)?;
+        let path = db.archive_upgrade_database(&source, &id, vault.encrypted().unwrap())?;
         assert_eq!(
             path,
             db.secrets
@@ -3743,8 +3813,8 @@ mod tests {
             Database::content_digest(&archive)?,
             Database::content_digest(&source)?
         );
-        super::super::vault::check_identity(&archive, &vault)?;
-        crate::secrets::inventory::validate_database(&archive, &vault)?;
+        super::super::vault::check_identity(&archive, vault.encrypted().unwrap())?;
+        crate::secrets::inventory::validate_database(&archive, vault.encrypted().unwrap())?;
         drop(archive);
         let bytes = std::fs::read(&path).map_err(|e| AppError::io(&path, e))?;
         assert!(!bytes
@@ -3765,7 +3835,10 @@ mod tests {
         let modified = std::fs::metadata(&path)
             .and_then(|metadata| metadata.modified())
             .map_err(|e| AppError::io(&path, e))?;
-        assert_eq!(db.archive_upgrade_database(&source, &id, &vault)?, path);
+        assert_eq!(
+            db.archive_upgrade_database(&source, &id, vault.encrypted().unwrap())?,
+            path
+        );
         assert_eq!(
             std::fs::read(&path).map_err(|e| AppError::io(&path, e))?,
             bytes
@@ -3800,13 +3873,15 @@ mod tests {
         let source = db.snapshot_to_memory()?;
         let vault = db.secrets.read()?;
         let id = uuid::Uuid::new_v4().to_string();
-        let path = db.archive_upgrade_database(&source, &id, &vault)?;
+        let path = db.archive_upgrade_database(&source, &id, vault.encrypted().unwrap())?;
         let bytes = std::fs::read(&path).map_err(|e| AppError::io(&path, e))?;
         source.execute(
             "INSERT INTO settings(key,value) VALUES('synthetic-archive-marker','changed')",
             [],
         )?;
-        assert!(db.archive_upgrade_database(&source, &id, &vault).is_err());
+        assert!(db
+            .archive_upgrade_database(&source, &id, vault.encrypted().unwrap())
+            .is_err());
         assert_eq!(
             std::fs::read(&path).map_err(|e| AppError::io(&path, e))?,
             bytes
@@ -3835,7 +3910,7 @@ mod tests {
             "00000000000000000000000000000000",
         ] {
             assert!(db
-                .archive_upgrade_database(&source, invalid, &vault)
+                .archive_upgrade_database(&source, invalid, vault.encrypted().unwrap())
                 .is_err());
         }
         let plaintext = db.snapshot_to_memory()?;
@@ -3844,7 +3919,7 @@ mod tests {
             [],
         )?;
         assert!(db
-            .archive_upgrade_database(&plaintext, &id, &vault)
+            .archive_upgrade_database(&plaintext, &id, vault.encrypted().unwrap())
             .is_err());
         let foreign = VaultContext::generate().map_err(crate::secrets::inventory::secret_error)?;
         assert!(db.archive_upgrade_database(&source, &id, &foreign).is_err());
@@ -3852,7 +3927,9 @@ mod tests {
             let conn = crate::database::lock_conn!(db.conn);
             super::super::vault::stamp(&conn, &foreign)?;
         }
-        assert!(db.archive_upgrade_database(&source, &id, &vault).is_err());
+        assert!(db
+            .archive_upgrade_database(&source, &id, vault.encrypted().unwrap())
+            .is_err());
         assert!(!path.exists());
         Ok(())
     }
@@ -3866,7 +3943,11 @@ mod tests {
         let source = db.snapshot_to_memory()?;
         let archive = {
             let vault = db.secrets.read()?;
-            db.archive_upgrade_database(&source, &uuid::Uuid::new_v4().to_string(), &vault)?
+            db.archive_upgrade_database(
+                &source,
+                &uuid::Uuid::new_v4().to_string(),
+                vault.encrypted().unwrap(),
+            )?
         };
         let routine = db.backup_database_file()?.expect("file-backed backup");
         let decoy = db.secrets.root().join("backups/upgrade_not-a-uuid.db");
@@ -3900,7 +3981,11 @@ mod tests {
         let source = db.snapshot_to_memory()?;
         let archive = {
             let vault = db.secrets.read()?;
-            db.archive_upgrade_database(&source, &uuid::Uuid::new_v4().to_string(), &vault)?
+            db.archive_upgrade_database(
+                &source,
+                &uuid::Uuid::new_v4().to_string(),
+                vault.encrypted().unwrap(),
+            )?
         };
         let filename = archive.file_name().unwrap().to_str().unwrap();
         assert!(Database::rename_backup(filename, "renamed-upgrade").is_err());
@@ -4979,5 +5064,16 @@ impl Database {
     #[doc(hidden)]
     pub fn verify_versioned_sync_join() {
         sync_join_tests::verify();
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "backup_user_text_tests.rs"]
+mod user_text_portable_tests;
+#[cfg(feature = "test-hooks")]
+impl Database {
+    #[doc(hidden)]
+    pub fn verify_user_text_portable_case(case: &str) {
+        user_text_portable_tests::verify(case);
     }
 }

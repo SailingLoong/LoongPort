@@ -30,6 +30,21 @@ pub(crate) mod inspection;
 pub(crate) mod loongport_schema;
 mod migration;
 mod schema;
+pub(crate) mod storage;
+#[cfg(any(test, feature = "test-hooks"))]
+mod storage_backup_generation_tests;
+mod storage_generation;
+#[cfg(feature = "test-hooks")]
+pub(crate) use storage_backup_generation_tests::verify_storage_backup_generation_case;
+#[cfg(any(test, feature = "test-hooks"))]
+mod storage_generation_tests;
+mod storage_identity;
+#[cfg(feature = "test-hooks")]
+pub(crate) use storage_generation_tests::verify_storage_generation_case;
+#[cfg(any(test, feature = "test-hooks"))]
+mod storage_tests;
+#[cfg(feature = "test-hooks")]
+pub(crate) use storage_tests::verify_storage_case;
 pub(crate) mod vault;
 
 #[cfg(test)]
@@ -251,9 +266,11 @@ impl Database {
     ///
     /// 数据库文件位于 `~/.cc-switch/cc-switch.db`
     pub fn init() -> Result<Self, AppError> {
-        vault::preflight_runtime(&get_app_config_dir().join(crate::config::DB_FILE_NAME))?;
-        let secrets = crate::secrets::session::SecretSession::open(
+        storage::preflight_runtime(&get_app_config_dir().join(crate::config::DB_FILE_NAME))?;
+        let device = crate::live::engine::DeviceStore::for_device();
+        let secrets = crate::secrets::session::SecretSession::open_protected(
             &get_app_config_dir(),
+            device.root(),
             &crate::secrets::key_store::SystemKeyStore,
             None,
         )?;
@@ -266,7 +283,7 @@ impl Database {
         let db_path = secrets.root().join(crate::config::DB_FILE_NAME);
         let conn = {
             let context = secrets.read()?;
-            vault::prepare(&db_path, &context)?
+            storage::prepare(&db_path, &context)?
         };
 
         if let Err(e) = configure_wal_mode(&conn) {
@@ -353,7 +370,7 @@ impl Database {
             let context = db.secrets.read()?;
             let conn = lock_conn!(db.conn);
             loongport_schema::apply(&conn)?;
-            vault::stamp(&conn, &context)?;
+            storage::stamp(&conn, &context)?;
         }
         db.ensure_model_pricing_seeded()?;
 

@@ -81,7 +81,7 @@ fn setup() -> (std::sync::Arc<SecretSession>, String) {
         label: "Synthetic account".into(),
         token: "SYNTHETIC_TOKEN_CANARY".into(),
     };
-    let id = account.id(&b.vault_id);
+    let id = account.id(b.store_id());
     store::save(&s, &b, vec![SavedAccount::new(account)]).unwrap();
     (s, id)
 }
@@ -265,7 +265,7 @@ async fn pending_unknown_claim_survives_verification_and_reauthorization_without
     );
     let rows = store::load(&s, &b).unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].account.id(&b.vault_id), id);
+    assert_eq!(rows[0].account.id(b.store_id()), id);
     assert!(rows[0].account.token.is_empty());
     assert!(rows[0].shared_authorization);
     assert!(rows[0].inference.is_some());
@@ -658,7 +658,7 @@ fn account_isolation_fixture() -> (std::sync::Arc<SecretSession>, Vec<String>) {
     .collect();
     let ids = rows
         .iter()
-        .map(|r| r.account.id(&binding.vault_id))
+        .map(|r| r.account.id(binding.store_id()))
         .collect();
     store::save(&session, &binding, rows).unwrap();
     (session, ids)

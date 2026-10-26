@@ -1,6 +1,8 @@
 use super::super::core::OAuthFamily;
 use super::super::native::tests::{native_document, replace, TEST_CONTEXT, TEST_SECRET};
 use super::*;
+use crate::secrets::storage::StorageContext;
+use crate::secrets::VaultContext;
 
 fn native() -> NativeCipher {
     NativeCipher::new(TEST_CONTEXT, TEST_SECRET).unwrap()
@@ -161,7 +163,7 @@ async fn saved_coding_preserved_native_start_is_revoked_by_later_explicit_auth_r
 
 #[test]
 fn checkpoint_imported_profile_remains_unverified_until_fresh_local_capture() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let native = native();
     let imported = native
         .inspect(&native_document(OAuthFamily::Zai, "a", "imported"))
@@ -197,7 +199,7 @@ fn checkpoint_imported_profile_remains_unverified_until_fresh_local_capture() {
 
 #[test]
 fn checkpoint_catalog_v1_is_readable_but_v2_requires_complete_provenance() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let native = native();
     let mut catalog = ProfileCatalog::default();
     let snapshot = native
@@ -250,7 +252,7 @@ fn profile_catalog_iterates_borrowed_unique_fresh_snapshots_without_schema_chang
             .unwrap()
             .contains("_fresh_"));
     }
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let encoded = catalog.seal(&vault, &native).unwrap();
     let reopened = ProfileCatalog::open(&encoded, &vault, &native).unwrap();
     let ids = |catalog: &ProfileCatalog| {
@@ -265,7 +267,7 @@ fn profile_catalog_iterates_borrowed_unique_fresh_snapshots_without_schema_chang
 fn mutate_payload(
     encoded: &str,
     file: &str,
-    vault: &VaultContext,
+    vault: &StorageContext,
     edit: impl FnOnce(&mut serde_json::Value),
 ) -> String {
     let bytes = vault.open(&["file", file, "content"], encoded).unwrap();
@@ -281,7 +283,7 @@ fn mutate_payload(
 
 #[test]
 fn checkpoint_catalog_is_encrypted_scoped_and_updates_same_identity() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let native = native();
     let mut catalog = ProfileCatalog::default();
     let a = native
@@ -308,7 +310,7 @@ fn checkpoint_catalog_is_encrypted_scoped_and_updates_same_identity() {
 
 #[test]
 fn checkpoint_catalog_rejects_wrong_vault_native_key_context_and_file_identity() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let native = native();
     let mut catalog = ProfileCatalog::default();
     catalog.upsert(
@@ -317,7 +319,12 @@ fn checkpoint_catalog_rejects_wrong_vault_native_key_context_and_file_identity()
             .unwrap(),
     );
     let encoded = catalog.seal(&vault, &native).unwrap();
-    assert!(ProfileCatalog::open(&encoded, &VaultContext::generate().unwrap(), &native).is_err());
+    assert!(ProfileCatalog::open(
+        &encoded,
+        &StorageContext::Encrypted(VaultContext::generate().unwrap()),
+        &native
+    )
+    .is_err());
     assert!(matches!(
         ProfileCatalog::open(
             &encoded,
@@ -338,7 +345,7 @@ fn checkpoint_catalog_rejects_wrong_vault_native_key_context_and_file_identity()
 
 #[test]
 fn checkpoint_catalog_rejects_unknown_schema_duplicate_identity_and_extra_scope() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let native = native();
     let mut catalog = ProfileCatalog::default();
     catalog.upsert(
@@ -365,7 +372,7 @@ fn checkpoint_catalog_rejects_unknown_schema_duplicate_identity_and_extra_scope(
 
 #[test]
 fn checkpoint_reopens_exact_preimages_for_read_only_whole_image_confirmation() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let native = native();
     let mut current = native_document(OAuthFamily::Zai, "a", "fresh");
     let b = native
@@ -414,7 +421,7 @@ fn checkpoint_reopens_exact_preimages_for_read_only_whole_image_confirmation() {
 
 #[test]
 fn checkpoint_rejects_invalid_preimage_scope_shared_values_and_unknown_phase() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let native = native();
     let current = native_document(OAuthFamily::Zai, "a", "fresh");
     let b = native
@@ -443,7 +450,7 @@ fn checkpoint_rejects_invalid_preimage_scope_shared_values_and_unknown_phase() {
 
 #[test]
 fn checkpoint_every_reopened_phase_is_inspection_only_and_keeps_exact_images() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let native = native();
     let current = native_document(OAuthFamily::Zai, "a", "fresh");
     let b = native
@@ -491,7 +498,7 @@ fn checkpoint_every_reopened_phase_is_inspection_only_and_keeps_exact_images() {
 
 #[test]
 fn checkpoint_phase_is_monotonic_and_published_states_cannot_apply() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let native = native();
     let current = native_document(OAuthFamily::Zai, "a", "fresh");
     let b = native
@@ -535,7 +542,7 @@ fn checkpoint_phase_is_monotonic_and_published_states_cannot_apply() {
 
 #[test]
 fn checkpoint_rejects_oversized_envelopes_before_decoding() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let native = native();
     let too_large = "x".repeat(16 * 1024 * 1024 + 1);
     assert!(matches!(
@@ -550,7 +557,7 @@ fn checkpoint_rejects_oversized_envelopes_before_decoding() {
 
 #[test]
 fn checkpoint_transaction_binding_roundtrips_and_cannot_be_rebound() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let native = native();
     let current = native_document(OAuthFamily::Zai, "a", "fresh");
     let target = native
@@ -658,7 +665,7 @@ fn checkpoint_whole_image_includes_optional_absence_and_target_specific_preimage
 
 #[test]
 fn checkpoint_rejects_every_partial_image_and_changed_touched_value_after_reopen() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let native = native();
     for family in [OAuthFamily::Zai, OAuthFamily::BigModel] {
         for cache_present in [false, true] {
@@ -728,7 +735,7 @@ fn checkpoint_rejects_every_partial_image_and_changed_touched_value_after_reopen
 fn checkpoint_journal_authentication_rejects_wrong_keys_context_and_legacy_recovery_layout() {
     use super::super::recovery::RecoveryLedger;
     use crate::secrets::owned_file::RECOVERY_FILE;
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let native = native();
     let current = native_document(OAuthFamily::Zai, "a", "fresh");
     let target = native
@@ -739,7 +746,11 @@ fn checkpoint_journal_authentication_rejects_wrong_keys_context_and_legacy_recov
         .seal(&vault, &native)
         .unwrap();
     assert!(matches!(
-        SwitchCheckpoint::open(&encoded, &VaultContext::generate().unwrap(), &native),
+        SwitchCheckpoint::open(
+            &encoded,
+            &StorageContext::Encrypted(VaultContext::generate().unwrap()),
+            &native
+        ),
         Err(CheckpointError::Vault)
     ));
     assert!(matches!(
@@ -824,7 +835,7 @@ fn login_receipt_capacity_rejects_new_work_without_forgetting_old_results() {
         }),
         Err(CheckpointError::ResourceLimit)
     );
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let native = native();
     let opened =
         ProfileCatalog::open(&catalog.seal(&vault, &native).unwrap(), &vault, &native).unwrap();
@@ -931,7 +942,7 @@ async fn review_rejected_native_connection_stays_rejected_after_timeout() {
 
 #[test]
 fn catalog_v4_import_receipts_are_authenticated_and_readable() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let native = native();
     let encoded = ProfileCatalog::default().seal(&vault, &native).unwrap();
     let plaintext = vault
@@ -965,7 +976,7 @@ fn synthetic_import_receipt(id: uuid::Uuid) -> super::super::import_receipts::Im
 }
 #[test]
 fn import_receipts_upgrade_v1_v2_v3_without_losing_accounts_or_authentication() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let native = native();
     let snapshot = native
         .inspect(&super::super::native::tests::native_document(
@@ -1017,9 +1028,12 @@ fn import_receipts_upgrade_v1_v2_v3_without_losing_accounts_or_authentication() 
             ProfileCatalog::open(&mislabeled, &vault, &native),
             Err(CheckpointError::InvalidPayload)
         ));
-        assert!(
-            ProfileCatalog::open(&encoded, &VaultContext::generate().unwrap(), &native).is_err()
-        );
+        assert!(ProfileCatalog::open(
+            &encoded,
+            &StorageContext::Encrypted(VaultContext::generate().unwrap()),
+            &native
+        )
+        .is_err());
         let wrong =
             NativeCipher::new("other-context", super::super::native::tests::TEST_SECRET).unwrap();
         assert!(matches!(

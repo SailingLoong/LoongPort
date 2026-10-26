@@ -1,10 +1,38 @@
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{OnceLock, RwLock};
-#[cfg(feature = "gui")]
-use tauri_plugin_store::StoreExt;
 
 use crate::error::AppError;
+
+/// Nonsecret scope path metadata; not a credential-protection policy or proof.
+pub(crate) const ISOLATED_SCOPE_IDENTITY_FILE: &str = "scope-identity.json";
+
+#[path = "app_store/isolated_scope.rs"]
+pub(crate) mod isolated_scope;
+static ACTIVE_SCOPE: isolated_scope::ScopeCache = isolated_scope::ScopeCache::new();
+
+/// Must run before logger, settings, device, or database bootstrap. Both success
+/// and failure are frozen for this process; publication only applies on restart.
+pub(crate) fn initialize_active_scope() -> Result<(), AppError> {
+    ACTIVE_SCOPE.initialize_optional_path(tauri_store_path().as_deref())
+}
+
+pub(crate) fn active_scope_root() -> Result<Option<PathBuf>, AppError> {
+    initialize_active_scope()?;
+    ACTIVE_SCOPE.root()
+}
+
+/// Compatibility boundary for old infallible path APIs. Runtime/bootstrap
+/// entrypoints must check initialize_active_scope first and surface its error.
+/// A missed guard must fail closed, never silently access the preserved root.
+fn isolated_root_for_paths() -> Option<PathBuf> {
+    active_scope_root()
+        .expect("active configuration scope is unavailable; startup must retain the scope error")
+}
+
+pub(crate) fn device_config_root(legacy: PathBuf) -> PathBuf {
+    isolated_root_for_paths().unwrap_or(legacy)
+}
 
 /// Store 中的键名
 const STORE_KEY_APP_CONFIG_DIR: &str = "app_config_dir_override";
@@ -44,6 +72,9 @@ impl Drop for TestAppConfigRoot {
 
 /// 获取缓存中的 app_config_dir 覆盖路径
 pub fn get_app_config_dir_override() -> Option<PathBuf> {
+    if let Some(root) = isolated_root_for_paths() {
+        return Some(root);
+    }
     override_cache().read().ok()?.clone()
 }
 
@@ -69,17 +100,32 @@ pub fn get_app_config_dir_override() -> Option<PathBuf> {
 ///
 /// 返回 `None` = 没设过覆盖（绝大多数用户），调用方用默认目录。
 pub fn read_app_config_dir_override_without_tauri() -> Option<PathBuf> {
-    let store_path = tauri_store_path()?;
-    let raw = std::fs::read_to_string(&store_path).ok()?;
+    if let Some(root) = isolated_root_for_paths() {
+        return Some(root);
+    }
+    legacy_override_at(&tauri_store_path()?, false)
+}
+
+fn legacy_override_at(store_path: &std::path::Path, accept_existing_file: bool) -> Option<PathBuf> {
+    let raw = std::fs::read_to_string(store_path).ok()?;
     let json: Value = serde_json::from_str(&raw).ok()?;
     let path_str = json.get(STORE_KEY_APP_CONFIG_DIR)?.as_str()?.trim();
     if path_str.is_empty() {
         return None;
     }
     let path = resolve_path(path_str);
-    // 与 `read_override_from_store` 同一条判据：路径不存在就当没设
-    // （用户可能把那个目录删了 / 拔了外置盘，那时用默认目录比报错好）。
-    path.is_dir().then_some(path)
+    isolated_scope::validate_legacy_root_at(store_path, &path)
+        .expect("managed configuration root requires a committed isolated selector");
+    // Preserve both original legacy contracts: GUI accepts an existing path
+    // (including a file, which must retain its original later error), while the
+    // headless reader requires a directory. Explicit isolated scopes never use
+    // either fallback; their validation errors are retained above.
+    (if accept_existing_file {
+        path.exists()
+    } else {
+        path.is_dir()
+    })
+    .then_some(path)
 }
 
 /// `app_paths.json` 在磁盘上的位置。
@@ -96,13 +142,24 @@ pub fn read_app_config_dir_override_without_tauri() -> Option<PathBuf> {
 /// ⚠️ identifier 从 `tauri.conf.json` 编译期读进来（`include_str!` + 解析），
 /// **不写字面量** —— 那个值改了这里不跟着改就会静默读不到覆盖，而症状是
 /// 「设了数据目录但生图还是用默认库」。
-fn tauri_store_path() -> Option<PathBuf> {
+pub(crate) fn tauri_store_path() -> Option<PathBuf> {
     const TAURI_CONF: &str = include_str!("../tauri.conf.json");
     let identifier = serde_json::from_str::<Value>(TAURI_CONF)
         .ok()?
         .get("identifier")?
         .as_str()?
         .to_string();
+
+    // Same explicit test-home convention as config::get_home_dir. No tests may
+    // inspect or publish a real user's selector when their data root is isolated.
+    if let Some(home) = std::env::var_os("CC_SWITCH_TEST_HOME") {
+        return Some(
+            PathBuf::from(home)
+                .join(".config")
+                .join(identifier)
+                .join("app_paths.json"),
+        );
+    }
 
     #[cfg(target_os = "macos")]
     let base = dirs::home_dir()?
@@ -117,41 +174,13 @@ fn tauri_store_path() -> Option<PathBuf> {
 }
 
 #[cfg(feature = "gui")]
-fn read_override_from_store(app: &tauri::AppHandle) -> Option<PathBuf> {
-    let store = match app.store_builder("app_paths.json").build() {
-        Ok(store) => store,
-        Err(e) => {
-            log::warn!("无法创建 Store: {e}");
-            return None;
-        }
-    };
-
-    match store.get(STORE_KEY_APP_CONFIG_DIR) {
-        Some(Value::String(path_str)) => {
-            let path_str = path_str.trim();
-            if path_str.is_empty() {
-                return None;
-            }
-
-            let path = resolve_path(path_str);
-
-            if !path.exists() {
-                log::warn!(
-                    "Store 中配置的 app_config_dir 不存在: {path:?}\n\
-                     将使用默认路径。"
-                );
-                return None;
-            }
-
-            log::info!("使用 Store 中的 app_config_dir: {path:?}");
-            Some(path)
-        }
-        Some(_) => {
-            log::warn!("Store 中的 {STORE_KEY_APP_CONFIG_DIR} 类型不正确，应为字符串");
-            None
-        }
-        None => None,
+fn read_override_from_store(_app: &tauri::AppHandle) -> Option<PathBuf> {
+    // Do not retain a tauri-plugin-store snapshot of this control document: a
+    // delayed save could erase an independently published isolated selection.
+    if let Some(root) = isolated_root_for_paths() {
+        return Some(root);
     }
+    legacy_override_at(&tauri_store_path()?, true)
 }
 
 /// 从 Store 刷新 app_config_dir 覆盖值并更新缓存
@@ -168,32 +197,10 @@ pub fn set_app_config_dir_to_store(
     app: &tauri::AppHandle,
     path: Option<&str>,
 ) -> Result<(), AppError> {
-    let store = app
-        .store_builder("app_paths.json")
-        .build()
-        .map_err(|e| AppError::Message(format!("创建 Store 失败: {e}")))?;
-
-    match path {
-        Some(p) => {
-            let trimmed = p.trim();
-            if !trimmed.is_empty() {
-                store.set(STORE_KEY_APP_CONFIG_DIR, Value::String(trimmed.to_string()));
-                log::info!("已将 app_config_dir 写入 Store: {trimmed}");
-            } else {
-                store.delete(STORE_KEY_APP_CONFIG_DIR);
-                log::info!("已从 Store 中删除 app_config_dir 配置");
-            }
-        }
-        None => {
-            store.delete(STORE_KEY_APP_CONFIG_DIR);
-            log::info!("已从 Store 中删除 app_config_dir 配置");
-        }
-    }
-
-    store
-        .save()
-        .map_err(|e| AppError::Message(format!("保存 Store 失败: {e}")))?;
-
+    initialize_active_scope()?;
+    let store = tauri_store_path()
+        .ok_or_else(|| AppError::Config("config.store_path_unavailable".into()))?;
+    isolated_scope::write_legacy_override_at(&store, path)?;
     refresh_app_config_dir_override(app);
     Ok(())
 }
@@ -233,6 +240,39 @@ mod tests {
     /// 3. 拼出来的路径确实以 `app_paths.json` 结尾（`tauri-plugin-store` 的默认落盘名，
     ///    与 `read_override_from_store` 里那个 `store_builder("app_paths.json")` 同一个）
     #[test]
+    fn legacy_direct_reader_cannot_bypass_managed_namespace_after_cache_init() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("app_paths.json");
+        let candidate = temp
+            .path()
+            .join("isolated-configs")
+            .join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&candidate).unwrap();
+        std::fs::write(
+            &store,
+            serde_json::to_vec(&serde_json::json!({STORE_KEY_APP_CONFIG_DIR:candidate})).unwrap(),
+        )
+        .unwrap();
+        assert!(std::panic::catch_unwind(|| legacy_override_at(&store, true)).is_err());
+        assert!(std::panic::catch_unwind(|| legacy_override_at(&store, false)).is_err());
+    }
+
+    #[test]
+    fn legacy_gui_file_override_keeps_its_original_error_path_not_home_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("file-not-directory");
+        std::fs::write(&file, b"preserved").unwrap();
+        let store = temp.path().join("app_paths.json");
+        std::fs::write(
+            &store,
+            serde_json::to_vec(&serde_json::json!({STORE_KEY_APP_CONFIG_DIR: file})).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(legacy_override_at(&store, true), Some(file));
+        assert_eq!(legacy_override_at(&store, false), None);
+    }
+
+    #[test]
     fn the_store_path_tracks_the_bundle_identifier() {
         const TAURI_CONF: &str = include_str!("../tauri.conf.json");
         let identifier = serde_json::from_str::<Value>(TAURI_CONF)
@@ -268,6 +308,100 @@ mod tests {
             path.to_string_lossy().contains(&identifier),
             "store 路径里没有 identifier（{identifier}）：{}",
             path.display()
+        );
+    }
+}
+
+#[cfg(test)]
+mod scope_integration_tests {
+    use super::*;
+    use std::fs;
+    use std::process::Command;
+
+    // Each case has a fresh process selection cache and temp-only store/home.
+    // Never reset production globals in a running process to simulate restart.
+    #[test]
+    fn explicit_selection_controls_all_path_accessors() {
+        const CHILD: &str = "LOONGPORT_SCOPE_TEST_CHILD";
+        let Some(mode) = std::env::var_os(CHILD) else {
+            for mode in ["legacy", "isolated", "broken"] {
+                let output = Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "app_store::scope_integration_tests::explicit_selection_controls_all_path_accessors", "--nocapture"])
+                    .env(CHILD,mode).output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{mode}: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return;
+        };
+        let temp = tempfile::tempdir().unwrap();
+        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
+        let store = tauri_store_path().unwrap();
+        assert!(
+            store.starts_with(temp.path()),
+            "tests must never resolve real home"
+        );
+        fs::create_dir_all(store.parent().unwrap()).unwrap();
+        let old = temp.path().join("old");
+        let device = temp.path().join("device");
+        fs::create_dir(&old).unwrap();
+        fs::create_dir(&device).unwrap();
+        fs::write(
+            &store,
+            serde_json::to_vec(&serde_json::json!({STORE_KEY_APP_CONFIG_DIR:old})).unwrap(),
+        )
+        .unwrap();
+        update_cached_override(Some(old.clone()));
+        let selected = if mode != "legacy" {
+            let pending = isolated_scope::prepare_scope_at(
+                &store,
+                &old,
+                &device,
+                &"a".repeat(64),
+                &isolated_scope::capture_legacy_selection_at(&store, &old).unwrap(),
+            )
+            .unwrap();
+            fs::write(pending.root().join("vault.json"), br#"{"metadata":{"vaultId":"4f281075-5976-4bba-aa7e-a3b24abc5d49","keyId":"445863c5-7aa4-4f88-817a-7532fc72f6f6"},"automaticUnlock":true}"#).unwrap();
+            Some(
+                pending
+                    .publish(
+                        "4f281075-5976-4bba-aa7e-a3b24abc5d49",
+                        "445863c5-7aa4-4f88-817a-7532fc72f6f6",
+                    )
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        if mode == "broken" {
+            fs::remove_dir_all(&selected.unwrap().root).unwrap();
+            assert!(initialize_active_scope().is_err());
+            assert!(
+                std::panic::catch_unwind(get_app_config_dir_override).is_err(),
+                "infallible API must not expose old root"
+            );
+            assert!(
+                std::panic::catch_unwind(read_app_config_dir_override_without_tauri).is_err(),
+                "headless path must not expose old root"
+            );
+            return;
+        }
+        initialize_active_scope().unwrap();
+        let expected = selected.map(|s| s.root);
+        assert_eq!(
+            get_app_config_dir_override(),
+            expected.clone().or(Some(old.clone()))
+        );
+        assert_eq!(
+            read_app_config_dir_override_without_tauri(),
+            expected.clone().or(Some(old))
+        );
+        assert_eq!(
+            device_config_root(device.clone()),
+            expected.unwrap_or(device)
         );
     }
 }

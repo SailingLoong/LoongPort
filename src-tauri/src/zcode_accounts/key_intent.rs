@@ -3,7 +3,7 @@
 use super::core::OAuthFamily;
 use crate::secrets::{
     owned_file::{OwnedFile, KEY_INTENT_FILE},
-    VaultContext,
+    storage::StorageContext,
 };
 use serde::{Deserialize, Serialize};
 
@@ -175,7 +175,7 @@ impl KeyIntentLedger {
     pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
-    pub(crate) fn seal(&self, vault: &VaultContext) -> Result<Vec<u8>, IntentError> {
+    pub(crate) fn seal(&self, vault: &StorageContext) -> Result<Vec<u8>, IntentError> {
         self.validate()?;
         let bytes =
             zeroize::Zeroizing::new(serde_json::to_vec(self).map_err(|_| IntentError::Invalid)?);
@@ -184,16 +184,16 @@ impl KeyIntentLedger {
         }
         OwnedFile::registered(KEY_INTENT_FILE)
             .map_err(|_| IntentError::Authentication)?
-            .encode(vault, &bytes)
+            .encode_storage(vault, &bytes)
             .map_err(|_| IntentError::Authentication)
     }
-    pub(crate) fn open(bytes: &[u8], vault: &VaultContext) -> Result<Self, IntentError> {
+    pub(crate) fn open(bytes: &[u8], vault: &StorageContext) -> Result<Self, IntentError> {
         if bytes.len() > 128 * 1024 {
             return Err(IntentError::Limit);
         }
         let plaintext = OwnedFile::registered(KEY_INTENT_FILE)
             .map_err(|_| IntentError::Authentication)?
-            .decode(vault, bytes)
+            .decode_storage(vault, bytes)
             .map_err(|_| IntentError::Authentication)?;
         if plaintext.len() > 64 * 1024 {
             return Err(IntentError::Limit);
@@ -229,6 +229,6 @@ impl KeyIntentLedger {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 #[path = "key_intent_tests.rs"]
-mod tests;
+pub(crate) mod tests;

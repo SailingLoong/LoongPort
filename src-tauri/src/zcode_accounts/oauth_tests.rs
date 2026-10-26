@@ -143,9 +143,7 @@ fn saved_coding_old_saved_receipt_does_not_shadow_a_new_current_revision() {
 fn binding() -> VaultBinding {
     VaultBinding {
         root: super::super::synthetic_test_path("vault"),
-        vault_id: "synthetic-vault".into(),
-        key_id: "synthetic-key".into(),
-        revision: 1,
+        storage: super::super::synthetic_storage_identity(1),
     }
 }
 fn flow(store: &LoginFlowStore, now: Instant) -> String {
@@ -422,7 +420,7 @@ fn reopened_login_finds_only_latest_same_vault_and_library_after_cancel() {
         Some(newer)
     );
     let mut changed = binding.clone();
-    changed.revision += 1;
+    changed.storage = super::super::synthetic_storage_identity(2);
     assert!(owner.latest(&changed, "library-a", now).unwrap().is_none());
     assert!(owner
         .latest(&binding, "other-library", now)

@@ -689,9 +689,7 @@ async fn rejection_fence_tracks_only_its_own_write_and_never_revives_request_lea
     );
     let updated = &result.fence.lease.binding;
     let before = &original.binding;
-    assert_eq!(updated.vault_id, before.vault_id);
-    assert_eq!(updated.key_id, before.key_id);
-    assert_eq!(updated.vault_revision, before.vault_revision);
+    assert_eq!(updated.storage, before.storage);
     assert_eq!(updated.epoch, before.epoch);
     assert_eq!(updated.account_id, before.account_id);
     assert_eq!(updated.session_binding, before.session_binding);

@@ -37,7 +37,7 @@ fn historical(version: i32) -> Connection {
 
 fn add_client_canaries(conn: &Connection) {
     let vault = crate::secrets::VaultContext::generate().unwrap();
-    let sealed = crate::secrets::inventory::seal_db(
+    let sealed = crate::secrets::inventory::seal_encrypted_db(
         &vault,
         "loongport_client_credentials",
         "secret",

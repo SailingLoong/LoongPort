@@ -599,7 +599,7 @@ pub(crate) async fn expiry_candidates(
     let rows = super::store::load(session, &binding)?;
     let row = rows
         .iter()
-        .find(|r| r.account.id(&binding.vault_id) == account_id)
+        .find(|r| r.account.id(binding.store_id()) == account_id)
         .ok_or(super::model::Failure::ExpiredAuthorization)?;
     Ok(project(row, account_id, final_model, now))
 }

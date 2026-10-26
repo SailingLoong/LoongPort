@@ -944,7 +944,7 @@ describe("TRAE Global explicit text-only account entry", () => {
     mount();
     await screen.findByRole("option", { name: /Synthetic MiniMax/ });
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "部分账号库不可用",
+      "部分账号库当前无法读取",
     );
     expect(screen.queryByText(/must-not-copy/)).toBeNull();
     await choose();

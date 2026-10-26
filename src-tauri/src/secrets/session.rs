@@ -1,6 +1,7 @@
 //! Explicit lifecycle ownership for the active credential vault.
 
 use super::key_store::{save_verified, KeyStore};
+use super::storage::StorageContext;
 use super::{VaultContext, VaultMetadata};
 pub(crate) use crate::config_file_io::write_durable;
 use crate::error::AppError;
@@ -29,13 +30,82 @@ enum MigrationState {
 pub struct SecretSession {
     root: PathBuf,
     _temporary_root: Option<tempfile::TempDir>,
-    vault: RwLock<VaultContext>,
+    vault: RwLock<StorageContext>,
     blocked: AtomicBool,
     // Volatile lease invalidation only; not a persistent account revision.
     lifecycle_epoch: AtomicU64,
 }
 
 impl SecretSession {
+    /// Internal authenticated key material, never a user-text IPC parser.
+    /// New choices are explicit; this entry never generates a replacement key.
+    pub(crate) fn open_protected(
+        root: &Path,
+        device: &Path,
+        store: &dyn KeyStore,
+        provided_key: Option<zeroize::Zeroizing<Vec<u8>>>,
+    ) -> Result<Arc<Self>, AppError> {
+        super::files::device_directory_exists(root)?;
+        super::files::device_directory_exists(device)?;
+        if super::reset::pending(root)?
+            || super::bootstrap_restore::pending_record(root)?.is_some()
+            || super::transition::pending_record(root)?.is_some()
+            || super::rewrap::pending_record(root)?.is_some()
+        {
+            return Err(AppError::Config("secret.recovery_required".into()));
+        }
+        crate::database::storage::preflight_runtime(&root.join(crate::config::DB_FILE_NAME))?;
+        let record = super::protection::read(root)?;
+        let local = read_metadata_with_bytes(root)?.map(|(local,_)|local);
+        if let Some(local) = &local {
+            local
+                .metadata
+                .validate()
+                .map_err(super::inventory::secret_error)?;
+        }
+        let context = if let Some(record) = record {
+            super::protection::open_context(
+                &record,
+                local.as_ref().map(|local| &local.metadata),
+                provided_key,
+                |vault_id, key_id| {
+                    store
+                        .load(vault_id, key_id)
+                        .map_err(|_| AppError::Config("secret.store_unavailable".into()))
+                },
+            )?
+        } else if let Some(local) = local {
+            if local.metadata.user_text_key.is_some() {
+                return Err(AppError::Config("protection.record_missing".into()));
+            }
+            let vault = if let Some(key) = provided_key {
+                VaultContext::from_key(local.metadata, key)
+                    .map_err(super::inventory::secret_error)?
+            } else {
+                authenticate_existing(root, store, None)?
+            };
+            StorageContext::Encrypted(vault)
+        } else {
+            if provided_key.is_some() {
+                return Err(AppError::Config("protection.configuration_required".into()));
+            }
+            let proof = super::protection::FreshScope::capture(
+                root,
+                device,
+                &crate::panic_hook::diagnostic_entries(),
+            )?;
+            let record = proof.publish_initial_plaintext()?;
+            super::protection::open_context(&record, None, None, |_, _| {
+                unreachable!("plaintext has no cache")
+            })?
+        };
+        let session = Self::from_storage_context(root.to_path_buf(), context);
+        // Authenticate the original stored state before handing out a session;
+        // this is read-only and never starts or completes recovery/migration.
+        session.migration_pending()?;
+        Ok(session)
+    }
+
     pub fn open(
         root: &Path,
         store: &dyn KeyStore,
@@ -125,10 +195,14 @@ impl SecretSession {
     }
 
     pub(crate) fn from_context(root: PathBuf, vault: VaultContext) -> Arc<Self> {
+        Self::from_storage_context(root, vault.into())
+    }
+
+    pub(crate) fn from_storage_context(root: PathBuf, context: StorageContext) -> Arc<Self> {
         Arc::new(Self {
             root,
             _temporary_root: None,
-            vault: RwLock::new(vault),
+            vault: RwLock::new(context),
             blocked: AtomicBool::new(false),
             lifecycle_epoch: AtomicU64::new(0),
         })
@@ -144,13 +218,13 @@ impl SecretSession {
         Ok(Arc::new(Self {
             root: directory.path().to_path_buf(),
             _temporary_root: Some(directory),
-            vault: RwLock::new(vault),
+            vault: RwLock::new(vault.into()),
             blocked: AtomicBool::new(false),
             lifecycle_epoch: AtomicU64::new(0),
         }))
     }
 
-    pub(crate) fn read(&self) -> Result<RwLockReadGuard<'_, VaultContext>, AppError> {
+    pub(crate) fn read(&self) -> Result<RwLockReadGuard<'_, StorageContext>, AppError> {
         let vault = self
             .vault
             .read()
@@ -161,7 +235,7 @@ impl SecretSession {
         Ok(vault)
     }
 
-    pub(crate) fn write(&self) -> Result<RwLockWriteGuard<'_, VaultContext>, AppError> {
+    pub(crate) fn write(&self) -> Result<RwLockWriteGuard<'_, StorageContext>, AppError> {
         let vault = self
             .vault
             .write()
@@ -218,12 +292,11 @@ impl SecretSession {
 
     fn migration_state(&self) -> Result<MigrationState, AppError> {
         let vault = self.read()?;
+        if vault.is_plaintext() {
+            return Ok(MigrationState::Complete);
+        }
         let saved = read_metadata(&self.root)?;
-        let state = vault
-            .open(&["local", "migration-state"], &saved.migration_state)
-            .map_err(super::inventory::secret_error)?;
-        serde_json::from_slice(&state)
-            .map_err(|_| AppError::Config("secret.invalid_metadata".into()))
+        decode_migration_state(vault.encrypted()?, &saved)
     }
 
     pub(crate) fn complete_migration(&self) -> Result<(), AppError> {
@@ -232,7 +305,8 @@ impl SecretSession {
         }
         let vault = self.read()?;
         let mut saved = read_metadata(&self.root)?;
-        saved.migration_state = seal_migration_state(&vault, &MigrationState::Complete)?;
+        saved.migration_state =
+            seal_migration_state(vault.encrypted()?, &MigrationState::Complete)?;
         write_metadata(&self.root, &saved)
     }
 }
@@ -253,10 +327,22 @@ pub(crate) fn authenticate_existing(
             .load(&saved.metadata.vault_id, &saved.metadata.key_id)
             .map_err(|_| AppError::Config("secret.store_unavailable".into()))?
             .ok_or_else(|| AppError::Config("secret.key_missing".into()))?;
-        VaultContext::from_key(saved.metadata, key).map_err(super::inventory::secret_error)
+        super::key_store::user_text::authenticate(saved.metadata, key)
+            .map_err(super::inventory::secret_error)
     } else {
         Err(AppError::Config("secret.locked".into()))
     }
+}
+
+fn decode_migration_state(vault:&VaultContext,saved:&LocalVault)->Result<MigrationState,AppError>{
+    let state=vault.open(&["local","migration-state"],&saved.migration_state).map_err(super::inventory::secret_error)?;
+    serde_json::from_slice(&state).map_err(|_|AppError::Config("secret.invalid_metadata".into()))
+}
+/// Read-only pending-generation admission through the original local-state codec.
+pub(crate) fn validate_completed_metadata(root:&Path,context:&StorageContext)->Result<(),AppError>{
+    if context.is_plaintext(){if read_metadata_with_bytes(root)?.is_some(){return Err(AppError::Config("protection.identity_mismatch".into()))}return Ok(())}
+    let vault=context.encrypted()?;let saved=read_metadata(root)?;
+    if saved.metadata!=*vault.metadata()||!matches!(decode_migration_state(vault,&saved)?,MigrationState::Complete){return Err(AppError::Config("secret.migration_required".into()))}Ok(())
 }
 
 pub(crate) fn completed_metadata(
@@ -278,18 +364,15 @@ fn seal_migration_state(vault: &VaultContext, state: &MigrationState) -> Result<
         .map_err(super::inventory::secret_error)
 }
 
+/// Original local-vault parser, optionally retaining exact nonsecret/ciphertext bytes for review CAS.
+pub(crate) fn read_metadata_with_bytes(root: &Path) -> Result<Option<(LocalVault, Vec<u8>)>, AppError> {
+    let path=root.join("vault.json");
+    crate::config_file_io::read_regular_file(&path,64*1024)
+        .map_err(|error| if error.kind()==std::io::ErrorKind::InvalidData {AppError::Config("secret.invalid_metadata".into())}else{AppError::io(&path,error)})?
+        .map(|bytes|serde_json::from_slice::<LocalVault>(&bytes).map(|local|(local,bytes)).map_err(|_|AppError::Config("secret.invalid_metadata".into()))).transpose()
+}
 pub(crate) fn read_metadata(root: &Path) -> Result<LocalVault, AppError> {
-    let path = root.join("vault.json");
-    let bytes = crate::config_file_io::read_regular_file(&path, 64 * 1024)
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::InvalidData {
-                AppError::Config("secret.invalid_metadata".into())
-            } else {
-                AppError::io(&path, error)
-            }
-        })?
-        .ok_or_else(|| AppError::Config("secret.metadata_missing".into()))?;
-    serde_json::from_slice(&bytes).map_err(|_| AppError::Config("secret.invalid_metadata".into()))
+    read_metadata_with_bytes(root)?.map(|(local,_)|local).ok_or_else(||AppError::Config("secret.metadata_missing".into()))
 }
 
 pub(crate) fn ensure_owned_directory(root: &Path, directory: &Path) -> Result<(), AppError> {
@@ -507,7 +590,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryKeys::default();
         let session = SecretSession::open(dir.path(), &store, None).unwrap();
-        let metadata = session.read().unwrap().metadata().clone();
+        let metadata = session
+            .read()
+            .unwrap()
+            .encrypted()
+            .unwrap()
+            .metadata()
+            .clone();
         let before = std::fs::read(dir.path().join("vault.json")).unwrap();
         store.remove(&metadata.vault_id, &metadata.key_id).unwrap();
         assert!(SecretSession::open(dir.path(), &store, None).is_err());
@@ -517,3 +606,36 @@ mod tests {
         );
     }
 }
+
+/// Shell visibility is independent from authenticated credential runtime publication.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeAvailability {
+    pub credential_runtime_available: bool,
+}
+
+/// A read-only observation; never acquires an OS key or creates a session.
+pub fn credential_runtime_availability(session: Option<&SecretSession>) -> RuntimeAvailability {
+    RuntimeAvailability {
+        credential_runtime_available: session.is_some_and(|session| session.read().is_ok()),
+    }
+}
+
+#[cfg(test)]
+mod runtime_availability_tests {
+    #[test]
+    fn blocked_session_is_not_an_available_credential_runtime() {
+        let session = super::SecretSession::ephemeral().unwrap();
+        assert!(
+            super::credential_runtime_availability(Some(&session)).credential_runtime_available
+        );
+        session.set_blocked(true);
+        assert!(
+            !super::credential_runtime_availability(Some(&session)).credential_runtime_available
+        );
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "session_protection_tests.rs"]
+pub(crate) mod protection_startup_tests;

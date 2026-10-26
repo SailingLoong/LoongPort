@@ -157,7 +157,7 @@ impl Default for Document {
 
 use crate::{
     config_file_io,
-    secrets::{owned_file::OwnedFile, VaultMetadata},
+    secrets::{owned_file::OwnedFile, storage::StorageIdentity},
     zcode_file_lock::FileLock,
 };
 use sha2::{Digest, Sha256};
@@ -171,18 +171,18 @@ impl Drop for Credentials {
 }
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct Binding {
-    pub vault: VaultMetadata,
+    pub vault: StorageIdentity,
     pub session_epoch: u64,
     pub process_epoch: u64,
 }
 impl Binding {
     fn capture(
         session: &SecretSession,
-        vault: &crate::secrets::VaultContext,
+        vault: &crate::secrets::storage::StorageContext,
         runtime: &super::Runtime,
     ) -> Self {
         Self {
-            vault: vault.metadata().clone(),
+            vault: vault.identity(),
             session_epoch: session.lifecycle_epoch(),
             process_epoch: runtime.epoch,
         }
@@ -391,7 +391,7 @@ pub(super) async fn access_after<R>(
         None => Document::default(),
         Some(bytes) => {
             let plain = file
-                .decode(&vault, bytes)
+                .decode_storage(&vault, bytes)
                 .map_err(|_| Failure::StorageUnavailable)?;
             serde_json::from_slice(&plain).map_err(|_| Failure::StorageUnavailable)?
         }
@@ -407,7 +407,7 @@ pub(super) async fn access_after<R>(
         let plain =
             Zeroizing::new(serde_json::to_vec(&document).map_err(|_| Failure::StorageUnavailable)?);
         let encrypted = file
-            .encode(&vault, &plain)
+            .encode_storage(&vault, &plain)
             .map_err(|_| Failure::StorageUnavailable)?;
         if encrypted.len() > 4 * 1024 * 1024
             || config_file_io::read_regular_file(&path, 4 * 1024 * 1024)
@@ -431,7 +431,7 @@ pub(super) async fn access_after<R>(
         let after = super::tests::fault_readback(session.root(), after);
         if after != encrypted
             || file
-                .decode(&vault, &after)
+                .decode_storage(&vault, &after)
                 .map_err(|_| Failure::StorageUnavailable)?
                 .as_slice()
                 != plain.as_slice()
@@ -543,5 +543,69 @@ pub(super) async fn dispatch_classified<T: super::http::Transport>(
             .ok_or(DispatchFailure::OutcomeUnknown(Failure::StorageUnavailable))?
             .await
             .map_err(DispatchFailure::OutcomeUnknown)
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) mod plaintext_tests {
+    use super::*;
+    use crate::secrets::storage::{PlaintextIdentity, StorageContext};
+
+    #[cfg(test)]
+    #[tokio::test]
+    async fn plaintext_owner_publishes_json_and_invalidates_previous_epoch_binding() {
+        plaintext_owner_publishes_json_and_invalidates_previous_epoch_binding_body().await;
+    }
+
+    async fn plaintext_owner_publishes_json_and_invalidates_previous_epoch_binding_body() {
+        let _serial = super::super::isolated_fixture_guard().await;
+        let root = tempfile::tempdir().unwrap();
+        let session = SecretSession::from_storage_context(
+            root.path().into(),
+            StorageContext::Plaintext(PlaintextIdentity {
+                format_version: 1,
+                store_id: "11111111-1111-4111-8111-111111111111".into(),
+                generation_id: "22222222-2222-4222-8222-222222222222".into(),
+                revision: 1,
+            }),
+        );
+        let binding = access(&session, None, |document, binding| {
+            document
+                .accounts
+                .push(super::super::test_fixtures::account());
+            Ok((binding.clone(), true))
+        })
+        .await
+        .unwrap();
+        let bytes = std::fs::read(root.path().join(FILE)).unwrap();
+        let document: Document = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            document.accounts[0]
+                .credentials
+                .as_ref()
+                .unwrap()
+                .access_token,
+            "synthetic-access"
+        );
+        assert!(!root.path().join("vault.json").exists());
+        let mut changed = binding.clone();
+        let StorageIdentity::Plaintext(identity) = &mut changed.vault else {
+            panic!("fixture must use actual plaintext identity");
+        };
+        identity.store_id = "33333333-3333-4333-8333-333333333333".into();
+        assert!(access(&session, Some(&changed), |_, _| Ok(((), true)))
+            .await
+            .is_err());
+        session.set_blocked(true);
+        session.set_blocked(false);
+        assert!(access(&session, Some(&binding), |_, _| Ok(((), true)))
+            .await
+            .is_err());
+        assert_eq!(std::fs::read(root.path().join(FILE)).unwrap(), bytes);
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub(crate) async fn run() {
+        plaintext_owner_publishes_json_and_invalidates_previous_epoch_binding_body().await;
     }
 }

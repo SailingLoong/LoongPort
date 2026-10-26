@@ -13,7 +13,7 @@ use zeroize::Zeroizing;
 use crate::error::AppError;
 use crate::live::engine::DeviceStore;
 use crate::secrets::owned_file::{DeviceFile, DEVICE_STATE_FILE};
-use crate::secrets::VaultContext;
+use crate::secrets::storage::StorageContext;
 
 #[cfg(test)]
 #[path = "state_persistence_tests.rs"]
@@ -597,7 +597,7 @@ fn invalid_state() -> AppError {
 
 fn read_preserved(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
 ) -> Result<PreservedState, AppError> {
     let file = DeviceFile::registered(DEVICE_STATE_FILE)?;
     let Some(bytes) = store.read_device(vault, &file)? else {
@@ -644,7 +644,7 @@ pub(crate) fn validate_envelope(bytes: &[u8]) -> Result<(), AppError> {
 /// One transient authenticated file view for the original upgrade reviewer.
 pub(crate) fn read_review_snapshot(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
 ) -> Result<PreservedState, AppError> {
     let _guard = state_lock()
         .lock()
@@ -695,7 +695,7 @@ impl PreservedState {
 /// future peer apps are retained opaquely, never interpreted as empty/Direct.
 pub(crate) fn load_app(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     app: &str,
 ) -> Result<LiveState, AppError> {
     let _guard = state_lock()
@@ -708,7 +708,7 @@ pub(crate) fn load_app(
 /// app is refused; unrelated payloads are never decoded, normalized or removed.
 pub(crate) fn update_app<R>(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     app: &str,
     change: impl FnOnce(&mut AppLiveState) -> Result<R, AppError>,
 ) -> Result<R, AppError> {
@@ -717,7 +717,7 @@ pub(crate) fn update_app<R>(
 
 fn update_app_checked<R>(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     app: &str,
     check: &dyn Fn(&LiveState) -> Result<(), AppError>,
     change: impl FnOnce(&mut AppLiveState) -> Result<R, AppError>,
@@ -755,7 +755,7 @@ fn update_app_checked<R>(
 /// replacement operation or changed app evidence must never be acknowledged.
 pub(crate) fn clear_pending_checked(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     app: &str,
     expected: &Pending,
     check: &dyn Fn(&LiveState) -> Result<(), AppError>,
@@ -767,7 +767,7 @@ pub(crate) fn clear_pending_checked(
 /// leaves the original intent available; a discarded intent is never completed.
 pub(crate) fn finish_pending_checked(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     app: &str,
     expected: &Pending,
     outcome: SaveOutcome,
@@ -807,7 +807,7 @@ pub(crate) fn finish_pending_checked(
 /// leave the original file untouched for controlled inspection and recovery.
 pub(crate) fn load(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
 ) -> Result<LiveState, AppError> {
     let file = DeviceFile::registered(DEVICE_STATE_FILE)?;
     match store.read_device(vault, &file)? {
@@ -818,7 +818,7 @@ pub(crate) fn load(
 
 fn save(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     state: &LiveState,
 ) -> Result<(), AppError> {
     let bytes = Zeroizing::new(
@@ -921,7 +921,7 @@ pub(crate) fn validate_app_for_update(app: &AppLiveState) -> Result<(), AppError
 /// Callers must keep external effects out of this closure; it owns only state.
 pub(crate) fn update<R>(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     change: impl FnOnce(&mut LiveState) -> Result<R, AppError>,
 ) -> Result<R, AppError> {
     let _guard = state_lock()
@@ -938,7 +938,7 @@ pub(crate) fn update<R>(
 
 pub(crate) fn pending(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     app: &str,
 ) -> Result<Option<Pending>, AppError> {
     let _guard = state_lock()
@@ -949,7 +949,7 @@ pub(crate) fn pending(
 
 pub(crate) fn set_pending(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     app: &str,
     pending: Option<Pending>,
 ) -> Result<(), AppError> {
@@ -962,7 +962,7 @@ pub(crate) fn set_pending(
 /// Read several app modes from one authenticated snapshot.
 pub(crate) fn mode_states<const N: usize>(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     apps: [&str; N],
 ) -> Result<[ModeState; N], AppError> {
     let _guard = state_lock()
@@ -991,7 +991,7 @@ pub(crate) fn mode_states<const N: usize>(
 
 pub(crate) fn mode_state(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     app: &str,
 ) -> Result<ModeState, AppError> {
     let [mode] = mode_states(store, vault, [app])?;
@@ -1001,7 +1001,7 @@ pub(crate) fn mode_state(
 /// None denotes that this version has not written this app's native files.
 pub(crate) fn written(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     app: &str,
 ) -> Result<Option<Written>, AppError> {
     let _guard = state_lock()
@@ -1012,7 +1012,7 @@ pub(crate) fn written(
 
 pub(crate) fn stack(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     app: &str,
 ) -> Result<StackState, AppError> {
     let _guard = state_lock()
@@ -1025,7 +1025,7 @@ pub(crate) fn stack(
 
 pub(crate) fn stack_mode(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     app: &str,
 ) -> Result<bool, AppError> {
     let _guard = state_lock()
@@ -1037,7 +1037,7 @@ pub(crate) fn stack_mode(
 
 pub(crate) fn apps_with_pending(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
 ) -> Result<Vec<String>, AppError> {
     let _guard = state_lock()
         .lock()

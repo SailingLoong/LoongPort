@@ -393,7 +393,7 @@ pub(crate) async fn save(
                 i
             } else {
                 d.accounts.push(Account {
-                    id: catalog::account_id(&b.vault.vault_id, flow.preview.region, uid),
+                    id: catalog::account_id(b.vault.store_id(), flow.preview.region, uid),
                     label: label.clone(),
                     region: flow.preview.region,
                     build_env: "prod".into(),

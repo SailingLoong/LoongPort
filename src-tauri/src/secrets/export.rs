@@ -12,7 +12,8 @@ use crate::error::AppError;
 use serde_json::{json, Map, Value};
 
 pub(crate) fn build_plaintext_export(session: &SecretSession) -> Result<String, AppError> {
-    let vault = session.read()?;
+    let context = session.read()?;
+    let vault = context.encrypted()?;
     let db_path = session.root().join(crate::config::DB_FILE_NAME);
     let conn =
         rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)

@@ -19,7 +19,7 @@ use crate::live::engine::{
     AppWriteGuard, DeviceStore, LiveFile, Planned,
 };
 use crate::live::patch::{LivePatch, LiveWriteError};
-use crate::secrets::VaultContext;
+use crate::secrets::storage::StorageContext;
 use std::collections::HashSet;
 use std::sync::RwLockReadGuard;
 
@@ -159,7 +159,7 @@ pub(crate) fn saved_request_status(
 /// 执行一次操作。调用方持有这个应用的写锁。
 pub(crate) fn run(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     guard: &AppWriteGuard,
     op: &str,
     changes: &[FileChange<'_>],
@@ -191,7 +191,7 @@ pub(crate) struct RunChecks<'a> {
 /// state proof. Ordinary operations keep their existing recovery behavior.
 pub(crate) fn run_checked(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     guard: &AppWriteGuard,
     op: &str,
     changes: &[FileChange<'_>],
@@ -417,7 +417,7 @@ pub(crate) fn run_checked(
 /// 补完或放弃这个应用上一次未完成的操作。调用方持有这个应用的写锁。
 pub(crate) fn recover(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     guard: &AppWriteGuard,
     admitted_files: &[LiveFile],
     commit_target: CommitTarget<'_>,
@@ -429,7 +429,7 @@ pub(crate) fn recover(
 
 pub(crate) fn recover_checked(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     guard: &AppWriteGuard,
     admitted_files: &[LiveFile],
     commit_target: CommitTarget<'_>,
@@ -459,7 +459,7 @@ pub(crate) struct RecoveryAdmission<'a> {
 /// for its explicit runtime handoff. Ordinary callers retain their admission.
 pub(crate) fn recover_checked_guarded(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     guard: &AppWriteGuard,
     admitted_files: &[LiveFile],
     commit_target: CommitTarget<'_>,
@@ -493,7 +493,7 @@ struct RecoveryCleanup<'a> {
 
 fn recover_checked_with_cleanup(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     guard: &AppWriteGuard,
     admitted_files: &[LiveFile],
     commit_target: CommitTarget<'_>,
@@ -729,7 +729,7 @@ fn recover_checked_with_cleanup(
 /// 的不会走到这一步）。
 pub(crate) fn recover_before_write(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     guard: &AppWriteGuard,
     admitted_files: &[LiveFile],
     commit_target: CommitTarget<'_>,
@@ -839,7 +839,7 @@ fn discard_pending_files(pending: &Pending) -> Result<(), AppError> {
 /// 还没发布过任何文件时放弃：删掉临时文件和 pending，什么都没改。
 fn drop_unpublished(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     guard: &AppWriteGuard,
     pending: &Pending,
 ) {
@@ -876,7 +876,7 @@ fn drop_unpublished(
 /// 等前滚。
 fn give_up_on_conflict(
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     guard: &AppWriteGuard,
     pending: &Pending,
     published_any: bool,
@@ -1344,7 +1344,7 @@ pub(crate) fn uses_upstream4_schema(db: &Database) -> Result<bool, AppError> {
     {
         return Err(AppError::Config("upgrade.source_changed".into()));
     }
-    crate::database::vault::check_identity(&conn, &vault)?;
+    crate::database::storage::check_identity(&conn, &vault)?;
     let database_path = root.join(crate::config::DB_FILE_NAME);
     let database_revision = inspection::file_revision(&database_path)?;
     let identity = database_revision.primary_identity()?;
@@ -1354,7 +1354,9 @@ pub(crate) fn uses_upstream4_schema(db: &Database) -> Result<bool, AppError> {
         .root()
         .join(crate::secrets::upgrade::checkpoint::FILE);
     let checkpoint_revision = inspection::file_revision(&checkpoint_path)?;
-    if crate::secrets::upgrade::checkpoint::verified_database_id(root, &device, &vault)?.is_none() {
+    if crate::secrets::upgrade::checkpoint::verified_database_id(root, &device, vault.encrypted()?)?
+        .is_none()
+    {
         return Err(AppError::Config("upgrade.future_version".into()));
     }
     inspection::verify_connection_primary_identity(&conn, &identity)?;
@@ -1390,7 +1392,7 @@ pub(crate) fn saved_provider(row: &state::SavedRow) -> Result<crate::provider::P
 pub(crate) fn verify_saved_row(
     db: &Database,
     session: &SecretSession,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     app: &AppType,
     target: &PendingTarget,
 ) -> Result<(), AppError> {
@@ -1439,7 +1441,7 @@ pub(crate) fn commit_target(
     db: &Database,
     session: &SecretSession,
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     app: &AppType,
     target: &PendingTarget,
 ) -> Result<(), AppError> {
@@ -1453,7 +1455,7 @@ pub(crate) fn commit_target(
         &PointerCommit {
             mode_choice: false,
             publish: &|id| {
-                crate::settings::set_current_provider_with_vault(app, Some(id), session, vault)
+                crate::settings::set_current_provider_with_storage(app, Some(id), session, vault)
             },
             verify: &|id| super::current::verify_direct_pointer(db, app, id),
         },
@@ -1467,7 +1469,7 @@ pub(crate) fn commit_upgrade_mode_choice(
     db: &Database,
     session: &SecretSession,
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     app: &AppType,
     target: &PendingTarget,
 ) -> Result<(), AppError> {
@@ -1481,7 +1483,7 @@ pub(crate) fn commit_upgrade_mode_choice(
         &PointerCommit {
             mode_choice: true,
             publish: &|id| {
-                crate::settings::set_current_provider_with_vault(app, Some(id), session, vault)
+                crate::settings::set_current_provider_with_storage(app, Some(id), session, vault)
             },
             verify: &|id| super::current::verify_direct_pointer(db, app, id),
         },
@@ -1540,7 +1542,7 @@ pub(crate) fn target_model_preference(
 fn verify_committed_target(
     db: &Database,
     session: &SecretSession,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     app: &AppType,
     target: &PendingTarget,
     live: &state::LiveState,
@@ -1616,7 +1618,7 @@ fn commit_target_with_pointer(
     db: &Database,
     session: &SecretSession,
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     app: &AppType,
     target: &PendingTarget,
     pointers: &PointerCommit<'_>,
@@ -1811,7 +1813,7 @@ pub(crate) struct PointerRecoveryChecks<'a> {
 pub(crate) fn recover_published_pointer(
     db: &Database,
     store: &DeviceStore,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     guard: &AppWriteGuard,
     app: &AppType,
     checks: &PointerRecoveryChecks<'_>,
@@ -1893,9 +1895,9 @@ pub(crate) fn recover_published_pointer(
 /// Transient checks borrowed by the explicit startup recovery handoff. These
 /// never grant ordinary begin/run admission or persist another operation state.
 type RecoveryAppAdmission<'a> =
-    &'a dyn Fn(&Database, &RwLockReadGuard<'_, VaultContext>) -> Result<(), AppError>;
+    &'a dyn Fn(&Database, &RwLockReadGuard<'_, StorageContext>) -> Result<(), AppError>;
 type RecoveryAppVerification<'a> = &'a dyn Fn(
-    &RwLockReadGuard<'_, VaultContext>,
+    &RwLockReadGuard<'_, StorageContext>,
     &Pending,
     Option<&state::LiveState>,
 ) -> Result<(), AppError>;
@@ -1914,7 +1916,7 @@ pub(crate) struct AppWrite<'a> {
     app: AppType,
     pub(crate) store: DeviceStore,
     pub(crate) guard: AppWriteGuard,
-    pub(crate) vault: RwLockReadGuard<'a, VaultContext>,
+    pub(crate) vault: RwLockReadGuard<'a, StorageContext>,
 }
 impl<'a> AppWrite<'a> {
     pub(crate) fn open(state: &'a AppState, app: &AppType) -> Result<Self, AppError> {

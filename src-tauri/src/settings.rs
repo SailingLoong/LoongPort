@@ -6,7 +6,7 @@ use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard};
 
 use crate::app_config::AppType;
 use crate::error::AppError;
-use crate::secrets::{session::SecretSession, VaultContext};
+use crate::secrets::{session::SecretSession, storage::StorageContext, VaultContext};
 use crate::services::skill::{SkillStorageLocation, SyncMethod};
 
 #[cfg(any(test, feature = "test-hooks"))]
@@ -893,9 +893,7 @@ const PROTECTED_SETTINGS_FIELDS: [&str; 4] =
     ["webdavSync", "s3Sync", "webdavBackup", "upgradeCompletion"];
 
 pub(crate) fn settings_path() -> PathBuf {
-    crate::config::get_home_dir()
-        .join(crate::config::APP_DIR_NAME)
-        .join("settings.json")
+    crate::config::get_device_config_dir().join("settings.json")
 }
 
 fn protected_field_identity(field: &str) -> [&str; 3] {
@@ -937,6 +935,57 @@ pub(crate) fn encode_settings_with_vault(
         *protected = serde_json::Value::String(ciphertext);
     }
     serde_json::to_vec_pretty(&value).map_err(|source| AppError::JsonSerialize { source })
+}
+
+/// Encode through the explicit session-owned storage mode, never by inspecting data.
+pub(crate) fn encode_settings_with_storage(
+    settings: &AppSettings,
+    storage: &StorageContext,
+) -> Result<Vec<u8>, AppError> {
+    if let StorageContext::Encrypted(vault) = storage {
+        return encode_settings_with_vault(settings, vault);
+    }
+    let mut normalized = settings.clone();
+    normalized.normalize_paths();
+    let bytes = serde_json::to_vec_pretty(&normalized)
+        .map_err(|source| AppError::JsonSerialize { source })?;
+    storage
+        .encode_bytes(&["file", "settings.json", "content"], &bytes)
+        .map_err(crate::secrets::error::secret_error)
+}
+
+pub(crate) fn decode_settings_with_storage(
+    bytes: &[u8],
+    storage: &StorageContext,
+) -> Result<AppSettings, AppError> {
+    decode_settings_document_with_storage(bytes, storage).map(|(settings, _)| settings)
+}
+
+fn decode_settings_document_with_storage(
+    bytes: &[u8],
+    storage: &StorageContext,
+) -> Result<(AppSettings, UnownedSettings), AppError> {
+    if let StorageContext::Encrypted(vault) = storage {
+        return decode_settings_document_with_vault(bytes, vault);
+    }
+    // Validate the explicit plaintext context and reject reserved envelope bytes.
+    let plaintext = storage
+        .decode_bytes(&["file", "settings.json", "content"], bytes)
+        .map_err(crate::secrets::error::secret_error)?;
+    let mut value: serde_json::Value = serde_json::from_slice(&plaintext)
+        .map_err(|source| AppError::json("settings.json", source))?;
+    let object = settings_object(&mut value)?;
+    for field in PROTECTED_SETTINGS_FIELDS {
+        if object
+            .get(field)
+            .is_some_and(|value| !value.is_null() && !value.is_object())
+        {
+            return Err(AppError::Config(
+                "protection.encrypted_data_in_plaintext".into(),
+            ));
+        }
+    }
+    project_settings_document(value, bytes)
 }
 
 /// Normal runtime decoding is ciphertext-only for every registered protected field.
@@ -1021,10 +1070,10 @@ const UPGRADE_APP_POINTER_FIELDS: [&str; 4] = [
 /// projection of conflicting app pointers. Selected native reads remain strict.
 fn decode_runtime_settings_document(
     bytes: &[u8],
-    vault: &VaultContext,
+    vault: &StorageContext,
     root: &Path,
 ) -> Result<(AppSettings, UnownedSettings), AppError> {
-    let strict = decode_settings_document_with_vault(bytes, vault);
+    let strict = decode_settings_document_with_storage(bytes, vault);
     if !matches!(&strict, Err(AppError::Json { .. })) {
         return strict;
     }
@@ -1041,13 +1090,19 @@ fn decode_runtime_settings_document(
     if conflicts.is_empty() {
         return strict;
     }
+    // A plaintext document cannot claim the encrypted upgrade checkpoint authority.
+    let StorageContext::Encrypted(encrypted) = vault else {
+        return strict;
+    };
     let device = crate::live::engine::DeviceStore::for_device();
     match crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(&device) {
         Ok(()) => return strict,
         Err(AppError::Config(code)) if code == "upgrade.checkpoint_pending" => {}
         Err(error) => return Err(error),
     }
-    if crate::secrets::upgrade::checkpoint::verified_database_id(root, &device, vault)?.is_none() {
+    if crate::secrets::upgrade::checkpoint::verified_database_id(root, &device, encrypted)?
+        .is_none()
+    {
         return strict;
     }
     let opaque: UnownedSettings = conflicts
@@ -1057,7 +1112,7 @@ fn decode_runtime_settings_document(
     let projected = zeroize::Zeroizing::new(
         serde_json::to_vec(&fields).map_err(|source| AppError::JsonSerialize { source })?,
     );
-    let (settings, mut unowned) = decode_settings_document_with_vault(&projected, vault)?;
+    let (settings, mut unowned) = decode_settings_document_with_storage(&projected, vault)?;
     unowned.extend(opaque);
     Ok((settings, unowned))
 }
@@ -1067,7 +1122,8 @@ pub(crate) fn validate_runtime_settings_with_vault(
     vault: &VaultContext,
     root: &Path,
 ) -> Result<(), AppError> {
-    decode_runtime_settings_document(bytes, vault, root).map(|_| ())
+    decode_runtime_settings_document(bytes, &StorageContext::Encrypted(vault.clone()), root)
+        .map(|_| ())
 }
 
 fn validate_selected_pointer_at(path: &Path, app: &AppType) -> Result<(), AppError> {
@@ -1130,6 +1186,13 @@ fn decode_settings_document_with_vault(
         *protected = serde_json::from_slice(&plaintext)
             .map_err(|_| AppError::Config("secret.invalid_settings_payload".into()))?;
     }
+    project_settings_document(value, bytes)
+}
+
+fn project_settings_document(
+    value: serde_json::Value,
+    bytes: &[u8],
+) -> Result<(AppSettings, UnownedSettings), AppError> {
     let projection: SettingsProjection =
         serde_json::from_value(value).map_err(|source| AppError::json("settings.json", source))?;
     // Classify fields through the original AppSettings serde contract, including
@@ -1182,6 +1245,8 @@ fn clear_protected_settings(settings: &mut AppSettings) {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BootstrapSettings {
     #[serde(default)]
+    pub(crate) language: Option<String>,
+    #[serde(default)]
     pub(crate) silent_startup: bool,
     #[serde(default = "default_minimize_to_tray_on_close")]
     pub(crate) minimize_to_tray_on_close: bool,
@@ -1212,6 +1277,7 @@ pub(crate) struct BootstrapSettings {
 impl BootstrapSettings {
     fn from_settings(settings: &AppSettings) -> Self {
         Self {
+            language: settings.language.clone(),
             silent_startup: settings.silent_startup,
             minimize_to_tray_on_close: settings.minimize_to_tray_on_close,
             receive_beta_updates: settings.receive_beta_updates,
@@ -1230,6 +1296,7 @@ impl BootstrapSettings {
 
     fn into_settings_projection(self) -> AppSettings {
         AppSettings {
+            language: self.language,
             silent_startup: self.silent_startup,
             minimize_to_tray_on_close: self.minimize_to_tray_on_close,
             receive_beta_updates: self.receive_beta_updates,
@@ -1338,6 +1405,9 @@ impl SettingsStore {
     }
 
     fn ready_snapshot(&self) -> Result<AppSettings, AppError> {
+        // Cached full settings still belong to the original credential lifecycle.
+        // Callers may already hold its vault guard; never recursively lock it.
+        self.session.ensure_available()?;
         let state = self.state.read()?;
         if let Some(error) = &state.failure {
             return Err(AppError::Config(error.clone()));
@@ -1365,16 +1435,16 @@ impl SettingsStore {
     /// The caller must supply a guard borrowed from `session`, held for the
     /// whole operation. Never reacquire its read lock: a queued key writer
     /// would otherwise deadlock this already-admitted operation.
-    fn mutate_with_vault<F, T, V>(
+    fn mutate_with_storage<F, T, V>(
         &self,
         session: &SecretSession,
-        vault: &RwLockReadGuard<'_, VaultContext>,
+        vault: &RwLockReadGuard<'_, StorageContext>,
         mutator: F,
         verify: V,
     ) -> Result<T, AppError>
     where
         F: FnOnce(&mut AppSettings) -> T,
-        V: FnOnce(&Path, &VaultContext, &T) -> Result<(), AppError>,
+        V: FnOnce(&Path, &StorageContext, &T) -> Result<(), AppError>,
     {
         if !std::ptr::eq(session, self.session.as_ref()) {
             return Err(AppError::Config("settings.session_mismatch".into()));
@@ -1385,13 +1455,13 @@ impl SettingsStore {
 
     fn mutate_pinned<F, T, V>(
         &self,
-        vault: &RwLockReadGuard<'_, VaultContext>,
+        vault: &RwLockReadGuard<'_, StorageContext>,
         mutator: F,
         verify: V,
     ) -> Result<T, AppError>
     where
         F: FnOnce(&mut AppSettings) -> Result<T, AppError>,
-        V: FnOnce(&Path, &VaultContext, &T) -> Result<(), AppError>,
+        V: FnOnce(&Path, &StorageContext, &T) -> Result<(), AppError>,
     {
         let mut state = self.state.write()?;
         if let Some(error) = &state.failure {
@@ -1416,7 +1486,7 @@ impl SettingsStore {
         let mut next = state.settings.clone();
         let result = mutator(&mut next)?;
         next.normalize_paths();
-        let encoded = encode_settings_with_vault(&next, vault)?;
+        let encoded = encode_settings_with_storage(&next, vault)?;
         let mut fields: UnownedSettings = serde_json::from_slice(&encoded)
             .map_err(|source| AppError::json("settings.json", source))?;
         // A DTO cannot replace an unresolved pointer with a new selection. Its
@@ -1436,12 +1506,12 @@ impl SettingsStore {
         Ok(result)
     }
 
-    fn set_current_provider_with_vault(
+    fn set_current_provider_with_storage(
         &self,
         app_type: &AppType,
         id: Option<&str>,
         session: &SecretSession,
-        vault: &RwLockReadGuard<'_, VaultContext>,
+        vault: &RwLockReadGuard<'_, StorageContext>,
     ) -> Result<(), AppError> {
         if !std::ptr::eq(session, self.session.as_ref()) {
             return Err(AppError::Config("settings.session_mismatch".into()));
@@ -1449,7 +1519,7 @@ impl SettingsStore {
         session.ensure_available()?;
         self.ready_snapshot()?;
         validate_selected_pointer_at(&self.path, app_type)?;
-        self.mutate_with_vault(
+        self.mutate_with_storage(
             session,
             vault,
             |settings| {
@@ -1462,10 +1532,10 @@ impl SettingsStore {
         Ok(())
     }
 
-    fn upgrade_completion_snapshot_with_vault(
+    fn upgrade_completion_snapshot_with_storage(
         &self,
         session: &SecretSession,
-        vault: &RwLockReadGuard<'_, VaultContext>,
+        vault: &RwLockReadGuard<'_, StorageContext>,
     ) -> Result<Option<(UpgradeCompletion, String)>, AppError> {
         if !std::ptr::eq(session, self.session.as_ref()) {
             return Err(AppError::Config("settings.session_mismatch".into()));
@@ -1505,7 +1575,7 @@ impl SettingsStore {
         self.reload_pinned(&vault)
     }
 
-    fn reload_pinned(&self, vault: &VaultContext) -> Result<(), AppError> {
+    fn reload_pinned(&self, vault: &StorageContext) -> Result<(), AppError> {
         let mut state = self.state.write()?;
         let loaded = match fs::read(&self.path) {
             Ok(bytes) => decode_runtime_settings_document(&bytes, vault, self.session.root())
@@ -1698,6 +1768,12 @@ fn prepare_settings_for_frontend(mut settings: AppSettings) -> AppSettings {
     settings
 }
 
+/// Read-only shell projection. Never use this response as an editable settings snapshot.
+pub fn get_bootstrap_settings_for_frontend() -> Result<AppSettings, AppError> {
+    bootstrap_settings()
+        .map(|bootstrap| prepare_settings_for_frontend(bootstrap.into_settings_projection()))
+}
+
 pub fn get_settings_for_frontend() -> Result<AppSettings, AppError> {
     unlocked_settings_store()?
         .ready_snapshot()
@@ -1737,7 +1813,7 @@ pub(crate) fn ensure_stats_install_id() -> Result<String, AppError> {
 
 fn decode_upgrade_completion(
     bytes: &[u8],
-    vault: &VaultContext,
+    vault: &StorageContext,
 ) -> Result<Option<UpgradeCompletion>, AppError> {
     serde_json::from_slice::<crate::mode::unique_keys::UniqueKeys>(bytes)
         .map_err(|source| AppError::json("settings.json", source))?;
@@ -1749,11 +1825,28 @@ fn decode_upgrade_completion(
     else {
         return Ok(None);
     };
-    let ciphertext: String = serde_json::from_str(raw.get())
-        .map_err(|_| AppError::Config("secret.plaintext_settings".into()))?;
-    let plaintext = vault
-        .open(&protected_field_identity("upgradeCompletion"), &ciphertext)
-        .map_err(crate::secrets::inventory::secret_error)?;
+    let plaintext = match vault {
+        StorageContext::Encrypted(encrypted) => {
+            let ciphertext: String = serde_json::from_str(raw.get())
+                .map_err(|_| AppError::Config("secret.plaintext_settings".into()))?;
+            encrypted
+                .open(&protected_field_identity("upgradeCompletion"), &ciphertext)
+                .map_err(crate::secrets::inventory::secret_error)?
+        }
+        StorageContext::Plaintext(_) => {
+            if !raw.get().starts_with('{') {
+                return Err(AppError::Config(
+                    "protection.encrypted_data_in_plaintext".into(),
+                ));
+            }
+            vault
+                .decode_bytes(
+                    &protected_field_identity("upgradeCompletion"),
+                    raw.get().as_bytes(),
+                )
+                .map_err(crate::secrets::error::secret_error)?
+        }
+    };
     let completion: UpgradeCompletion = serde_json::from_slice(&plaintext)
         .map_err(|_| AppError::Config("upgrade.invalid_completion".into()))?;
     if completion.checkpoint_id.trim().is_empty() {
@@ -1764,7 +1857,7 @@ fn decode_upgrade_completion(
 
 fn read_upgrade_completion_at(
     path: &Path,
-    vault: &VaultContext,
+    vault: &StorageContext,
 ) -> Result<Option<UpgradeCompletion>, AppError> {
     match fs::read(path) {
         Ok(bytes) => decode_upgrade_completion(&bytes, vault),
@@ -1774,27 +1867,27 @@ fn read_upgrade_completion_at(
 }
 
 /// Caller supplies its already-held guard from this exact session.
-pub(crate) fn read_upgrade_completion_with_vault(
+pub(crate) fn read_upgrade_completion_with_storage(
     session: &SecretSession,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
 ) -> Result<Option<UpgradeCompletion>, AppError> {
     Ok(unlocked_settings_store()?
-        .upgrade_completion_snapshot_with_vault(session, vault)?
+        .upgrade_completion_snapshot_with_storage(session, vault)?
         .map(|(completion, _)| completion))
 }
 
 /// Establish pause only after the independent archive has been durably verified.
 /// Retrying the same checkpoint never reverses a later explicit sync confirmation.
-pub(crate) fn set_upgrade_completion_with_vault(
+pub(crate) fn set_upgrade_completion_with_storage(
     checkpoint_id: &str,
     session: &SecretSession,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
 ) -> Result<(), AppError> {
     if checkpoint_id.trim().is_empty() {
         return Err(AppError::Config("upgrade.invalid_completion".into()));
     }
     let store = unlocked_settings_store()?;
-    if let Some((existing, _)) = store.upgrade_completion_snapshot_with_vault(session, vault)? {
+    if let Some((existing, _)) = store.upgrade_completion_snapshot_with_storage(session, vault)? {
         return if existing.checkpoint_id == checkpoint_id {
             finalize_upgrade_completion_at(&store.path, vault, &Some(existing))
         } else {
@@ -1825,7 +1918,7 @@ pub(crate) fn set_upgrade_completion_with_vault(
 
 fn finalize_upgrade_completion_at(
     path: &Path,
-    vault: &VaultContext,
+    vault: &StorageContext,
     expected: &Option<UpgradeCompletion>,
 ) -> Result<(), AppError> {
     verify_upgrade_completion_at(path, vault, expected)?;
@@ -1836,7 +1929,7 @@ fn finalize_upgrade_completion_at(
 
 fn verify_upgrade_completion_at(
     path: &Path,
-    vault: &VaultContext,
+    vault: &StorageContext,
     expected: &Option<UpgradeCompletion>,
 ) -> Result<(), AppError> {
     if read_upgrade_completion_at(path, vault)? != *expected {
@@ -1856,12 +1949,12 @@ pub(crate) struct UpgradeSyncReview {
     pub paused: bool,
 }
 
-pub(crate) fn review_upgrade_sync_with_vault(
+pub(crate) fn review_upgrade_sync_with_storage(
     session: &SecretSession,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
 ) -> Result<Option<UpgradeSyncReview>, AppError> {
     Ok(unlocked_settings_store()?
-        .upgrade_completion_snapshot_with_vault(session, vault)?
+        .upgrade_completion_snapshot_with_storage(session, vault)?
         .map(|(completion, revision)| UpgradeSyncReview {
             checkpoint_id: completion.checkpoint_id,
             revision,
@@ -1871,15 +1964,15 @@ pub(crate) fn review_upgrade_sync_with_vault(
 
 /// The startup command owns the user's explicit confirmation choice. Commit
 /// only if this exact checkpoint and authenticated saved document are unchanged.
-pub(crate) fn confirm_upgrade_sync_with_vault(
+pub(crate) fn confirm_upgrade_sync_with_storage(
     expected_id: &str,
     expected_revision: &str,
     session: &SecretSession,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
 ) -> Result<(), AppError> {
     let store = unlocked_settings_store()?;
     let (completion, revision) = store
-        .upgrade_completion_snapshot_with_vault(session, vault)?
+        .upgrade_completion_snapshot_with_storage(session, vault)?
         .ok_or_else(|| AppError::Config("upgrade.completion_required".into()))?;
     if completion.checkpoint_id != expected_id || revision != expected_revision {
         return Err(AppError::Config("upgrade.sync_review_changed".into()));
@@ -1922,7 +2015,7 @@ pub(crate) fn ensure_upgrade_sync_resumed() -> Result<(), AppError> {
     let store = unlocked_settings_store()?;
     let vault = store.session.read()?;
     if store
-        .upgrade_completion_snapshot_with_vault(&store.session, &vault)?
+        .upgrade_completion_snapshot_with_storage(&store.session, &vault)?
         .is_some_and(|(completion, _)| completion.sync_paused)
     {
         return Err(AppError::Config("upgrade.sync_paused".into()));
@@ -2098,6 +2191,13 @@ pub(crate) fn reload_settings_with_vault(
     session: &SecretSession,
     vault: &VaultContext,
 ) -> Result<(), AppError> {
+    reload_settings_with_storage(session, &StorageContext::Encrypted(vault.clone()))
+}
+
+pub(crate) fn reload_settings_with_storage(
+    session: &SecretSession,
+    vault: &StorageContext,
+) -> Result<(), AppError> {
     let store = settings_store()
         .read()?
         .unlocked
@@ -2234,30 +2334,30 @@ pub(crate) fn get_current_provider_ready(app_type: &AppType) -> Result<Option<St
 
 /// Original settings owner exposes only a transient authenticated startup read.
 /// No runtime store/cache is unlocked and no protected bundle is re-encrypted.
-pub(crate) fn read_upgrade_settings_with_vault(
+pub(crate) fn read_upgrade_settings_with_storage(
     app: &AppType,
     session: &SecretSession,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     max_bytes: u64,
 ) -> Result<AppSettings, AppError> {
-    read_app_settings_with_vault(app, session, vault, max_bytes, false)
+    read_app_settings_with_storage(app, session, vault, max_bytes, false)
 }
 
 /// Read current native app inputs through the original unlocked settings owner.
 /// The caller keeps that owner's vault guard; disk facts must match its ready pointer.
-pub(crate) fn read_native_app_settings_with_vault(
+pub(crate) fn read_native_app_settings_with_storage(
     app: &AppType,
     session: &SecretSession,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     max_bytes: u64,
 ) -> Result<AppSettings, AppError> {
-    read_app_settings_with_vault(app, session, vault, max_bytes, true)
+    read_app_settings_with_storage(app, session, vault, max_bytes, true)
 }
 
-fn read_app_settings_with_vault(
+fn read_app_settings_with_storage(
     app: &AppType,
     session: &SecretSession,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     max_bytes: u64,
     native: bool,
 ) -> Result<AppSettings, AppError> {
@@ -2316,7 +2416,7 @@ fn read_app_settings_with_vault(
             let projected = zeroize::Zeroizing::new(
                 serde_json::to_vec(&fields).map_err(|source| AppError::JsonSerialize { source })?,
             );
-            let mut selected = decode_settings_with_vault(&projected, vault)?;
+            let mut selected = decode_settings_with_storage(&projected, vault)?;
             clear_protected_settings(&mut selected);
             selected
         }
@@ -2386,7 +2486,7 @@ fn current_provider_slot<'a>(
 
 fn verify_current_provider_at(
     path: &Path,
-    vault: &VaultContext,
+    vault: &StorageContext,
     app_type: &AppType,
     expected: &Option<String>,
 ) -> Result<(), AppError> {
@@ -2446,14 +2546,14 @@ pub fn set_current_provider(app_type: &AppType, id: Option<&str>) -> Result<(), 
 /// verifies that session belongs to the unlocked store without taking another
 /// key lock. Readback failure leaves the previous cache and returns an error;
 /// the operation journal, not settings, owns recovery of published bytes.
-pub(crate) fn set_current_provider_with_vault(
+pub(crate) fn set_current_provider_with_storage(
     app_type: &AppType,
     id: Option<&str>,
     session: &SecretSession,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
 ) -> Result<(), AppError> {
     let store = unlocked_settings_store()?;
-    store.set_current_provider_with_vault(app_type, id, session, vault)?;
+    store.set_current_provider_with_storage(app_type, id, session, vault)?;
     refresh_bootstrap_from(&store)
 }
 
@@ -2792,13 +2892,13 @@ mod tests {
         fs::create_dir_all(settings_path().parent().unwrap()).unwrap();
         fs::write(
             settings_path(),
-            encode_settings_with_vault(&settings, &vault).unwrap(),
+            encode_settings_with_storage(&settings, &vault).unwrap(),
         )
         .unwrap();
         let bytes = fs::read(settings_path()).unwrap();
         for app in crate::mode::controller::PROXY_APPS {
             let mut selected =
-                read_upgrade_settings_with_vault(&app, &session, &vault, 1024 * 1024).unwrap();
+                read_upgrade_settings_with_storage(&app, &session, &vault, 1024 * 1024).unwrap();
             assert_eq!(
                 current_provider_from_settings(&mut selected, &app),
                 Some(format!("synthetic-{}", app.as_str()))
@@ -2829,7 +2929,7 @@ mod tests {
             let vault = session.read().unwrap();
             encrypt_legacy_settings_with_vault(
                 &serde_json::to_vec(&credential_settings()).unwrap(),
-                &vault,
+                vault.encrypted().unwrap(),
             )
             .unwrap()
         };
@@ -3130,7 +3230,7 @@ mod u03_foreign_settings_tests {
         fs::create_dir_all(settings_path().parent().unwrap()).unwrap();
         fs::write(
             settings_path(),
-            encode_settings_with_vault(&settings, &session.read().unwrap()).unwrap(),
+            encode_settings_with_storage(&settings, &session.read().unwrap()).unwrap(),
         )
         .unwrap();
         write_foreign(FOREIGN);
@@ -3157,7 +3257,7 @@ mod u03_foreign_settings_tests {
         crate::database::Database::create_tables_on_conn(&conn).unwrap();
         crate::database::Database::apply_schema_migrations_on_conn(&conn).unwrap();
         crate::database::loongport_schema::apply(&conn).unwrap();
-        crate::database::vault::stamp(&conn, &session.read().unwrap()).unwrap();
+        crate::database::vault::stamp(&conn, session.read().unwrap().encrypted().unwrap()).unwrap();
         let db = crate::database::Database::from_connection(conn, session);
         assert!(get_effective_current_provider(&db, &AppType::Claude)
             .unwrap()
@@ -3323,18 +3423,18 @@ mod u03_completion_settings_tests {
         let (_home, session) = fixture();
         let vault = session.read().unwrap();
         assert_eq!(
-            read_upgrade_completion_with_vault(&session, &vault).unwrap(),
+            read_upgrade_completion_with_storage(&session, &vault).unwrap(),
             None
         );
-        assert!(set_upgrade_completion_with_vault("", &session, &vault).is_err());
+        assert!(set_upgrade_completion_with_storage("", &session, &vault).is_err());
         assert!(!settings_path().exists());
-        set_upgrade_completion_with_vault(CHECKPOINT, &session, &vault).unwrap();
+        set_upgrade_completion_with_storage(CHECKPOINT, &session, &vault).unwrap();
         let expected = Some(UpgradeCompletion {
             checkpoint_id: CHECKPOINT.into(),
             sync_paused: true,
         });
         assert_eq!(
-            read_upgrade_completion_with_vault(&session, &vault).unwrap(),
+            read_upgrade_completion_with_storage(&session, &vault).unwrap(),
             expected
         );
         let bytes = fs::read(settings_path()).unwrap();
@@ -3342,18 +3442,18 @@ mod u03_completion_settings_tests {
         let raw: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(raw["upgradeCompletion"].is_string());
         assert_eq!(
-            decode_settings_with_vault(&bytes, &vault)
+            decode_settings_with_storage(&bytes, &vault)
                 .unwrap()
                 .upgrade_completion,
             expected
         );
-        set_upgrade_completion_with_vault(CHECKPOINT, &session, &vault).unwrap();
+        set_upgrade_completion_with_storage(CHECKPOINT, &session, &vault).unwrap();
         assert_eq!(
-            read_upgrade_completion_with_vault(&session, &vault).unwrap(),
+            read_upgrade_completion_with_storage(&session, &vault).unwrap(),
             expected
         );
         let before = fs::read(settings_path()).unwrap();
-        assert!(set_upgrade_completion_with_vault(
+        assert!(set_upgrade_completion_with_storage(
             "synthetic-different-checkpoint",
             &session,
             &vault
@@ -3361,7 +3461,7 @@ mod u03_completion_settings_tests {
         .is_err());
         assert_eq!(fs::read(settings_path()).unwrap(), before);
         assert_eq!(
-            read_upgrade_completion_with_vault(&session, &vault).unwrap(),
+            read_upgrade_completion_with_storage(&session, &vault).unwrap(),
             expected
         );
         unlocked_settings_store()
@@ -3369,7 +3469,7 @@ mod u03_completion_settings_tests {
             .reload_pinned(&vault)
             .unwrap();
         assert_eq!(
-            read_upgrade_completion_with_vault(&session, &vault).unwrap(),
+            read_upgrade_completion_with_storage(&session, &vault).unwrap(),
             expected
         );
     }
@@ -3394,7 +3494,7 @@ mod u03_completion_settings_tests {
             .is_none());
         {
             let vault = session.read().unwrap();
-            set_upgrade_completion_with_vault(CHECKPOINT, &session, &vault).unwrap();
+            set_upgrade_completion_with_storage(CHECKPOINT, &session, &vault).unwrap();
         }
         assert!(get_settings().upgrade_completion.is_none());
         assert!(get_settings_for_frontend()
@@ -3405,7 +3505,7 @@ mod u03_completion_settings_tests {
         update_settings(AppSettings::default()).unwrap();
         let vault = session.read().unwrap();
         assert_eq!(
-            read_upgrade_completion_with_vault(&session, &vault).unwrap(),
+            read_upgrade_completion_with_storage(&session, &vault).unwrap(),
             Some(UpgradeCompletion {
                 checkpoint_id: CHECKPOINT.into(),
                 sync_paused: true,
@@ -3418,7 +3518,7 @@ mod u03_completion_settings_tests {
     fn u03_completion_guard_rejects_foreign_session_and_tampered_disk() {
         let (_home, session) = fixture();
         let vault = session.read().unwrap();
-        set_upgrade_completion_with_vault(CHECKPOINT, &session, &vault).unwrap();
+        set_upgrade_completion_with_storage(CHECKPOINT, &session, &vault).unwrap();
         let before = fs::read(settings_path()).unwrap();
         let foreign_session = SecretSession::from_context(
             session.root().to_path_buf(),
@@ -3426,18 +3526,18 @@ mod u03_completion_settings_tests {
         );
         let foreign_vault = foreign_session.read().unwrap();
         assert!(
-            set_upgrade_completion_with_vault(CHECKPOINT, &foreign_session, &foreign_vault)
+            set_upgrade_completion_with_storage(CHECKPOINT, &foreign_session, &foreign_vault)
                 .is_err()
         );
-        assert!(read_upgrade_completion_with_vault(&foreign_session, &foreign_vault).is_err());
+        assert!(read_upgrade_completion_with_storage(&foreign_session, &foreign_vault).is_err());
         assert_eq!(fs::read(settings_path()).unwrap(), before);
         let mut fields: serde_json::Value = serde_json::from_slice(&before).unwrap();
         fields["upgradeCompletion"] =
             serde_json::json!({"checkpointId":CHECKPOINT,"syncPaused":false});
         fs::write(settings_path(), serde_json::to_vec(&fields).unwrap()).unwrap();
         let tampered = fs::read(settings_path()).unwrap();
-        assert!(read_upgrade_completion_with_vault(&session, &vault).is_err());
-        assert!(set_upgrade_completion_with_vault(CHECKPOINT, &session, &vault).is_err());
+        assert!(read_upgrade_completion_with_storage(&session, &vault).is_err());
+        assert!(set_upgrade_completion_with_storage(CHECKPOINT, &session, &vault).is_err());
         assert_eq!(fs::read(settings_path()).unwrap(), tampered);
     }
 
@@ -3454,9 +3554,9 @@ mod u03_completion_settings_tests {
             .mutate(|settings| settings.upgrade_completion = Some(completed.clone()))
             .unwrap();
         let vault = session.read().unwrap();
-        set_upgrade_completion_with_vault(CHECKPOINT, &session, &vault).unwrap();
+        set_upgrade_completion_with_storage(CHECKPOINT, &session, &vault).unwrap();
         assert_eq!(
-            read_upgrade_completion_with_vault(&session, &vault).unwrap(),
+            read_upgrade_completion_with_storage(&session, &vault).unwrap(),
             Some(completed)
         );
     }
@@ -3484,20 +3584,22 @@ mod u03_completion_settings_tests {
     fn u03_sync_review_is_authenticated_read_only_and_confirmation_is_revision_bound() {
         let (_home, session) = fixture();
         let vault = session.read().unwrap();
-        assert!(review_upgrade_sync_with_vault(&session, &vault)
+        assert!(review_upgrade_sync_with_storage(&session, &vault)
             .unwrap()
             .is_none());
-        assert!(confirm_upgrade_sync_with_vault(CHECKPOINT, "missing", &session, &vault).is_err());
-        set_upgrade_completion_with_vault(CHECKPOINT, &session, &vault).unwrap();
+        assert!(
+            confirm_upgrade_sync_with_storage(CHECKPOINT, "missing", &session, &vault).is_err()
+        );
+        set_upgrade_completion_with_storage(CHECKPOINT, &session, &vault).unwrap();
         let before = fs::read(settings_path()).unwrap();
-        let review = review_upgrade_sync_with_vault(&session, &vault)
+        let review = review_upgrade_sync_with_storage(&session, &vault)
             .unwrap()
             .unwrap();
         assert_eq!(review.checkpoint_id, CHECKPOINT);
         assert!(review.paused);
         assert_eq!(review.revision.len(), 64);
         assert_eq!(fs::read(settings_path()).unwrap(), before);
-        assert!(confirm_upgrade_sync_with_vault(
+        assert!(confirm_upgrade_sync_with_storage(
             "synthetic-other",
             &review.revision,
             &session,
@@ -3505,29 +3607,29 @@ mod u03_completion_settings_tests {
         )
         .is_err());
         assert_eq!(fs::read(settings_path()).unwrap(), before);
-        confirm_upgrade_sync_with_vault(CHECKPOINT, &review.revision, &session, &vault).unwrap();
+        confirm_upgrade_sync_with_storage(CHECKPOINT, &review.revision, &session, &vault).unwrap();
         let after = fs::read(settings_path()).unwrap();
         assert_ne!(after, before);
         assert!(
-            !read_upgrade_completion_with_vault(&session, &vault)
+            !read_upgrade_completion_with_storage(&session, &vault)
                 .unwrap()
                 .unwrap()
                 .sync_paused
         );
         assert!(
-            confirm_upgrade_sync_with_vault(CHECKPOINT, &review.revision, &session, &vault)
+            confirm_upgrade_sync_with_storage(CHECKPOINT, &review.revision, &session, &vault)
                 .is_err()
         );
         assert_eq!(fs::read(settings_path()).unwrap(), after);
-        let resumed = review_upgrade_sync_with_vault(&session, &vault)
+        let resumed = review_upgrade_sync_with_storage(&session, &vault)
             .unwrap()
             .unwrap();
         assert!(!resumed.paused);
-        confirm_upgrade_sync_with_vault(CHECKPOINT, &resumed.revision, &session, &vault).unwrap();
+        confirm_upgrade_sync_with_storage(CHECKPOINT, &resumed.revision, &session, &vault).unwrap();
         assert_eq!(fs::read(settings_path()).unwrap(), after);
-        set_upgrade_completion_with_vault(CHECKPOINT, &session, &vault).unwrap();
+        set_upgrade_completion_with_storage(CHECKPOINT, &session, &vault).unwrap();
         assert!(
-            !read_upgrade_completion_with_vault(&session, &vault)
+            !read_upgrade_completion_with_storage(&session, &vault)
                 .unwrap()
                 .unwrap()
                 .sync_paused
@@ -3540,11 +3642,11 @@ mod u03_completion_settings_tests {
         let (_home, session) = fixture();
         {
             let vault = session.read().unwrap();
-            set_upgrade_completion_with_vault(CHECKPOINT, &session, &vault).unwrap();
+            set_upgrade_completion_with_storage(CHECKPOINT, &session, &vault).unwrap();
         }
         let review = {
             let vault = session.read().unwrap();
-            review_upgrade_sync_with_vault(&session, &vault)
+            review_upgrade_sync_with_storage(&session, &vault)
                 .unwrap()
                 .unwrap()
         };
@@ -3552,24 +3654,24 @@ mod u03_completion_settings_tests {
         let vault = session.read().unwrap();
         let changed = fs::read(settings_path()).unwrap();
         assert!(
-            confirm_upgrade_sync_with_vault(CHECKPOINT, &review.revision, &session, &vault)
+            confirm_upgrade_sync_with_storage(CHECKPOINT, &review.revision, &session, &vault)
                 .is_err()
         );
         assert_eq!(fs::read(settings_path()).unwrap(), changed);
-        let review = review_upgrade_sync_with_vault(&session, &vault)
+        let review = review_upgrade_sync_with_storage(&session, &vault)
             .unwrap()
             .unwrap();
-        let settings = decode_settings_with_vault(&changed, &vault).unwrap();
-        let reencrypted = encode_settings_with_vault(&settings, &vault).unwrap();
+        let settings = decode_settings_with_storage(&changed, &vault).unwrap();
+        let reencrypted = encode_settings_with_storage(&settings, &vault).unwrap();
         assert_ne!(changed, reencrypted);
         fs::write(settings_path(), &reencrypted).unwrap();
         assert!(
-            confirm_upgrade_sync_with_vault(CHECKPOINT, &review.revision, &session, &vault)
+            confirm_upgrade_sync_with_storage(CHECKPOINT, &review.revision, &session, &vault)
                 .is_err()
         );
         assert_eq!(fs::read(settings_path()).unwrap(), reencrypted);
         assert!(
-            read_upgrade_completion_with_vault(&session, &vault)
+            read_upgrade_completion_with_storage(&session, &vault)
                 .unwrap()
                 .unwrap()
                 .sync_paused
@@ -3581,7 +3683,7 @@ mod u03_completion_settings_tests {
     fn u03_sync_review_rejects_empty_or_unknown_completion_record() {
         let (_home, session) = fixture();
         let vault = session.read().unwrap();
-        set_upgrade_completion_with_vault(CHECKPOINT, &session, &vault).unwrap();
+        set_upgrade_completion_with_storage(CHECKPOINT, &session, &vault).unwrap();
         let original = fs::read(settings_path()).unwrap();
         for invalid in [
             serde_json::json!({}),
@@ -3599,10 +3701,10 @@ mod u03_completion_settings_tests {
             );
             fs::write(settings_path(), serde_json::to_vec(&fields).unwrap()).unwrap();
             let before = fs::read(settings_path()).unwrap();
-            assert!(read_upgrade_completion_with_vault(&session, &vault).is_err());
-            assert!(review_upgrade_sync_with_vault(&session, &vault).is_err());
+            assert!(read_upgrade_completion_with_storage(&session, &vault).is_err());
+            assert!(review_upgrade_sync_with_storage(&session, &vault).is_err());
             assert!(
-                confirm_upgrade_sync_with_vault(CHECKPOINT, "invalid", &session, &vault).is_err()
+                confirm_upgrade_sync_with_storage(CHECKPOINT, "invalid", &session, &vault).is_err()
             );
             assert_eq!(fs::read(settings_path()).unwrap(), before);
         }
@@ -3619,17 +3721,17 @@ mod u03_completion_settings_tests {
         ensure_upgrade_sync_resumed().unwrap();
         {
             let vault = session.read().unwrap();
-            set_upgrade_completion_with_vault(CHECKPOINT, &session, &vault).unwrap();
+            set_upgrade_completion_with_storage(CHECKPOINT, &session, &vault).unwrap();
         }
         assert!(
             matches!(ensure_upgrade_sync_resumed(), Err(AppError::Config(code)) if code == "upgrade.sync_paused")
         );
         {
             let vault = session.read().unwrap();
-            let review = review_upgrade_sync_with_vault(&session, &vault)
+            let review = review_upgrade_sync_with_storage(&session, &vault)
                 .unwrap()
                 .unwrap();
-            confirm_upgrade_sync_with_vault(CHECKPOINT, &review.revision, &session, &vault)
+            confirm_upgrade_sync_with_storage(CHECKPOINT, &review.revision, &session, &vault)
                 .unwrap();
         }
         ensure_upgrade_sync_resumed().unwrap();
@@ -3684,5 +3786,305 @@ mod mcode_current_tests {
             None
         );
         assert_eq!(db.get_current_provider("mcode").unwrap(), Some(provider.id));
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) mod plaintext_storage_tests {
+    use super::*;
+    use crate::secrets::storage::{PlaintextIdentity, StorageContext};
+
+    fn plaintext() -> StorageContext {
+        StorageContext::Plaintext(PlaintextIdentity {
+            format_version: 1,
+            store_id: "11111111-1111-4111-8111-111111111111".into(),
+            generation_id: "22222222-2222-4222-8222-222222222222".into(),
+            revision: 1,
+        })
+    }
+
+    #[cfg_attr(test, test)]
+    fn plaintext_settings_keep_protected_objects_and_foreign_raw_values() {
+        let storage = plaintext();
+        let original = br#"{"webdavSync":{"baseUrl":"https://sync.example.invalid/dav","username":"synthetic-user","password":"synthetic-canary"},"foreign":{"n":18446744073709551615}}"#;
+        let (settings, unowned) =
+            decode_settings_document_with_storage(original, &storage).unwrap();
+        assert_eq!(
+            settings.webdav_sync.as_ref().unwrap().password,
+            "synthetic-canary"
+        );
+        assert_eq!(unowned["foreign"].get(), "{\"n\":18446744073709551615}");
+        let encoded = encode_settings_with_storage(&settings, &storage).unwrap();
+        let object: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert!(object["webdavSync"].is_object());
+        assert_eq!(object["webdavSync"]["password"], "synthetic-canary");
+    }
+
+    #[cfg_attr(test, test)]
+    fn plaintext_settings_owner_persists_under_the_original_guard_and_preserves_foreign_bytes() {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let operation = std::thread::spawn(move || {
+            let root = tempfile::tempdir().unwrap();
+            let session = SecretSession::from_storage_context(root.path().into(), plaintext());
+            let path = root.path().join("settings.json");
+            fs::write(&path, br#"{"futureSettings":{"n":18446744073709551615}}"#).unwrap();
+            let store = SettingsStore::open_at(path.clone(), session.clone()).unwrap();
+            let guard = session.read().unwrap();
+            let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+            let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+            let writer_session = session.clone();
+            let writer = std::thread::spawn(move || {
+                waiting_tx.send(()).unwrap();
+                let _guard = writer_session.write().unwrap();
+                finished_tx.send(()).unwrap();
+            });
+            waiting_rx
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap();
+            assert!(finished_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err());
+            store
+                .set_current_provider_with_storage(
+                    &AppType::Codex,
+                    Some("synthetic-provider"),
+                    &session,
+                    &guard,
+                )
+                .unwrap();
+            let bytes = fs::read(&path).unwrap();
+            let fields: UnownedSettings = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                fields["futureSettings"].get(),
+                "{\"n\":18446744073709551615}"
+            );
+            assert_eq!(
+                store
+                    .ready_snapshot()
+                    .unwrap()
+                    .current_provider_codex
+                    .as_deref(),
+                Some("synthetic-provider")
+            );
+            assert!(!root.path().join("vault.json").exists());
+            drop(guard);
+            finished_rx
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap();
+            writer.join().unwrap();
+            done_tx.send(()).unwrap();
+        });
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("plaintext publication must not reacquire its held session guard");
+        operation.join().unwrap();
+    }
+
+    #[cfg_attr(test, test)]
+    fn plaintext_settings_owner_does_not_replace_existing_ciphertext_on_read_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let session = SecretSession::from_storage_context(root.path().into(), plaintext());
+        let path = root.path().join("settings.json");
+        let original = br#"{"webdavSync":"lpenc:damaged"}"#;
+        fs::write(&path, original).unwrap();
+        assert!(SettingsStore::open_at(path.clone(), session).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+
+    #[cfg_attr(test, test)]
+    fn plaintext_settings_refuse_ciphertext_and_encrypted_settings_refuse_plaintext() {
+        let plaintext = plaintext();
+        let encrypted = StorageContext::Encrypted(VaultContext::generate().unwrap());
+        let original = br#"{"webdavSync":{"baseUrl":"https://sync.example.invalid/dav","username":"synthetic-user","password":"synthetic-canary"}}"#;
+        let (settings, _) = decode_settings_document_with_storage(original, &plaintext).unwrap();
+        let encrypted_bytes = encode_settings_with_storage(&settings, &encrypted).unwrap();
+        assert!(decode_settings_document_with_storage(&encrypted_bytes, &plaintext).is_err());
+        assert!(decode_settings_document_with_storage(original, &encrypted).is_err());
+        assert!(decode_settings_document_with_storage(
+            br#"{"webdavSync":"lpenc:damaged"}"#,
+            &plaintext
+        )
+        .is_err());
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn run() {
+        plaintext_settings_keep_protected_objects_and_foreign_raw_values();
+        plaintext_settings_owner_persists_under_the_original_guard_and_preserves_foreign_bytes();
+        plaintext_settings_owner_does_not_replace_existing_ciphertext_on_read_failure();
+        plaintext_settings_refuse_ciphertext_and_encrypted_settings_refuse_plaintext();
+    }
+}
+
+/// Byte-only generation conversion; the lifecycle owner supplies the lock and publication.
+pub(crate) fn transcode_settings_with_storage(
+    bytes: &[u8],
+    source: &StorageContext,
+    target: &StorageContext,
+) -> Result<Vec<u8>, AppError> {
+    let source_identity = source.identity();
+    let target_identity = target.identity();
+    if source_identity.store_id() != target_identity.store_id()
+        || source_identity.generation_id() == target_identity.generation_id()
+    {
+        return Err(AppError::Config("protection.invalid_generation".into()));
+    }
+    let plaintext = strict_settings_image_with_storage(bytes, source)?;
+    let encoded = match target {
+        StorageContext::Encrypted(vault) => restore_settings_archive_with_vault(&plaintext, vault)?,
+        StorageContext::Plaintext(_) => target
+            .encode_bytes(&["file", "settings.json", "content"], &plaintext)
+            .map_err(crate::secrets::error::secret_error)?,
+    };
+    // Re-open using the target's original strict owner contract. Compare every
+    // raw field, not an AppSettings serialization that would insert defaults or
+    // discard unknown fields inside protected objects.
+    let verified = strict_settings_image_with_storage(&encoded, target)?;
+    if !settings_archive_images_equal(&plaintext, &verified)? {
+        return Err(AppError::Config(
+            "protection.settings_readback_failed".into(),
+        ));
+    }
+    Ok(encoded)
+}
+
+/// Strict cross-generation image equivalence, owned by the original settings codec.
+/// This compares every raw field without serializing AppSettings defaults.
+pub(crate) fn settings_images_equal_with_storage(
+    left: &[u8],
+    left_context: &StorageContext,
+    right: &[u8],
+    right_context: &StorageContext,
+) -> Result<bool, AppError> {
+    let left = strict_settings_image_with_storage(left, left_context)?;
+    let right = strict_settings_image_with_storage(right, right_context)?;
+    settings_archive_images_equal(&left, &right)
+}
+
+fn settings_archive_images_equal(left: &[u8], right: &[u8]) -> Result<bool, AppError> {
+    let expected: std::collections::BTreeMap<String, &serde_json::value::RawValue> =
+        serde_json::from_slice(left).map_err(|source| AppError::json("settings.json", source))?;
+    let actual: std::collections::BTreeMap<String, &serde_json::value::RawValue> =
+        serde_json::from_slice(right).map_err(|source| AppError::json("settings.json", source))?;
+    Ok(expected.len() == actual.len()
+        && expected.iter().all(|(field, raw)| {
+            actual
+                .get(field)
+                .is_some_and(|readback| readback.get() == raw.get())
+        }))
+}
+
+fn strict_settings_image_with_storage(
+    bytes: &[u8],
+    storage: &StorageContext,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, AppError> {
+    decode_settings_document_with_storage(bytes, storage)?;
+    let plaintext = match storage {
+        StorageContext::Encrypted(vault) => export_settings_archive_with_vault(bytes, vault)?,
+        StorageContext::Plaintext(_) => storage
+            .decode_bytes(&["file", "settings.json", "content"], bytes)
+            .map_err(crate::secrets::error::secret_error)?,
+    };
+    // Include decrypted protected objects in duplicate-key rejection as well.
+    serde_json::from_slice::<crate::mode::unique_keys::UniqueKeys>(&plaintext)
+        .map_err(|source| AppError::json("settings.json", source))?;
+    Ok(plaintext)
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) mod explicit_storage_transcode_tests {
+    use super::*;
+    use crate::secrets::storage::PlaintextIdentity;
+
+    fn plaintext_for(vault: &VaultContext) -> StorageContext {
+        StorageContext::Plaintext(PlaintextIdentity {
+            format_version: 1,
+            store_id: vault.metadata().vault_id.clone(),
+            generation_id: "22222222-2222-4222-8222-222222222222".into(),
+            revision: 1,
+        })
+    }
+
+    fn fields(bytes: &[u8]) -> std::collections::BTreeMap<String, String> {
+        let values: UnownedSettings = serde_json::from_slice(bytes).unwrap();
+        values
+            .into_iter()
+            .map(|(key, raw)| (key, raw.get().to_owned()))
+            .collect()
+    }
+
+    #[cfg_attr(test, test)]
+    fn explicit_storage_settings_transcode_preserves_all_raw_fields_without_default_insertion() {
+        let vault = VaultContext::generate().unwrap();
+        let plain = plaintext_for(&vault);
+        let encrypted = StorageContext::Encrypted(vault);
+        let original = br#"{"webdavSync":{"baseUrl":"https://sync.example.invalid/dav","username":"synthetic-user","password":"synthetic-token","futureInner":{"n":18446744073709551615}},"foreign":{"n":18446744073709551615},"currentProviderCodex":"synthetic-provider","s3Sync":null}"#;
+        let sealed = transcode_settings_with_storage(original, &plain, &encrypted).unwrap();
+        assert!(!String::from_utf8_lossy(&sealed).contains("synthetic-token"));
+        let decoded = decode_settings_with_storage(&sealed, &encrypted).unwrap();
+        assert_eq!(decoded.webdav_sync.unwrap().password, "synthetic-token");
+        let reopened = transcode_settings_with_storage(&sealed, &encrypted, &plain).unwrap();
+        assert_eq!(fields(&reopened), fields(original));
+        assert_eq!(
+            fields(&reopened).len(),
+            4,
+            "AppSettings defaults must not be serialized"
+        );
+    }
+
+    #[cfg_attr(test, test)]
+    fn explicit_storage_settings_transcode_rejects_wrong_source_mode_key_or_duplicate_fields() {
+        let vault = VaultContext::generate().unwrap();
+        let plain = plaintext_for(&vault);
+        let encrypted = StorageContext::Encrypted(vault);
+        let original = br#"{"webdavSync":{"baseUrl":"https://sync.example.invalid/dav","username":"synthetic-user","password":"synthetic-token"}}"#;
+        let sealed = transcode_settings_with_storage(original, &plain, &encrypted).unwrap();
+        assert!(transcode_settings_with_storage(original, &encrypted, &plain).is_err());
+        assert!(transcode_settings_with_storage(&sealed, &plain, &encrypted).is_err());
+        let wrong_key =
+            StorageContext::Encrypted(encrypted.encrypted().unwrap().rotate_key().unwrap());
+        assert!(transcode_settings_with_storage(&sealed, &wrong_key, &plain).is_err());
+        assert!(transcode_settings_with_storage(
+            br#"{"webdavSync":"lpenc:damaged"}"#,
+            &plain,
+            &encrypted
+        )
+        .is_err());
+        assert!(transcode_settings_with_storage(
+            br#"{"foreign":1,"foreign":2}"#,
+            &plain,
+            &encrypted
+        )
+        .is_err());
+    }
+
+    #[cfg_attr(test, test)]
+    fn explicit_storage_settings_transcode_requires_same_store_and_distinct_generation() {
+        let vault = VaultContext::generate().unwrap();
+        let plain = plaintext_for(&vault);
+        let encrypted = StorageContext::Encrypted(vault);
+        assert!(transcode_settings_with_storage(b"{}", &plain, &plain).is_err());
+        let mut other = plain.clone();
+        if let StorageContext::Plaintext(identity) = &mut other {
+            identity.store_id = "33333333-3333-4333-8333-333333333333".into();
+        }
+        assert!(transcode_settings_with_storage(b"{}", &other, &encrypted).is_err());
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn run_case(case: &str) {
+        match case {
+            "settings_transcode_roundtrip" => explicit_storage_settings_transcode_preserves_all_raw_fields_without_default_insertion(),
+            "settings_transcode_strict_source" => explicit_storage_settings_transcode_rejects_wrong_source_mode_key_or_duplicate_fields(),
+            "settings_transcode_generation" => explicit_storage_settings_transcode_requires_same_store_and_distinct_generation(),
+            _ => panic!("unknown explicit storage verification case: {case}"),
+        }
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn run() {
+        run_case("settings_transcode_roundtrip");
+        run_case("settings_transcode_strict_source");
+        run_case("settings_transcode_generation");
     }
 }

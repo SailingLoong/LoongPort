@@ -7,7 +7,7 @@ fn rotation_reencrypts_device_files_for_equal_and_distinct_roots() {
         let device_root = fixture._temporary.path().join(crate::APP_DIR_NAME);
         let old = {
             let current = fixture.db.secrets.read().unwrap();
-            VaultContext::from_key(current.metadata().clone(), current.export_key()).unwrap()
+            VaultContext::from_key(current.encrypted().unwrap().metadata().clone(), current.encrypted().unwrap().export_key()).unwrap()
         };
         let names = [
             "live-state.json".to_owned(),
@@ -37,7 +37,7 @@ fn rotation_reencrypts_device_files_for_equal_and_distinct_roots() {
             let bytes = std::fs::read(device_root.join(name.as_str())).unwrap();
             assert_eq!(
                 &*file
-                    .decode(&next, &bytes)
+                    .decode(next.encrypted().unwrap(), &bytes)
                     .expect("device ciphertext must use the committed generation"),
                 device_plaintext(name)
             );
@@ -79,7 +79,7 @@ fn device_names() -> Vec<String> {
 fn seed_device(fixture: &Fixture) -> (PathBuf, VaultContext, Vec<Vec<u8>>) {
     let root = fixture._temporary.path().join(crate::APP_DIR_NAME);
     let current = fixture.db.secrets.read().unwrap();
-    let old = VaultContext::from_key(current.metadata().clone(), current.export_key()).unwrap();
+    let old = VaultContext::from_key(current.encrypted().unwrap().metadata().clone(), current.encrypted().unwrap().export_key()).unwrap();
     let bytes = device_names()
         .iter()
         .map(|name| {
@@ -301,13 +301,13 @@ fn same_key_install_preserves_device_ciphertext() {
             );
         }
         let next = fixture.db.secrets.read().unwrap();
-        assert_eq!(next.metadata().key_id, old.metadata().key_id);
+        assert_eq!(next.encrypted().unwrap().metadata().key_id, old.metadata().key_id);
         for (name, bytes) in device_names().iter().zip(original) {
             assert_eq!(std::fs::read(root.join(name.as_str())).unwrap(), bytes);
             assert_eq!(
                 &*crate::secrets::owned_file::DeviceFile::registered(name.as_str())
                     .unwrap()
-                    .decode(&next, &bytes)
+                    .decode(next.encrypted().unwrap(), &bytes)
                     .unwrap(),
                 device_plaintext(name.as_str())
             );
@@ -422,7 +422,7 @@ fn device_transition_recovers_at_every_checkpoint() {
                     crate::secrets::owned_file::DeviceFile::registered(name.as_str()).unwrap();
                 let bytes = std::fs::read(root.join(name.as_str())).unwrap();
                 assert_eq!(
-                    &*file.decode(&next, &bytes).unwrap(),
+                    &*file.decode(next.encrypted().unwrap(), &bytes).unwrap(),
                     device_plaintext(name.as_str())
                 );
                 assert!(file.decode(&old, &bytes).is_err());
@@ -450,7 +450,7 @@ fn device_legacy_recovery_refuses_uncaptured_members() {
             seed_device(&fixture).1
         } else {
             let current = fixture.db.secrets.read().unwrap();
-            VaultContext::from_key(current.metadata().clone(), current.export_key()).unwrap()
+            VaultContext::from_key(current.encrypted().unwrap().metadata().clone(), current.encrypted().unwrap().export_key()).unwrap()
         };
         fixture.interrupt(Checkpoint::Intent);
         let (mut intent, next, manifest) = interrupted_manifest(&fixture);
@@ -532,13 +532,13 @@ fn rewrap_leaves_device_ciphertext_identical() {
                 SecretSession::open_existing(&fixture.root, &fixture.store, Some(DEVICE_PASSWORD))
                     .unwrap();
             let next = recovered.read().unwrap();
-            assert_eq!(next.metadata().key_id, old.metadata().key_id);
+            assert_eq!(next.encrypted().unwrap().metadata().key_id, old.metadata().key_id);
             for (name, bytes) in device_names().iter().zip(original) {
                 assert_eq!(std::fs::read(root.join(name.as_str())).unwrap(), bytes);
                 assert_eq!(
                     &*crate::secrets::owned_file::DeviceFile::registered(name.as_str())
                         .unwrap()
-                        .decode(&next, &bytes)
+                        .decode(next.encrypted().unwrap(), &bytes)
                         .unwrap(),
                     device_plaintext(name.as_str())
                 );
@@ -575,7 +575,7 @@ fn device_exact_staged_target_is_valid_interrupted_publication() {
         let file = crate::secrets::owned_file::DeviceFile::registered(name.as_str()).unwrap();
         assert!(file.decode(&old, &bytes).is_err());
         assert_eq!(
-            &*file.decode(&recovered.read().unwrap(), &bytes).unwrap(),
+            &*file.decode(recovered.read().unwrap().encrypted().unwrap(), &bytes).unwrap(),
             device_plaintext(name.as_str())
         );
     }
@@ -725,13 +725,13 @@ fn device_different_vault_generation_install_reseals_local_members() {
     )
     .unwrap();
     let next = fixture.db.secrets.read().unwrap();
-    assert_eq!(*next.metadata(), expected);
-    assert_ne!(next.metadata().vault_id, old.metadata().vault_id);
+    assert_eq!(*next.encrypted().unwrap().metadata(), expected);
+    assert_ne!(next.encrypted().unwrap().metadata().vault_id, old.metadata().vault_id);
     for name in device_names() {
         let file = crate::secrets::owned_file::DeviceFile::registered(name.as_str()).unwrap();
         let bytes = std::fs::read(root.join(name.as_str())).unwrap();
         assert_eq!(
-            &*file.decode(&next, &bytes).unwrap(),
+            &*file.decode(next.encrypted().unwrap(), &bytes).unwrap(),
             device_plaintext(name.as_str())
         );
         assert!(file.decode(&old, &bytes).is_err());
@@ -746,7 +746,7 @@ fn device_explicit_root_is_pinned_for_interrupted_recovery() {
     let device = fixture._temporary.path().join("pinned-device");
     let old = {
         let current = fixture.db.secrets.read().unwrap();
-        VaultContext::from_key(current.metadata().clone(), current.export_key()).unwrap()
+        VaultContext::from_key(current.encrypted().unwrap().metadata().clone(), current.encrypted().unwrap().export_key()).unwrap()
     };
     for name in device_names() {
         let file = crate::secrets::owned_file::DeviceFile::registered(name.as_str()).unwrap();

@@ -1,6 +1,8 @@
 //! Platform key custody. Callers retain recovery material until verified publication.
 
 use zeroize::Zeroizing;
+#[path = "key_store/user_text.rs"]
+pub(crate) mod user_text;
 
 #[derive(Debug, thiserror::Error)]
 pub enum KeyStoreError {
@@ -29,6 +31,11 @@ pub(crate) fn save_verified(
     if key.len() != 32 {
         return Err(KeyStoreError::Verification);
     }
+    save_bytes_verified(store, vault_id, key_id, key)
+}
+
+// A single original OS-write protocol; source-specific authentication stays above it.
+fn save_bytes_verified(store: &dyn KeyStore, vault_id: &str, key_id: &str, key: &[u8]) -> Result<(), KeyStoreError> {
     if let Some(existing) = store.load(vault_id, key_id)? {
         if existing.as_slice() != key {
             return Err(KeyStoreError::Verification);
@@ -40,6 +47,20 @@ pub(crate) fn save_verified(
         Some(stored) if stored.as_slice() == key => Ok(()),
         _ => Err(KeyStoreError::Verification),
     }
+}
+
+/// Store the original UTF-8 text only after it authenticates this exact vault.
+/// A conflicting account is never overwritten and no previous key is removed.
+pub(crate) fn save_user_text_verified(
+    store: &dyn KeyStore,
+    vault: &crate::secrets::VaultContext,
+    text: &str,
+) -> Result<(), KeyStoreError> {
+    let metadata = vault.metadata();
+    crate::secrets::VaultContext::from_user_text(metadata.clone(), text)
+        .map_err(|_| KeyStoreError::Verification)?;
+    let bytes = user_text::encode(text).map_err(|_| KeyStoreError::Verification)?;
+    save_bytes_verified(store, &metadata.vault_id, &metadata.key_id, &bytes)
 }
 
 /// Explicit supported-platform implementation; never use keyring's mock fallback.
@@ -175,5 +196,100 @@ mod tests {
             &**store.load("vault", "key").unwrap().as_ref().unwrap(),
             &[42; 32]
         );
+    }
+}
+
+#[cfg(test)]
+mod user_text_cache_tests {
+    use super::*;
+    use std::sync::Mutex;
+    struct Cache {
+        value: Mutex<Option<Vec<u8>>>,
+        writes: Mutex<usize>,
+        denied: bool,
+        discard: bool,
+    }
+    impl Cache {
+        fn new(value: Option<Vec<u8>>) -> Self {
+            Self {
+                value: Mutex::new(value),
+                writes: Mutex::new(0),
+                denied: false,
+                discard: false,
+            }
+        }
+    }
+    impl KeyStore for Cache {
+        fn load(&self, _: &str, _: &str) -> Result<Option<Zeroizing<Vec<u8>>>, KeyStoreError> {
+            if self.denied {
+                return Err(KeyStoreError::Unavailable);
+            }
+            Ok(self.value.lock().unwrap().clone().map(Zeroizing::new))
+        }
+        fn save(&self, _: &str, _: &str, bytes: &[u8]) -> Result<(), KeyStoreError> {
+            *self.writes.lock().unwrap() += 1;
+            if !self.discard {
+                *self.value.lock().unwrap() = Some(bytes.to_vec());
+            }
+            Ok(())
+        }
+        fn remove(&self, _: &str, _: &str) -> Result<(), KeyStoreError> {
+            panic!("never removes recovery material")
+        }
+    }
+    #[test]
+    fn user_text_cache_stores_exact_text_and_verifies_same_master_without_overwrite() {
+        let text = " 中文🔑 aBc ";
+        let vault = crate::secrets::VaultContext::create_generation_with_user_text(
+            uuid::Uuid::new_v4().to_string(),
+            1,
+            text,
+        )
+        .unwrap();
+        let cache = Cache::new(None);
+        save_user_text_verified(&cache, &vault, text).unwrap();
+        let bytes = cache.value.lock().unwrap().clone().unwrap();
+        assert_eq!(user_text::decode(&bytes).unwrap().as_str(), text);
+        assert_eq!(
+            user_text::authenticate(vault.metadata().clone(), Zeroizing::new(bytes.clone()))
+                .unwrap()
+                .export_key()
+                .as_slice(),
+            vault.export_key().as_slice()
+        );
+        save_user_text_verified(&cache, &vault, text).unwrap();
+        assert_eq!(*cache.writes.lock().unwrap(), 1);
+        assert!(save_user_text_verified(&cache, &vault, "wrong text").is_err());
+        assert_eq!(cache.value.lock().unwrap().as_ref().unwrap(), &bytes);
+        let collision = Cache::new(Some(vec![7; 32]));
+        assert!(save_user_text_verified(&collision, &vault, text).is_err());
+        assert_eq!(*collision.writes.lock().unwrap(), 0);
+        assert_eq!(
+            collision.value.lock().unwrap().as_ref().unwrap(),
+            &vec![7; 32]
+        );
+    }
+    #[test]
+    fn user_text_cache_denial_discard_and_legacy_metadata_never_rewrite_or_downgrade() {
+        let text = " ";
+        let vault = crate::secrets::VaultContext::create_generation_with_user_text(
+            uuid::Uuid::new_v4().to_string(),
+            1,
+            text,
+        )
+        .unwrap();
+        let mut denied = Cache::new(None);
+        denied.denied = true;
+        assert!(save_user_text_verified(&denied, &vault, text).is_err());
+        assert_eq!(*denied.writes.lock().unwrap(), 0);
+        let mut discard = Cache::new(None);
+        discard.discard = true;
+        assert!(save_user_text_verified(&discard, &vault, text).is_err());
+        let legacy =
+            crate::secrets::VaultContext::create_with_user_key(Zeroizing::new(vec![9; 32]))
+                .unwrap();
+        let untouched = Cache::new(None);
+        assert!(save_user_text_verified(&untouched, &legacy, text).is_err());
+        assert_eq!(*untouched.writes.lock().unwrap(), 0);
     }
 }

@@ -33,7 +33,7 @@ impl Fixture {
         // Frozen deployed v24 shape, not a current database with an old stamp.
         conn.execute_batch(include_str!("test_fixtures/authenticated_v24.sql"))
             .unwrap();
-        database::vault::stamp(&conn, &vault).unwrap();
+        database::vault::stamp(&conn, vault.encrypted().unwrap()).unwrap();
         drop(conn);
         if complete {
             session.complete_migration().unwrap();
@@ -42,7 +42,7 @@ impl Fixture {
             root,
             device: DeviceStore::for_device(),
             store,
-            vault,
+            vault: vault.encrypted().unwrap().clone(),
             _app_root: app_root,
             home,
         }
@@ -1120,7 +1120,7 @@ fn upgrade_database_publication_recovers_through_original_generation_boundaries(
         Checkpoint::Keys,
     ] {
         let f = Fixture::with_custom_root(true, boundary == Checkpoint::Database);
-        let vault = std::sync::RwLock::new(f.vault.clone());
+        let vault = std::sync::RwLock::new(crate::secrets::storage::StorageContext::Encrypted(f.vault.clone()));
         crate::mode::state::update(&f.device, &vault.read().unwrap(), |live| {
             live.apps.entry("grok-build".into()).or_default().mode =
                 Some(crate::mode::state::Mode::Direct);
@@ -1532,7 +1532,7 @@ fn upgrade_checkpoint_preserves_credential_generation_until_handoff_finishes() {
     crate::secrets::rewrap::change_password(&db, &f.store, "synthetic-new-password", false)
         .unwrap();
     assert_ne!(
-        db.secret_session().read().unwrap().metadata(),
+        db.secret_session().read().unwrap().encrypted().unwrap().metadata(),
         f.vault.metadata()
     );
     assert_eq!(
@@ -4654,7 +4654,7 @@ fn u03_gemini_retained_checkpoint_admits_actual_native_owner_and_keeps_sync_paus
         assert_eq!(snapshot(f.home.path()), before);
         assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
         assert_eq!(
-            checkpoint::verified_database_id(&f.root, &f.device, &session.read().unwrap()).unwrap(),
+            checkpoint::verified_database_id(&f.root, &f.device, session.read().unwrap().encrypted().unwrap()).unwrap(),
             review.view(&inspected).unwrap().checkpoint_id
         );
     }
@@ -4961,7 +4961,7 @@ fn u03_grok_retained_checkpoint_uses_original_native_and_written_owners() {
         assert_eq!(snapshot(f.home.path()), before);
         assert!(checkpoint::ensure_sync_admitted(&f.device).is_err());
         assert_eq!(
-            checkpoint::verified_database_id(&f.root, &f.device, &session.read().unwrap()).unwrap(),
+            checkpoint::verified_database_id(&f.root, &f.device, session.read().unwrap().encrypted().unwrap()).unwrap(),
             review.view(&inspected).unwrap().checkpoint_id
         );
     }
@@ -5512,7 +5512,7 @@ fn missing_mode_cases(cases: &[(crate::mode::state::Mode, Option<&str>)]) {
                             .unwrap();
                         return;
                     }
-                    let vault = std::sync::RwLock::new(original.clone());
+                    let vault = std::sync::RwLock::new(crate::secrets::storage::StorageContext::Encrypted(original.clone()));
                     state::update_app(&device, &vault.read().unwrap(), "claude", |entry| {
                         if written {
                             entry.written = Some(state::Written::default());
@@ -5665,7 +5665,7 @@ fn missing_mode_cases(cases: &[(crate::mode::state::Mode, Option<&str>)]) {
                 let original = f.vault.clone();
                 crate::mode::operation::failpoint::on_boundary(Some(Box::new(move |point| {
                     if point == "recover:verified" {
-                        let vault = std::sync::RwLock::new(original.clone());
+                        let vault = std::sync::RwLock::new(crate::secrets::storage::StorageContext::Encrypted(original.clone()));
                         state::update_app(&device, &vault.read().unwrap(), "claude", |entry| {
                             entry.proxy_route = Some("a".into());
                             Ok(())
@@ -5822,6 +5822,7 @@ mod native_recovery_tests;
 #[path = "upgrade_attached_recovery_tests.rs"]
 mod attached_recovery_tests;
 
+#[cfg(test)]
 #[path = "upgrade_client_recovery_tests.rs"]
 mod client_recovery_tests;
 
@@ -5906,19 +5907,19 @@ fn u03_completion_archive_survives_original_key_rotation_without_source_key() {
         "lost response retry must not write again (path, lengths, offsets): {changed_bytes:?}"
     );
     assert!(
-        crate::settings::read_upgrade_completion_with_vault(&session, &session.read().unwrap())
+        crate::settings::read_upgrade_completion_with_storage(&session, &session.read().unwrap())
             .unwrap()
             .unwrap()
             .sync_paused
     );
     crate::secrets::rewrap::change_password(&db, &f.store, "synthetic-rewrapped-password", true)
         .unwrap();
-    checkpoint::restored_archive_files(&f.root, &f.device, &session.read().unwrap(), &id).unwrap();
+    checkpoint::restored_archive_files(&f.root, &f.device, session.read().unwrap().encrypted().unwrap(), &id).unwrap();
     crate::secrets::transition::rotate(&db, &f.store, "synthetic-new-archive-password", true)
         .unwrap();
     let current = session.read().unwrap();
-    assert!(current.metadata().key_id != f.vault.metadata().key_id);
-    let restored = checkpoint::restored_archive_files(&f.root, &f.device, &current, &id).unwrap();
+    assert!(current.encrypted().unwrap().metadata().key_id != f.vault.metadata().key_id);
+    let restored = checkpoint::restored_archive_files(&f.root, &f.device, current.encrypted().unwrap(), &id).unwrap();
     assert!(
         restored
             .iter()
@@ -5937,7 +5938,7 @@ fn u03_completion_archive_survives_original_key_rotation_without_source_key() {
         .as_ref()
         .unwrap();
     assert!(
-        crate::settings::decode_settings_with_vault(settings, &current)
+        crate::settings::decode_settings_with_vault(settings, current.encrypted().unwrap())
             .unwrap()
             .webdav_sync
             .unwrap()
@@ -5957,14 +5958,14 @@ fn u03_completion_archive_survives_original_key_rotation_without_source_key() {
     .unwrap();
     assert!(
         descriptor
-            .decode(&current, device_bytes)
+            .decode(current.encrypted().unwrap(), device_bytes)
             .unwrap()
             .as_slice()
             == live
     );
-    let source = checkpoint::archived_database(&f.root, &f.device, &current, &id).unwrap();
+    let source = checkpoint::archived_database(&f.root, &f.device, current.encrypted().unwrap(), &id).unwrap();
     assert_eq!(Database::get_user_version(&source).unwrap(), 17);
-    database::vault::check_identity(&source, &current).unwrap();
+    database::vault::check_identity(&source, current.encrypted().unwrap()).unwrap();
     let rows = Database::get_all_providers_on_connection(&source, &current, "claude").unwrap();
     assert!(
         rows["archive-canary"]
@@ -5975,7 +5976,7 @@ fn u03_completion_archive_survives_original_key_rotation_without_source_key() {
     );
     assert!(checkpoint::restored_archive_files(&f.root, &f.device, &f.vault, &id).is_err());
     assert!(
-        crate::settings::read_upgrade_completion_with_vault(&session, &current)
+        crate::settings::read_upgrade_completion_with_storage(&session, &current)
             .unwrap()
             .unwrap()
             .sync_paused
@@ -5984,7 +5985,7 @@ fn u03_completion_archive_survives_original_key_rotation_without_source_key() {
     let backup_path = f.root.join("backups").join(format!("upgrade_{id}.db"));
     let original_backup = std::fs::read(&backup_path).unwrap();
     for protected in [false, true] {
-        let different = checkpoint::archived_database(&f.root, &f.device, &current, &id).unwrap();
+        let different = checkpoint::archived_database(&f.root, &f.device, current.encrypted().unwrap(), &id).unwrap();
         if protected {
             let replacement = crate::secrets::inventory::seal_db(
                 &current,
@@ -6004,13 +6005,13 @@ fn u03_completion_archive_survives_original_key_rotation_without_source_key() {
                 [],
             ).unwrap();
         }
-        crate::secrets::inventory::validate_database(&different, &current).unwrap();
+        crate::secrets::inventory::validate_database(&different, current.encrypted().unwrap()).unwrap();
         let bytes = different.serialize(rusqlite::MAIN_DB).unwrap().to_vec();
         drop(different);
         crate::config_file_io::write_durable(&backup_path, &bytes).unwrap();
         let before = snapshot(f.home.path());
         assert!(
-            checkpoint::restored_archive_files(&f.root, &f.device, &current, &id).is_err(),
+            checkpoint::restored_archive_files(&f.root, &f.device, current.encrypted().unwrap(), &id).is_err(),
             "same-vault same-version replacement must not become the original recovery snapshot"
         );
         assert!(checkpoint::read_completed_result(&db, &f.device, &current).is_err());
@@ -6240,7 +6241,7 @@ fn native_v28_checkpoint_preserves_clients_until_release_then_migrates_only_live
         .unwrap();
     source.execute_batch("UPDATE loongport_schema_version SET version=28 WHERE id=1; INSERT INTO qoder_campaign_operations VALUES('synthetic-v28-attempt','synthetic-subject','international','synthetic-campaign','synthetic-key',100,200,'synthetic-generation','unknown')").unwrap();
     let sealed = crate::secrets::inventory::seal_db(
-        &f.vault,
+        &f.vault.clone().into(),
         "loongport_client_credentials",
         "secret",
         &["synthetic-v28-credential"],
@@ -6306,7 +6307,7 @@ fn native_v28_checkpoint_preserves_clients_until_release_then_migrates_only_live
         "reopen must preserve the unexpired synthetic request"
     );
     assert_eq!(
-        checkpoint::verified_database_id(&f.root, &f.device, &session.read().unwrap())
+        checkpoint::verified_database_id(&f.root, &f.device, session.read().unwrap().encrypted().unwrap())
             .unwrap()
             .as_deref(),
         Some(id.as_str())
@@ -6331,7 +6332,7 @@ fn native_v28_checkpoint_preserves_clients_until_release_then_migrates_only_live
     let archive_path = f.root.join("backups").join(format!("upgrade_{id}.db"));
     let archive_bytes = std::fs::read(&archive_path).unwrap();
     let archived =
-        checkpoint::archived_database(&f.root, &f.device, &session.read().unwrap(), &id).unwrap();
+        checkpoint::archived_database(&f.root, &f.device, session.read().unwrap().encrypted().unwrap(), &id).unwrap();
     assert_v28(&archived);
     assert_eq!(Database::get_user_version(&archived).unwrap(), 17);
     assert_eq!(
@@ -6360,7 +6361,7 @@ fn native_v28_checkpoint_preserves_clients_until_release_then_migrates_only_live
     drop(live);
     assert_eq!(std::fs::read(&archive_path).unwrap(), archive_bytes);
     let restored =
-        checkpoint::archived_database(&f.root, &f.device, &session.read().unwrap(), &id).unwrap();
+        checkpoint::archived_database(&f.root, &f.device, session.read().unwrap().encrypted().unwrap(), &id).unwrap();
     assert_v28(&restored);
     assert_eq!(
         table_rows(&restored, "loongport_client_credentials"),
@@ -6514,7 +6515,7 @@ fn native_archive_publication_readback_failure_retains_authenticated_recovery() 
     );
     let archived_path = f.device.root().join("upgrade-completed.json");
     let archived = std::fs::read(&archived_path).unwrap();
-    checkpoint::restored_archive_files(&f.root, &f.device, &session.read().unwrap(), &id).unwrap();
+    checkpoint::restored_archive_files(&f.root, &f.device, session.read().unwrap().encrypted().unwrap(), &id).unwrap();
     // A retry still authenticates the installed image; it cannot skip the readback.
     assert!(checkpoint::archive_and_release(
         &db,

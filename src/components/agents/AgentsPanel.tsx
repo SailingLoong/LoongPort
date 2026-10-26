@@ -55,7 +55,9 @@ export function AgentsPanel({}: AgentsPanelProps) {
       if (mounted.current && revision.current === current) setGroups(data);
     } catch {
       if (mounted.current && revision.current === current)
-        setError("无法读取任务，请确认应用已解锁且当前平台受支持。");
+        setError(
+          "当前无法读取任务，已有数据保留。请检查凭据服务是否可用及当前平台是否受支持。",
+        );
     }
   }
   useEffect(() => {

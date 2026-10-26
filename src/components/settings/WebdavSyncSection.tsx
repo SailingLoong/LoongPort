@@ -674,15 +674,7 @@ export function WebdavSyncSection({
           description:
             resumeReview?.paused === true
               ? t("startupUpgrade.completedSyncPaused")
-              : `${t("startupUpgrade.syncPausedReason")} ${t(
-                  "startupUpgrade.syncReviewHint",
-                  {
-                    settings: t("common.settings"),
-                    auth: t("settings.tabAuth"),
-                    protection: t("secrets.protectionTitle"),
-                    review: t("startupUpgrade.reviewApps"),
-                  },
-                )}`,
+              : t("startupUpgrade.syncPausedReason"),
           duration: 10000,
         });
         return;

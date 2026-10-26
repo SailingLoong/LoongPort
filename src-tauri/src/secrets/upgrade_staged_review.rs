@@ -115,7 +115,7 @@ pub(super) fn source_facts(
                 |id| providers.iter().any(|(candidate, _)| candidate == id),
             )
         };
-        let rows = Database::get_all_providers_on_connection(conn, vault, app.as_str())?;
+        let rows = Database::get_all_providers_on_connection(conn, &vault.clone().into(), app.as_str())?;
         let selected = local
             .as_ref()
             .filter(|id| rows.contains_key(*id))

@@ -7,9 +7,7 @@ const LIFETIME: Duration = Duration::from_secs(120);
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct Binding {
     pub vault_root: std::path::PathBuf,
-    pub vault_id: String,
-    pub key_id: String,
-    pub vault_revision: u64,
+    pub storage: crate::secrets::storage::StorageIdentity,
     pub context_revision: String,
     pub catalog_revision: String,
 }
@@ -74,9 +72,7 @@ mod tests {
     fn binding() -> Binding {
         Binding {
             vault_root: "/synthetic/vault".into(),
-            vault_id: "vault".into(),
-            key_id: "key".into(),
-            vault_revision: 1,
+            storage: super::super::synthetic_storage_identity(1),
             context_revision: "context".into(),
             catalog_revision: "catalog".into(),
         }
@@ -98,6 +94,21 @@ mod tests {
         assert!(reviews.take(&id, &b, now + LIFETIME).is_none());
         assert!(reviews.take("unknown", &b, now).is_none());
     }
+    fn changed_storage(
+        identity: &crate::secrets::storage::StorageIdentity,
+        field: u8,
+    ) -> crate::secrets::storage::StorageIdentity {
+        let mut identity = identity.clone();
+        let crate::secrets::storage::StorageIdentity::Plaintext(plain) = &mut identity else {
+            unreachable!()
+        };
+        match field {
+            0 => plain.store_id = "33333333-3333-4333-8333-333333333333".into(),
+            1 => plain.generation_id = "44444444-4444-4444-8444-444444444444".into(),
+            _ => plain.revision += 1,
+        }
+        identity
+    }
     #[test]
     fn every_binding_dimension_invalidates_and_failed_take_consumes() {
         let now = Instant::now();
@@ -108,15 +119,15 @@ mod tests {
                 ..b.clone()
             },
             Binding {
-                vault_id: "other".into(),
+                storage: changed_storage(&b.storage, 0),
                 ..b.clone()
             },
             Binding {
-                key_id: "other".into(),
+                storage: changed_storage(&b.storage, 1),
                 ..b.clone()
             },
             Binding {
-                vault_revision: 2,
+                storage: changed_storage(&b.storage, 2),
                 ..b.clone()
             },
             Binding {

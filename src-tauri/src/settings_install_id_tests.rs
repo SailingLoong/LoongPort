@@ -15,7 +15,7 @@ fn fixture() -> (TestHome, Arc<SecretSession>) {
 }
 
 fn persisted(session: &SecretSession) -> AppSettings {
-    decode_settings_with_vault(
+    decode_settings_with_storage(
         &fs::read(settings_path()).unwrap(),
         &session.read().unwrap(),
     )

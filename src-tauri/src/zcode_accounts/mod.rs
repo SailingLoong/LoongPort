@@ -81,3 +81,17 @@ pub(crate) mod claim_runtime;
 
 #[cfg(any(feature = "gui", test))]
 pub(crate) mod claim_queue;
+
+#[cfg(test)]
+pub(super) fn synthetic_storage_identity(
+    revision: u64,
+) -> crate::secrets::storage::StorageIdentity {
+    crate::secrets::storage::StorageIdentity::Plaintext(
+        crate::secrets::storage::PlaintextIdentity {
+            format_version: 1,
+            store_id: "11111111-1111-4111-8111-111111111111".into(),
+            generation_id: "22222222-2222-4222-8222-222222222222".into(),
+            revision,
+        },
+    )
+}

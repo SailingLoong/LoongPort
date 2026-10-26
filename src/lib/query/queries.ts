@@ -65,23 +65,19 @@ export const useProvidersQuery = (
     // 当代理服务运行时，每 10 秒刷新一次供应商列表
     // 这样可以自动反映后端熔断器自动禁用代理目标的变更
     refetchInterval: isProxyRunning ? 10000 : false,
-    queryFn: async () => {
-      try {
-        return { providers: sortProviders(await providersApi.getAll(appId)) };
-      } catch (error) {
-        console.error("获取供应商列表失败:", error);
-        return { providers: {} };
-      }
-    },
+    queryFn: async () => ({
+      providers: sortProviders(await providersApi.getAll(appId)),
+    }),
   });
 };
 
-export const useSettingsQuery = (): UseQueryResult<
-  Awaited<ReturnType<typeof settingsApi.get>>
-> => {
+export const useSettingsQuery = (options?: {
+  bootstrap?: boolean;
+}): UseQueryResult<Awaited<ReturnType<typeof settingsApi.get>>> => {
   return useQuery({
-    queryKey: ["settings"],
-    queryFn: async () => settingsApi.get(),
+    queryKey: options?.bootstrap ? ["bootstrapSettings"] : ["settings"],
+    queryFn: () =>
+      options?.bootstrap ? settingsApi.getBootstrap() : settingsApi.get(),
   });
 };
 

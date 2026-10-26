@@ -26,7 +26,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::error::AppError;
 use crate::secrets::{
     inventory::{open_db, seal_db},
-    VaultContext,
+    storage::StorageContext,
 };
 use crate::vendor::{Vendor, VendorAccount};
 
@@ -49,7 +49,7 @@ pub struct VendorRow {
 const SELECT_COLS: &str = "id, vendor_id, account_id, account_label, login_identifier,
      auth_token, api_key, sort_index";
 
-fn row_to_vendor(row: &rusqlite::Row<'_>, vault: &VaultContext) -> Result<VendorRow, AppError> {
+fn row_to_vendor(row: &rusqlite::Row<'_>, vault: &StorageContext) -> Result<VendorRow, AppError> {
     let mut account = VendorRow {
         id: row.get(0)?,
         vendor_id: row.get(1)?,
@@ -126,7 +126,7 @@ pub fn create_table(conn: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 
-pub fn list(conn: &Connection, vault: &VaultContext) -> Result<Vec<VendorRow>, AppError> {
+pub fn list(conn: &Connection, vault: &StorageContext) -> Result<Vec<VendorRow>, AppError> {
     let sql = format!("SELECT {SELECT_COLS} FROM loongport_vendor ORDER BY sort_index, id");
     let mut stmt = conn
         .prepare(&sql)
@@ -143,7 +143,7 @@ pub fn list(conn: &Connection, vault: &VaultContext) -> Result<Vec<VendorRow>, A
 
 pub fn get(
     conn: &Connection,
-    vault: &VaultContext,
+    vault: &StorageContext,
     row_id: i64,
 ) -> Result<Option<VendorRow>, AppError> {
     let sql = format!("SELECT {SELECT_COLS} FROM loongport_vendor WHERE id = ?1");
@@ -155,7 +155,7 @@ pub fn get(
 /// 存一个账号（登录成功后调）。同 `(vendor_id, account_id)` 已存在则**更新**。
 pub fn save_account(
     conn: &Connection,
-    vault: &VaultContext,
+    vault: &StorageContext,
     vendor: Vendor,
     token: &str,
     acct: &VendorAccount,
@@ -194,7 +194,7 @@ pub fn save_account(
 
 pub fn set_api_key(
     conn: &Connection,
-    vault: &VaultContext,
+    vault: &StorageContext,
     row_id: i64,
     api_key: &str,
 ) -> Result<(), AppError> {
@@ -275,7 +275,7 @@ mod tests {
     #[test]
     fn encrypted_vendor_insert_rolls_back_allocated_identity_if_update_fails() {
         let conn = setup();
-        let vault = VaultContext::generate().unwrap();
+        let vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         conn.execute_batch("CREATE TRIGGER reject_credential BEFORE UPDATE OF auth_token ON loongport_vendor BEGIN SELECT RAISE(ABORT, 'reject update'); END;").unwrap();
         assert!(save_account(&conn, &vault, Vendor::DeepSeek, "canary", &acct("one")).is_err());
         let count: i64 = conn
@@ -289,7 +289,7 @@ mod tests {
     #[test]
     fn secret_vendor_storage_roundtrips_without_plaintext() {
         let conn = setup();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let id = save_account(
             &conn,
             &_vault,
@@ -317,7 +317,7 @@ mod tests {
     #[test]
     fn encrypted_vendor_credentials_reject_plaintext_and_field_transplant() {
         let conn = setup();
-        let vault = VaultContext::generate().unwrap();
+        let vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let id =
             save_account(&conn, &vault, Vendor::DeepSeek, "auth-secret", &acct("one")).unwrap();
         set_api_key(&conn, &vault, id, "api-secret").unwrap();
@@ -346,7 +346,7 @@ mod tests {
     #[test]
     fn saving_the_same_account_twice_updates_one_row() {
         let conn = setup();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let first = save_account(&conn, &_vault, Vendor::DeepSeek, "tok-1", &acct("uuid-a"))
             .expect("第一次");
         let second = save_account(&conn, &_vault, Vendor::DeepSeek, "tok-2", &acct("uuid-a"))
@@ -365,7 +365,7 @@ mod tests {
     #[test]
     fn two_accounts_of_the_same_vendor_are_separate_rows() {
         let conn = setup();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let a = save_account(&conn, &_vault, Vendor::DeepSeek, "t", &acct("uuid-a")).expect("a");
         let b = save_account(&conn, &_vault, Vendor::DeepSeek, "t", &acct("uuid-b")).expect("b");
         assert_ne!(a, b, "同一厂商的两个账号是两行");
@@ -375,7 +375,7 @@ mod tests {
     #[test]
     fn clearing_the_token_keeps_the_api_key() {
         let conn = setup();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let id =
             save_account(&conn, &_vault, Vendor::DeepSeek, "tok", &acct("uuid-a")).expect("存");
         set_api_key(&conn, &_vault, id, "sk-plaintext").expect("存 key");
@@ -393,7 +393,7 @@ mod tests {
     #[test]
     fn clearing_the_token_keeps_the_login_identifier() {
         let conn = setup();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let id =
             save_account(&conn, &_vault, Vendor::DeepSeek, "tok", &acct("uuid-a")).expect("存");
         clear_token(&conn, id).expect("清");
@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn list_is_ordered_by_sort_index() {
         let conn = setup();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let a = save_account(&conn, &_vault, Vendor::DeepSeek, "t", &acct("uuid-a")).expect("a");
         let b = save_account(&conn, &_vault, Vendor::DeepSeek, "t", &acct("uuid-b")).expect("b");
         conn.execute(
@@ -434,7 +434,7 @@ mod tests {
     #[test]
     fn reorder_writes_the_dragged_order() {
         let conn = setup();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let a = save_account(&conn, &_vault, Vendor::DeepSeek, "t", &acct("uuid-a")).expect("a");
         let b = save_account(&conn, &_vault, Vendor::DeepSeek, "t", &acct("uuid-b")).expect("b");
         let c = save_account(&conn, &_vault, Vendor::DeepSeek, "t", &acct("uuid-c")).expect("c");
@@ -454,7 +454,7 @@ mod tests {
     #[test]
     fn reorder_ignores_ids_that_are_not_in_this_table() {
         let conn = setup();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let a = save_account(&conn, &_vault, Vendor::DeepSeek, "t", &acct("uuid-a")).expect("a");
         let b = save_account(&conn, &_vault, Vendor::DeepSeek, "t", &acct("uuid-b")).expect("b");
 
@@ -471,7 +471,7 @@ mod tests {
     #[test]
     fn removing_a_row_leaves_the_others() {
         let conn = setup();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let a = save_account(&conn, &_vault, Vendor::DeepSeek, "t", &acct("uuid-a")).expect("a");
         let b = save_account(&conn, &_vault, Vendor::DeepSeek, "t", &acct("uuid-b")).expect("b");
         remove(&conn, a).expect("删");
@@ -486,14 +486,14 @@ mod tests {
     #[test]
     fn create_table_is_idempotent() {
         let conn = setup();
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         create_table(&conn).expect("再建一次不该报错");
     }
 
     /// 老库（v20，没有本表）升级后必须有这张表且可写。
     #[test]
     fn an_upgraded_database_gets_the_table() {
-        let _vault = VaultContext::generate().unwrap();
+        let _vault = StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap());
         let conn = Connection::open_in_memory().expect("内存库");
         // 模拟 v20：只建 relay 的表，不建 vendor 的
         crate::relay::creds::create_table(&conn).expect("relay 表");

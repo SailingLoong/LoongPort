@@ -648,8 +648,11 @@ describe("ZCode saved accounts", () => {
       }),
     ).toBeDisabled();
     expect(
-      screen.getByText(/Unlock the local LoongPort vault/),
+      screen.getByText(/Saved credential data is currently unavailable/),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Unlock the local LoongPort vault/),
+    ).not.toBeInTheDocument();
   });
   it("cancels on source change and discards the old query reply", async () => {
     let resolve!: (value: CatalogStatus) => void;
@@ -855,8 +858,11 @@ describe("ZCode saved accounts", () => {
       screen.getByRole("button", { name: "Encrypted backup" }),
     ).toBeDisabled();
     expect(
-      screen.getByText(/Unlock the local LoongPort vault/),
+      screen.getByText(/Saved credential data is currently unavailable/),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Unlock the local LoongPort vault/),
+    ).not.toBeInTheDocument();
   });
   it("edits only a local display label using the reviewed library revision", async () => {
     vi.mocked(zcodeAccountsApi.setLabel).mockResolvedValue({

@@ -8,6 +8,7 @@ import { relayApi, type SwitchTierCommandResult } from "@/lib/api/relay";
 import type { ProviderCatalogDecision } from "@/lib/api/providers";
 import { applicationRoutingApi } from "@/lib/api/applicationRouting";
 import { vendorApi } from "@/lib/api/vendor";
+import { credentialProtectionKey } from "@/lib/api/credentialProtection";
 import { serviceOnboardingApi } from "@/lib/api/serviceOnboarding";
 import { applicationOverviewApi } from "@/lib/api/applicationOverview";
 import { extractErrorMessage } from "@/utils/errorUtils";
@@ -281,6 +282,7 @@ export function useServiceConfiguration(
         await serviceOnboardingApi.complete(shareData);
       await Promise.all([
         client.invalidateQueries({ queryKey: serviceOnboardingKey }),
+        client.invalidateQueries({ queryKey: credentialProtectionKey }),
         client.invalidateQueries({ queryKey: ["settings"] }),
       ]);
       if (isActive()) onDone();

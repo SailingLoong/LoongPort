@@ -35,6 +35,13 @@ pub(crate) struct WrappedKey {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct UserTextKey {
+    pub format_version: u32,
+    pub kdf: KdfParameters,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct VaultMetadata {
     pub format_version: u32,
     pub algorithm: String,
@@ -43,6 +50,8 @@ pub(crate) struct VaultMetadata {
     pub revision: u64,
     pub verifier: EncryptedPayload,
     pub wrapped_key: Option<WrappedKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_text_key: Option<UserTextKey>,
 }
 
 #[derive(Clone)]
@@ -74,7 +83,34 @@ struct ValueEnvelope {
     payload: EncryptedPayload,
 }
 
+impl UserTextKey {
+    fn validate(&self) -> Result<(), SecretError> {
+        if self.format_version != 1 {
+            return Err(SecretError::UnsupportedFormat);
+        }
+        self.kdf.validate()?;
+        if self.kdf.memory_kib != 64 * 1024
+            || self.kdf.iterations != 3
+            || self.kdf.parallelism != 1
+            || URL_SAFE_NO_PAD
+                .decode(&self.kdf.salt)
+                .map_err(|_| SecretError::InvalidMetadata)?
+                .len()
+                != 16
+        {
+            return Err(SecretError::InvalidMetadata);
+        }
+        Ok(())
+    }
+}
+
 impl VaultMetadata {
+    /// Portable recovery eligibility belongs to the same metadata owner as authentication.
+    pub(crate) fn recovery_input_available(&self) -> Result<bool, SecretError> {
+        self.validate()?;
+        Ok(self.user_text_key.is_some() || self.wrapped_key.is_some())
+    }
+
     pub(crate) fn validate(&self) -> Result<(), SecretError> {
         if self.format_version != FORMAT_VERSION || self.algorithm != ALGORITHM {
             return Err(SecretError::UnsupportedFormat);
@@ -87,6 +123,9 @@ impl VaultMetadata {
         }
         if self.revision == 0 {
             return Err(SecretError::InvalidMetadata);
+        }
+        if let Some(source) = &self.user_text_key {
+            source.validate()?;
         }
         validate_metadata_payload(&self.verifier, VERIFIER.len() + 16)?;
         if let Some(wrapped) = &self.wrapped_key {
@@ -141,7 +180,91 @@ impl KdfParameters {
     }
 }
 
+pub(crate) fn parse_user_key_hex(encoded: &str) -> Result<Zeroizing<Vec<u8>>, SecretError> {
+    if encoded.len() != 64 || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(SecretError::InvalidKeyLength);
+    }
+    let mut key = Zeroizing::new(vec![0; 32]);
+    hex::decode_to_slice(encoded, &mut *key).map_err(|_| SecretError::InvalidKeyLength)?;
+    Ok(key)
+}
+
 impl VaultContext {
+    /// One descriptor-driven user-input authentication boundary. The exact UTF-8
+    /// input is never normalized and a failed text source never falls back to a wrapper.
+    pub(crate) fn from_recovery_input(metadata: VaultMetadata, original: &str) -> Result<Self, SecretError> {
+        metadata.validate()?;
+        if metadata.user_text_key.is_some() {
+            Self::from_user_text(metadata, original)
+        } else {
+            Self::from_password(metadata, original)
+        }
+    }
+
+    pub(crate) fn create_generation_with_user_text(
+        store_id: String,
+        revision: u64,
+        text: &str,
+    ) -> Result<Self, SecretError> {
+        if text.is_empty() {
+            return Err(SecretError::UserTextRequired);
+        }
+        let descriptor = UserTextKey {
+            format_version: 1,
+            kdf: KdfParameters {
+                algorithm: "argon2id".into(),
+                version: 19,
+                memory_kib: 64 * 1024,
+                iterations: 3,
+                parallelism: 1,
+                salt: URL_SAFE_NO_PAD.encode(random_bytes::<16>()?),
+            },
+        };
+        // The user's exact UTF-8 text directly determines the master key.
+        // Randomness here is a public salt/identity/nonce, never a random master.
+        let key = descriptor.kdf.derive(text)?;
+        Self::new_with_source(store_id, revision, key, Some(descriptor))
+    }
+    pub(crate) fn from_user_text(metadata: VaultMetadata, text: &str) -> Result<Self, SecretError> {
+        if text.is_empty() {
+            return Err(SecretError::UserTextRequired);
+        }
+        metadata.validate()?;
+        let descriptor = metadata
+            .user_text_key
+            .as_ref()
+            .ok_or(SecretError::UserTextUnavailable)?;
+        let key = descriptor.kdf.derive(text)?;
+        Self::from_key(metadata, key)
+    }
+
+    pub(crate) fn create_generation_with_user_key(
+        store_id: String,
+        revision: u64,
+        key: Zeroizing<Vec<u8>>,
+    ) -> Result<Self, SecretError> {
+        Self::new_with_key(store_id, revision, key)
+    }
+
+    pub(crate) fn create_with_user_key(key: Zeroizing<Vec<u8>>) -> Result<Self, SecretError> {
+        if key.len() != 32 {
+            return Err(SecretError::InvalidKeyLength);
+        }
+        Self::new_with_key(random_id()?, 1, key)
+    }
+
+    pub(crate) fn replace_with_user_key(
+        &self,
+        key: Zeroizing<Vec<u8>>,
+    ) -> Result<Self, SecretError> {
+        let revision = self
+            .metadata
+            .revision
+            .checked_add(1)
+            .ok_or(SecretError::InvalidMetadata)?;
+        Self::new_with_key(self.metadata.vault_id.clone(), revision, key)
+    }
+
     pub(crate) fn generate() -> Result<Self, SecretError> {
         Self::new_with_random_key(random_id()?, 1)
     }
@@ -149,6 +272,26 @@ impl VaultContext {
     fn new_with_random_key(vault_id: String, revision: u64) -> Result<Self, SecretError> {
         let mut key = Zeroizing::new(vec![0; 32]);
         getrandom::fill(&mut key).map_err(|_| SecretError::RandomUnavailable)?;
+        Self::new_with_key(vault_id, revision, key)
+    }
+
+    fn new_with_key(
+        vault_id: String,
+        revision: u64,
+        key: Zeroizing<Vec<u8>>,
+    ) -> Result<Self, SecretError> {
+        Self::new_with_source(vault_id, revision, key, None)
+    }
+
+    fn new_with_source(
+        vault_id: String,
+        revision: u64,
+        key: Zeroizing<Vec<u8>>,
+        user_text_key: Option<UserTextKey>,
+    ) -> Result<Self, SecretError> {
+        if key.len() != 32 {
+            return Err(SecretError::InvalidKeyLength);
+        }
         let mut metadata = VaultMetadata {
             format_version: FORMAT_VERSION,
             algorithm: ALGORITHM.into(),
@@ -160,8 +303,10 @@ impl VaultContext {
                 ciphertext: String::new(),
             },
             wrapped_key: None,
+            user_text_key,
         };
         metadata.verifier = encrypt(&key, &verifier_aad(&metadata)?, VERIFIER)?;
+        metadata.validate()?;
         Ok(Self { metadata, key })
     }
 
@@ -269,6 +414,9 @@ impl VaultContext {
     /// The lifecycle owner must migrate protected values before publishing this context.
     /// The previous password wrapper belongs to the old key and is not carried forward.
     pub(crate) fn rotate_key(&self) -> Result<Self, SecretError> {
+        if self.metadata.user_text_key.is_some() {
+            return Err(SecretError::GenerationOwnerRequired);
+        }
         let revision = self
             .metadata
             .revision
@@ -313,6 +461,19 @@ fn value_aad(metadata: &VaultMetadata, identity: &[&str]) -> Result<Vec<u8>, Sec
 }
 
 fn verifier_aad(metadata: &VaultMetadata) -> Result<Vec<u8>, SecretError> {
+    if let Some(source) = &metadata.user_text_key {
+        return serde_json::to_vec(&(
+            "loongport.user-text-key-verifier",
+            metadata.format_version,
+            &metadata.algorithm,
+            &metadata.vault_id,
+            &metadata.key_id,
+            metadata.revision,
+            source,
+        ))
+        .map_err(|_| SecretError::InvalidMetadata);
+    }
+
     serde_json::to_vec(&(
         "loongport.key-verifier",
         metadata.format_version,
@@ -689,5 +850,165 @@ mod tests {
             VaultContext::from_password(modified, PASSWORD).unwrap_err(),
             SecretError::PasswordRejected
         );
+    }
+}
+
+#[cfg(test)]
+mod user_key_tests {
+    use super::*;
+    #[test]
+    fn strict_hex_parser_uses_exact_user_material_without_normalizing_input() {
+        let key = "01aB".repeat(16);
+        let parsed = parse_user_key_hex(&key).unwrap();
+        assert_eq!(&*parsed, &hex::decode(&key).unwrap());
+        for invalid in [
+            "".into(),
+            "x".repeat(64),
+            "0".repeat(63),
+            "0".repeat(65),
+            format!(" {}", "0".repeat(64)),
+            "é".repeat(32),
+        ] {
+            assert!(parse_user_key_hex(&invalid).is_err());
+        }
+    }
+    #[test]
+    fn user_key_is_master_key_not_password_around_a_random_master() {
+        let input = Zeroizing::new(vec![0x2a; 32]);
+        let vault = VaultContext::create_with_user_key(input.clone()).unwrap();
+        assert_eq!(&*vault.export_key(), &*input);
+        assert!(vault.metadata().wrapped_key.is_none());
+        let opened = VaultContext::from_key(vault.metadata().clone(), input).unwrap();
+        let cipher = vault.seal(&["test"], b"synthetic-credential").unwrap();
+        assert_eq!(
+            &*opened.open(&["test"], &cipher).unwrap(),
+            b"synthetic-credential"
+        );
+        assert!(
+            VaultContext::from_key(vault.metadata().clone(), Zeroizing::new(vec![0x2b; 32]))
+                .is_err()
+        );
+        for len in [0, 1, 31, 33, 64] {
+            assert!(VaultContext::create_with_user_key(Zeroizing::new(vec![0; len])).is_err());
+        }
+    }
+    #[test]
+    fn user_rekey_preserves_store_identity_but_not_generation_or_old_decryption() {
+        let old = VaultContext::create_with_user_key(Zeroizing::new(vec![1; 32])).unwrap();
+        let old_cipher = old.seal(&["old"], b"preserved-old-data").unwrap();
+        let next = old
+            .replace_with_user_key(Zeroizing::new(vec![2; 32]))
+            .unwrap();
+        assert_eq!(old.metadata().vault_id, next.metadata().vault_id);
+        assert_ne!(old.metadata().key_id, next.metadata().key_id);
+        assert_eq!(next.metadata().revision, old.metadata().revision + 1);
+        assert_eq!(&*next.export_key(), &[2; 32]);
+        assert!(next.open(&["old"], &old_cipher).is_err());
+        assert_eq!(
+            &*old.open(&["old"], &old_cipher).unwrap(),
+            b"preserved-old-data"
+        );
+    }
+    #[test]
+    fn explicit_store_generation_accepts_only_canonical_identity_and_exact_user_key() {
+        let store = "11111111-1111-4111-8111-111111111111";
+        let key = Zeroizing::new(vec![23; 32]);
+        let next =
+            VaultContext::create_generation_with_user_key(store.into(), 2, key.clone()).unwrap();
+        assert_eq!(next.metadata().vault_id, store);
+        assert_eq!(next.metadata().revision, 2);
+        assert_eq!(&*next.export_key(), &*key);
+        assert!(next.metadata().wrapped_key.is_none());
+        for id in [
+            "invalid",
+            "00000000-0000-0000-0000-000000000000",
+            "11111111111141118111111111111111",
+        ] {
+            assert!(
+                VaultContext::create_generation_with_user_key(id.into(), 2, key.clone()).is_err()
+            );
+        }
+        assert!(
+            VaultContext::create_generation_with_user_key(store.into(), 0, key.clone()).is_err()
+        );
+        assert!(VaultContext::create_generation_with_user_key(
+            store.into(),
+            2,
+            Zeroizing::new(vec![23; 31])
+        )
+        .is_err());
+    }
+}
+
+#[cfg(test)]
+mod user_text_tests {
+    use super::*;
+    const STORE: &str = "11111111-1111-4111-8111-111111111111";
+    #[test]
+    fn exact_unicode_text_is_the_master_source_and_cache_reopen_keeps_salt() {
+        let text = "  中文 e\u{301} 🔐 Ab7  ";
+        let vault = VaultContext::create_generation_with_user_text(STORE.into(), 2, text).unwrap();
+        let descriptor = vault.metadata().user_text_key.as_ref().unwrap();
+        assert_eq!(descriptor.format_version, 1);
+        assert_eq!(&*descriptor.kdf.derive(text).unwrap(), &*vault.export_key());
+        assert!(vault.metadata().wrapped_key.is_none());
+        let bytes = serde_json::to_vec(vault.metadata()).unwrap();
+        assert!(!String::from_utf8(bytes.clone()).unwrap().contains(text));
+        let cached = crate::secrets::key_store::user_text::encode(text).unwrap();
+        let recovered = crate::secrets::key_store::user_text::decode(&cached).unwrap();
+        assert_eq!(&*recovered, text);
+        let reopened =
+            VaultContext::from_user_text(serde_json::from_slice(&bytes).unwrap(), &recovered)
+                .unwrap();
+        assert_eq!(&*reopened.export_key(), &*vault.export_key());
+        assert_eq!(serde_json::to_vec(reopened.metadata()).unwrap(), bytes);
+        assert!(VaultContext::from_user_text(vault.metadata().clone(), text.trim()).is_err());
+    }
+    #[test]
+    fn no_length_or_character_strength_policy_is_applied_to_nonempty_text() {
+        for text in ["7", " "] {
+            let vault =
+                VaultContext::create_generation_with_user_text(STORE.into(), 1, text).unwrap();
+            let reopened = VaultContext::from_user_text(vault.metadata().clone(), text).unwrap();
+            assert_eq!(&*reopened.export_key(), &*vault.export_key());
+        }
+        assert!(VaultContext::create_generation_with_user_text(STORE.into(), 1, "").is_err());
+    }
+    #[test]
+    fn text_never_guesses_legacy_raw_key_from_shape_and_legacy_metadata_stays_legacy() {
+        let text = "aB".repeat(32);
+        let vault = VaultContext::create_generation_with_user_text(STORE.into(), 1, &text).unwrap();
+        assert_ne!(&*vault.export_key(), &hex::decode(&text).unwrap());
+        let legacy = VaultContext::create_generation_with_user_key(
+            STORE.into(),
+            1,
+            Zeroizing::new(vec![3; 32]),
+        )
+        .unwrap();
+        assert!(legacy.metadata().user_text_key.is_none());
+        assert!(VaultContext::from_user_text(legacy.metadata().clone(), &"03".repeat(32)).is_err());
+        assert!(VaultContext::from_key(legacy.metadata().clone(), legacy.export_key()).is_ok());
+        assert!(!serde_json::to_string(legacy.metadata())
+            .unwrap()
+            .contains("userTextKey"));
+    }
+}
+
+#[cfg(test)]
+mod user_text_rotation_tests {
+    use super::*;
+    #[test]
+    fn user_text_mode_cannot_be_replaced_by_legacy_random_rotation() {
+        let vault =
+            VaultContext::create_generation_with_user_text(random_id().unwrap(), 1, "x").unwrap();
+        let metadata = vault.metadata().clone();
+        let key = vault.export_key();
+        assert!(vault.rotate_key().is_err());
+        assert_eq!(vault.metadata(), &metadata);
+        assert_eq!(vault.export_key().as_slice(), key.as_slice());
+        VaultContext::new_with_key(random_id().unwrap(), 1, Zeroizing::new(vec![4; 32]))
+            .unwrap()
+            .rotate_key()
+            .unwrap();
     }
 }

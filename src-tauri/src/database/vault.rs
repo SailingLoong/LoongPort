@@ -39,7 +39,7 @@ pub(crate) fn preflight_runtime(path: &Path) -> Result<(), AppError> {
     result
 }
 
-pub(crate) fn preflight_connection(conn: &Connection) -> Result<(), AppError> {
+pub(crate) fn preflight_structure(conn: &Connection) -> Result<(), AppError> {
     if Database::get_user_version(conn)? > super::SCHEMA_VERSION
         || is_prefork_relic(conn)?
         || super::loongport_schema::read_stored_version(conn)?
@@ -57,6 +57,19 @@ pub(crate) fn preflight_connection(conn: &Connection) -> Result<(), AppError> {
     if super::loongport_schema::read_stored_version(conn)? >= 26 {
         crate::database::dao::qoder_campaign_operations::read_rows(conn)?;
     }
+    Ok(())
+}
+
+fn reject_plaintext_identity(conn: &Connection) -> Result<(), AppError> {
+    if super::storage_identity::stored(conn)?.is_some() {
+        return Err(AppError::Config("protection.plaintext_data_present".into()));
+    }
+    Ok(())
+}
+
+pub(crate) fn preflight_connection(conn: &Connection) -> Result<(), AppError> {
+    preflight_structure(conn)?;
+    reject_plaintext_identity(conn)?;
     if super::loongport_schema::read_stored_version(conn)? >= 24 && stored_metadata(conn)?.is_none()
     {
         return Err(AppError::Config("secret.metadata_missing".into()));
@@ -84,6 +97,7 @@ pub(crate) fn stored_metadata(
 }
 
 pub(crate) fn check_identity(conn: &Connection, vault: &VaultContext) -> Result<(), AppError> {
+    reject_plaintext_identity(conn)?;
     let metadata = stored_metadata(conn)?
         .ok_or_else(|| AppError::Config("secret.migration_required".into()))?;
     if &metadata != vault.metadata() {
@@ -93,6 +107,7 @@ pub(crate) fn check_identity(conn: &Connection, vault: &VaultContext) -> Result<
 }
 
 pub(crate) fn stamp(conn: &Connection, vault: &VaultContext) -> Result<(), AppError> {
+    reject_plaintext_identity(conn)?;
     create_schema(conn)?;
     let metadata = serde_json::to_string(vault.metadata())
         .map_err(|_| AppError::Config("secret.invalid_metadata".into()))?;
@@ -122,6 +137,7 @@ pub(crate) fn upgrade_staging_for_target(
     vault: &VaultContext,
     target: i32,
 ) -> Result<(), AppError> {
+    reject_plaintext_identity(conn)?;
     if Database::get_user_version(conn)? > super::SCHEMA_VERSION
         || is_prefork_relic(conn)?
         || super::loongport_schema::read_stored_version(conn)?
@@ -542,7 +558,7 @@ mod tests {
         let stage = dir.path().join(".vault-migration.db");
         let vault = VaultContext::generate().unwrap();
         let conn = prepare(&path, &vault).unwrap();
-        let encrypted = crate::secrets::inventory::seal_db(
+        let encrypted = crate::secrets::inventory::seal_encrypted_db(
             &vault,
             "settings",
             "value",
@@ -610,7 +626,7 @@ mod tests {
         let raw: String = migrated
             .query_row("SELECT settings_config FROM providers", [], |r| r.get(0))
             .unwrap();
-        let value = crate::secrets::inventory::open_db(
+        let value = crate::secrets::inventory::open_encrypted_db(
             &vault,
             "providers",
             "settings_config",

@@ -220,7 +220,7 @@ impl Lease {
         let a = &self.snapshot.account;
         let correlation = hex::encode(Sha256::digest(
             serde_json::to_vec(&(
-                &self.snapshot.binding.vault.vault_id,
+                self.snapshot.binding.vault.store_id(),
                 &a.id,
                 a.generation,
                 &self.request_session,

@@ -1,5 +1,6 @@
 //! App-local recovery inside the original authenticated startup owner. A DB
 //! checkpoint is not app completion; these queries never authorize runtime.
+use crate::secrets::storage::StorageContext;
 use super::*;
 use crate::proxy::providers::codex_oauth_auth::CodexLiveAuthGuard;
 use crate::{
@@ -242,16 +243,16 @@ impl AuthenticatedUpgrade {
     fn app_settings(
         &self,
         app: &AppType,
-        vault: &RwLockReadGuard<'_, VaultContext>,
+        vault: &RwLockReadGuard<'_, StorageContext>,
     ) -> Result<crate::settings::AppSettings, AppError> {
-        match crate::settings::read_upgrade_settings_with_vault(
+        match crate::settings::read_upgrade_settings_with_storage(
             app,
             &self.session,
             vault,
             checkpoint::MAX_BYTES,
         ) {
             Err(AppError::Config(code)) if code == "settings.already_unlocked" => {
-                crate::settings::read_native_app_settings_with_vault(
+                crate::settings::read_native_app_settings_with_storage(
                     app,
                     &self.session,
                     vault,
@@ -301,7 +302,7 @@ impl AuthenticatedUpgrade {
     fn capture_app(
         &self,
         app: &AppType,
-        vault: &RwLockReadGuard<'_, VaultContext>,
+        vault: &RwLockReadGuard<'_, StorageContext>,
     ) -> Result<AppCapture, AppError> {
         self.capture_app_with_state(app, vault, None)
     }
@@ -309,7 +310,7 @@ impl AuthenticatedUpgrade {
     fn capture_app_with_state(
         &self,
         app: &AppType,
-        vault: &RwLockReadGuard<'_, VaultContext>,
+        vault: &RwLockReadGuard<'_, StorageContext>,
         pinned_state: Option<&crate::mode::state::LiveState>,
     ) -> Result<AppCapture, AppError> {
         self.capture_recovery_app(app, vault, pinned_state, false)
@@ -318,7 +319,7 @@ impl AuthenticatedUpgrade {
     fn capture_recovery_app(
         &self,
         app: &AppType,
-        vault: &RwLockReadGuard<'_, VaultContext>,
+        vault: &RwLockReadGuard<'_, StorageContext>,
         pinned_state: Option<&crate::mode::state::LiveState>,
         include_listener: bool,
     ) -> Result<AppCapture, AppError> {
@@ -339,7 +340,7 @@ impl AuthenticatedUpgrade {
     fn capture_app_with_generation(
         &self,
         app: &AppType,
-        vault: &RwLockReadGuard<'_, VaultContext>,
+        vault: &RwLockReadGuard<'_, StorageContext>,
         pinned_state: Option<&crate::mode::state::LiveState>,
         generation: Option<&CodexLiveAuthGuard<'_>>,
     ) -> Result<AppCapture, AppError> {
@@ -375,13 +376,13 @@ impl AuthenticatedUpgrade {
         self.verify_app_session(inspected, token, app)?;
         let result = {
             let vault = self.session.read()?;
-            self.verify_app_checkpoint_pinned(inspected, &vault)?;
+            self.verify_app_checkpoint_pinned(inspected, vault.encrypted()?)?;
             let first = self.capture_app_with_generation(app, &vault, None, generation)?;
             let second = self.capture_app_with_generation(app, &vault, None, generation)?;
             if first.view.revision != second.view.revision {
                 return Err(source_changed());
             }
-            self.verify_app_checkpoint_pinned(inspected, &vault)?;
+            self.verify_app_checkpoint_pinned(inspected, vault.encrypted()?)?;
             second
         };
         self.verify(inspected)?;
@@ -401,7 +402,7 @@ impl AuthenticatedUpgrade {
         self.verify_app_session(inspected, token, app)?;
         let capture = || {
             let vault = self.session.read()?;
-            self.verify_app_checkpoint_pinned(inspected, &vault)?;
+            self.verify_app_checkpoint_pinned(inspected, vault.encrypted()?)?;
             capture_app_with_state(
                 &self.device,
                 &self.session,
@@ -606,7 +607,7 @@ impl AuthenticatedUpgrade {
                         id,
                         &mut |boundary| {
                             if boundary == checkpoint::CompletionBoundary::BeforeRelease {
-                                self.verify_app_checkpoint_pinned(inspected, &vault)?;
+                                self.verify_app_checkpoint_pinned(inspected, vault.encrypted()?)?;
                                 for (app, before) in [
                                     AppType::Claude,
                                     AppType::Codex,
@@ -632,7 +633,7 @@ impl AuthenticatedUpgrade {
                                     }
                                     Self::verify_completion_listener(&capture, state)?;
                                 }
-                                self.verify_app_checkpoint_pinned(inspected, &vault)?;
+                                self.verify_app_checkpoint_pinned(inspected, vault.encrypted()?)?;
                             }
                             Ok(())
                         },
@@ -836,7 +837,7 @@ impl AuthenticatedUpgrade {
         }
         {
             let vault = self.session.read()?;
-            self.verify_app_checkpoint_pinned(inspected, &vault)?;
+            self.verify_app_checkpoint_pinned(inspected, vault.encrypted()?)?;
             let path = self.root.join(crate::config::DB_FILE_NAME);
             inspection::verify_primary_identity(&path, &captured.identity)?;
             {
@@ -845,7 +846,7 @@ impl AuthenticatedUpgrade {
             }
             // Refresh the original runtime owner under this same Vault guard.
             // Fresh unrelated settings must survive the selected pointer write.
-            crate::settings::reload_settings_with_vault(&self.session, &vault)?;
+            crate::settings::reload_settings_with_vault(&self.session, vault.encrypted()?)?;
             if self
                 .capture_app_with_generation(app, &vault, None, generation)?
                 .view
@@ -903,7 +904,7 @@ impl AuthenticatedUpgrade {
                 Ok(())
             };
             let verify_cleanup = |live: &crate::mode::state::LiveState| {
-                self.verify_app_checkpoint_pinned(inspected, &vault)?;
+                self.verify_app_checkpoint_pinned(inspected, vault.encrypted()?)?;
                 inspection::verify_primary_identity(&path, &captured.identity)?;
                 {
                     let conn = state.db.conn.lock()?;
@@ -926,7 +927,7 @@ impl AuthenticatedUpgrade {
                 {
                     return Err(source_changed());
                 }
-                self.verify_app_checkpoint_pinned(inspected, &vault)
+                self.verify_app_checkpoint_pinned(inspected, vault.encrypted()?)
             };
             operation::run_checked(
                 &self.device,
@@ -940,7 +941,7 @@ impl AuthenticatedUpgrade {
                         if actual != &target {
                             return Err(source_changed());
                         }
-                        self.verify_app_checkpoint_pinned(inspected, &vault)?;
+                        self.verify_app_checkpoint_pinned(inspected, vault.encrypted()?)?;
                         inspection::verify_primary_identity(&path, &captured.identity)?;
                         operation::failpoint::hit("upgrade:provider_target")?;
                         if target.state.is_some() {
@@ -954,7 +955,7 @@ impl AuthenticatedUpgrade {
                         };
                         commit(&state.db, &self.session, &self.device, &vault, app, actual)?;
                         verify_provider()?;
-                        self.verify_app_checkpoint_pinned(inspected, &vault)
+                        self.verify_app_checkpoint_pinned(inspected, vault.encrypted()?)
                     },
                     before_cleanup: target.state.as_ref().map(|_| {
                         &verify_cleanup
@@ -1056,11 +1057,11 @@ impl AuthenticatedUpgrade {
             // Codex owns manager -> app -> vault lock order. Keep the service
             // switch lock, but release this query guard before entering it.
             drop(guard);
-            let verify_identity = |db: &Database, vault: &RwLockReadGuard<'_, VaultContext>| {
+            let verify_identity = |db: &Database, vault: &RwLockReadGuard<'_, StorageContext>| {
                 if !std::sync::Arc::ptr_eq(&db.secrets, &self.session) {
                     return Err(source_changed());
                 }
-                self.verify_app_checkpoint_pinned(inspected, vault)?;
+                self.verify_app_checkpoint_pinned(inspected, vault.encrypted()?)?;
                 let path = self.root.join(crate::config::DB_FILE_NAME);
                 inspection::verify_primary_identity(&path, &captured.identity)?;
                 inspection::verify_connection_primary_identity(
@@ -1094,7 +1095,7 @@ impl AuthenticatedUpgrade {
                 }
                 Ok(())
             };
-            let admit = |db: &Database, vault: &RwLockReadGuard<'_, VaultContext>| {
+            let admit = |db: &Database, vault: &RwLockReadGuard<'_, StorageContext>| {
                 verify_identity(db, vault)?;
                 verify_listener()?;
                 let actual = self.capture_app(app, vault)?;
@@ -1116,7 +1117,7 @@ impl AuthenticatedUpgrade {
                 }
                 verify_identity(db, vault)
             };
-            let verify = |vault: &RwLockReadGuard<'_, VaultContext>,
+            let verify = |vault: &RwLockReadGuard<'_, StorageContext>,
                           current: &crate::mode::state::Pending,
                           live: Option<&crate::mode::state::LiveState>| {
                 verify_identity(&state.db, vault)?;
@@ -1222,7 +1223,7 @@ impl AuthenticatedUpgrade {
     ) -> Result<UpgradeAppReview, AppError> {
         {
             let vault = self.session.read()?;
-            self.verify_app_checkpoint_pinned(inspected, &vault)?;
+            self.verify_app_checkpoint_pinned(inspected, vault.encrypted()?)?;
             let path = self.root.join(crate::config::DB_FILE_NAME);
             crate::mode::operation::failpoint::hit("recover:database_open")?;
             let reopened = if runtime.is_none() {
@@ -1246,7 +1247,7 @@ impl AuthenticatedUpgrade {
                 inspection::verify_connection_primary_identity(&conn, &captured.identity)?;
             }
             let runtime_ready = runtime.is_some()
-                && crate::settings::read_native_app_settings_with_vault(
+                && crate::settings::read_native_app_settings_with_storage(
                     app,
                     &self.session,
                     &vault,
@@ -1254,13 +1255,13 @@ impl AuthenticatedUpgrade {
                 )
                 .is_ok();
             if runtime_ready {
-                crate::settings::reload_settings_with_vault(&self.session, &vault)?;
+                crate::settings::reload_settings_with_vault(&self.session, vault.encrypted()?)?;
             }
             let publish_pointer = |id: &str| {
                 if !runtime_ready {
                     return Err(source_changed());
                 }
-                crate::settings::set_current_provider_with_vault(
+                crate::settings::set_current_provider_with_storage(
                     app,
                     Some(id),
                     &self.session,
@@ -1268,7 +1269,7 @@ impl AuthenticatedUpgrade {
                 )
             };
             let before = || {
-                self.verify_app_checkpoint_pinned(inspected, &vault)?;
+                self.verify_app_checkpoint_pinned(inspected, vault.encrypted()?)?;
                 if self
                     .capture_app_with_generation(app, &vault, None, generation)?
                     .view
@@ -1281,7 +1282,7 @@ impl AuthenticatedUpgrade {
             };
             let pointer = |id: &str| {
                 inspection::verify_primary_identity(&path, &captured.identity)?;
-                self.verify_app_checkpoint_pinned(inspected, &vault)?;
+                self.verify_app_checkpoint_pinned(inspected, vault.encrypted()?)?;
                 let mut settings = self.app_settings(app, &vault)?;
                 if crate::settings::current_provider_from_settings(&mut settings, app).as_deref()
                     != Some(id)
@@ -1295,7 +1296,7 @@ impl AuthenticatedUpgrade {
                 Ok(())
             };
             let after = || {
-                self.verify_app_checkpoint_pinned(inspected, &vault)?;
+                self.verify_app_checkpoint_pinned(inspected, vault.encrypted()?)?;
                 inspection::verify_primary_identity(&path, &captured.identity)?;
                 let actual = self.capture_app_with_generation(app, &vault, None, generation)?;
                 if captured.finalized_revision.as_ref() != Some(&actual.view.revision) {
@@ -1319,14 +1320,14 @@ impl AuthenticatedUpgrade {
                         .then_some(&publish_pointer as &dyn Fn(&str) -> Result<(), AppError>),
                     after_target: &after,
                     before_cleanup: &|live| {
-                        self.verify_app_checkpoint_pinned(inspected, &vault)?;
+                        self.verify_app_checkpoint_pinned(inspected, vault.encrypted()?)?;
                         inspection::verify_primary_identity(&path, &captured.identity)?;
                         let actual =
                             self.capture_app_with_generation(app, &vault, Some(live), generation)?;
                         if captured.finalized_revision.as_ref() != Some(&actual.view.revision) {
                             return Err(source_changed());
                         }
-                        self.verify_app_checkpoint_pinned(inspected, &vault)?;
+                        self.verify_app_checkpoint_pinned(inspected, vault.encrypted()?)?;
                         inspection::verify_primary_identity(&path, &captured.identity)
                     },
                 },
@@ -1348,7 +1349,7 @@ fn capture_app_with_state(
     session: &std::sync::Arc<crate::secrets::session::SecretSession>,
     token: &str,
     app: &AppType,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     pinned_state: Option<&crate::mode::state::LiveState>,
     mut settings: crate::settings::AppSettings,
     include_listener: bool,
@@ -1647,7 +1648,7 @@ fn capture_app_with_state(
     let forward_pointer_proven = target_native_proven
         && (mode_target_matches || detached_mode_verified)
         && preference.as_ref().is_none_or(String::is_empty)
-        && crate::settings::read_native_app_settings_with_vault(
+        && crate::settings::read_native_app_settings_with_storage(
             app,
             session,
             vault,
@@ -1683,7 +1684,7 @@ fn capture_app_with_state(
                     || pending.target.routing_order.is_some()
                     || pending.target.state.is_some())
                 && operation::validate_pending(app.as_str(), pending, &admitted).is_ok()
-                && crate::settings::read_native_app_settings_with_vault(
+                && crate::settings::read_native_app_settings_with_storage(
                     app,
                     session,
                     vault,
@@ -1989,7 +1990,7 @@ pub(crate) fn ensure_native_app_write_admitted(
     db: &Database,
     device: &DeviceStore,
     app: &AppType,
-    vault: &RwLockReadGuard<'_, VaultContext>,
+    vault: &RwLockReadGuard<'_, StorageContext>,
     generation: Option<&CodexLiveAuthGuard<'_>>,
 ) -> Result<(), AppError> {
     match checkpoint::ensure_no_pending_checkpoint(device) {
@@ -2006,13 +2007,13 @@ pub(crate) fn ensure_native_app_write_admitted(
         if conn.path().map(Path::new) != Some(root.join(crate::config::DB_FILE_NAME).as_path()) {
             return Err(source_changed());
         }
-        crate::database::vault::check_identity(&conn, vault)?;
+        crate::database::vault::check_identity(&conn, vault.encrypted()?)?;
     }
     let checkpoint_path = device.root().join(checkpoint::FILE);
     let revision = inspection::file_revision(&checkpoint_path)?;
-    let id = checkpoint::verified_database_id(root, device, vault)?
+    let id = checkpoint::verified_database_id(root, device, vault.encrypted()?)?
         .ok_or_else(|| AppError::Config("upgrade.migration_required".into()))?;
-    let settings = crate::settings::read_native_app_settings_with_vault(
+    let settings = crate::settings::read_native_app_settings_with_storage(
         app,
         &db.secrets,
         vault,
@@ -2032,7 +2033,7 @@ pub(crate) fn ensure_native_app_write_admitted(
     if !first.view.can_complete_app {
         return Err(AppError::Config("mode.verification_required".into()));
     }
-    let settings = crate::settings::read_native_app_settings_with_vault(
+    let settings = crate::settings::read_native_app_settings_with_storage(
         app,
         &db.secrets,
         vault,
@@ -2056,7 +2057,7 @@ pub(crate) fn ensure_native_app_write_admitted(
         let conn = db.conn.lock()?;
         inspection::verify_connection_primary_identity(&conn, &second.identity)?;
     }
-    if checkpoint::verified_database_id(root, device, vault)?.as_deref() != Some(id.as_str()) {
+    if checkpoint::verified_database_id(root, device, vault.encrypted()?)?.as_deref() != Some(id.as_str()) {
         return Err(source_changed());
     }
     inspection::verify_unchanged(&checkpoint_path, &revision)

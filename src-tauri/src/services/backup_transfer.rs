@@ -13,7 +13,11 @@ pub(crate) fn restore_sql(
     password: Option<&str>,
     store: &dyn KeyStore,
 ) -> Result<String, AppError> {
-    let current = db.secrets.read()?.clone();
+    // The legacy installer cannot publish a protection-aware generation. Check
+    // its existing admission before source preparation or a safety-copy write.
+    crate::secrets::transition::ensure_legacy_generation_owner(db.secrets.root())?;
+    let current = db.secrets.read()?.encrypted()?.clone();
+    crate::secrets::transition::ensure_legacy_metadata(current.metadata())?;
     let incoming = db.prepare_backup_content(sql, password, &current)?;
     let automatic_unlock = read_metadata(db.secrets.root())?.automatic_unlock;
     let _skills = skill_state_write_guard();
@@ -75,7 +79,7 @@ mod tests {
         let session = SecretSession::open(&home.root(), store, None).unwrap();
         let conn = crate::database::vault::prepare(
             &home.root().join(crate::config::DB_FILE_NAME),
-            &session.read().unwrap(),
+            session.read().unwrap().encrypted().unwrap(),
         )
         .unwrap();
         session.complete_migration().unwrap();
@@ -124,13 +128,23 @@ mod tests {
         let sql = portable_sql(&home);
         let store = MemoryKeyStore::default();
         let db = local(&home, &store);
-        let before = db.secrets.read().unwrap().metadata().clone();
+        let before = db
+            .secrets
+            .read()
+            .unwrap()
+            .encrypted()
+            .unwrap()
+            .metadata()
+            .clone();
         CredentialFile::Codex
             .write(&db.secrets, br#"{"token":"local-signin-canary"}"#)
             .unwrap();
         let safety = restore_sql(&db, &sql, Some("backup source password"), &store).unwrap();
         assert!(!safety.is_empty());
-        assert_eq!(db.secrets.read().unwrap().metadata(), &before);
+        assert_eq!(
+            db.secrets.read().unwrap().encrypted().unwrap().metadata(),
+            &before
+        );
         let provider = db
             .get_provider_by_id("restored-provider", "claude")
             .unwrap()
@@ -141,7 +155,10 @@ mod tests {
             .unwrap()
             .contains("local-signin-canary"));
         let reopened = SecretSession::open_existing(&home.root(), &store, None).unwrap();
-        assert_eq!(reopened.read().unwrap().metadata(), &before);
+        assert_eq!(
+            reopened.read().unwrap().encrypted().unwrap().metadata(),
+            &before
+        );
     }
 
     #[test]
@@ -185,12 +202,26 @@ mod tests {
         crate::secrets::transition::rotate(&db, &store, "first backup password", true).unwrap();
         db.set_setting("common_config_claude", "retired-key-content")
             .unwrap();
-        let previous = db.secrets.read().unwrap().metadata().clone();
+        let previous = db
+            .secrets
+            .read()
+            .unwrap()
+            .encrypted()
+            .unwrap()
+            .metadata()
+            .clone();
         let path = home.temporary.path().join("retained-backup.sql");
         db.export_sql(&path).unwrap();
         let sql = std::fs::read_to_string(path).unwrap();
         crate::secrets::transition::rotate(&db, &store, "current device password", true).unwrap();
-        let current = db.secrets.read().unwrap().metadata().clone();
+        let current = db
+            .secrets
+            .read()
+            .unwrap()
+            .encrypted()
+            .unwrap()
+            .metadata()
+            .clone();
         assert!(store
             .load(&previous.vault_id, &previous.key_id)
             .unwrap()
@@ -200,7 +231,10 @@ mod tests {
 
         restore_sql(&db, &sql, Some("first backup password"), &store).unwrap();
 
-        assert_eq!(db.secrets.read().unwrap().metadata(), &current);
+        assert_eq!(
+            db.secrets.read().unwrap().encrypted().unwrap().metadata(),
+            &current
+        );
         assert_eq!(
             db.get_setting("common_config_claude").unwrap().as_deref(),
             Some("retired-key-content")
@@ -223,7 +257,14 @@ mod tests {
             if receiver_version == 20 {
                 Database::apply_upstream4_migrations_on_conn(&db.conn.lock().unwrap()).unwrap();
             }
-            let original_metadata = db.secrets.read().unwrap().metadata().clone();
+            let original_metadata = db
+                .secrets
+                .read()
+                .unwrap()
+                .encrypted()
+                .unwrap()
+                .metadata()
+                .clone();
             CredentialFile::Codex
                 .write(&db.secrets, br#"{"token":"retained-local-token"}"#)
                 .unwrap();
@@ -273,7 +314,10 @@ mod tests {
                 Database::get_user_version(&db.conn.lock().unwrap()).unwrap(),
                 receiver_version
             );
-            assert_eq!(db.secrets.read().unwrap().metadata(), &original_metadata);
+            assert_eq!(
+                db.secrets.read().unwrap().encrypted().unwrap().metadata(),
+                &original_metadata
+            );
             assert_eq!(
                 &**CredentialFile::Codex.read(&db.secrets).unwrap().unwrap(),
                 br#"{"token":"retained-local-token"}"#

@@ -13,3 +13,6 @@ mod tests;
 
 #[cfg(test)]
 mod lifecycle_tests;
+
+#[cfg(any(test, feature = "test-hooks"))]
+mod test_fixtures;

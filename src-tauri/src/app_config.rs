@@ -737,15 +737,16 @@ impl MultiAppConfig {
         if existing {
             let current = std::fs::read(file.path(session))
                 .map_err(|e| AppError::io(file.path(session), e))?;
-            let plaintext = file.decode(&vault, &current)?;
+            let plaintext = file.decode_storage(&vault, &current)?;
             let backup = OwnedFile::registered("config.json.bak")?;
-            let ciphertext = backup.encode(&vault, &plaintext)?;
+            let ciphertext = backup.encode_storage(&vault, &plaintext)?;
+            crate::secrets::files::ensure_plaintext_destination(&vault, &backup.path(session))?;
             crate::secrets::session::write_durable(&backup.path(session), &ciphertext)?;
         }
         let plaintext = zeroize::Zeroizing::new(
             serde_json::to_vec_pretty(self).map_err(|e| AppError::JsonSerialize { source: e })?,
         );
-        let ciphertext = file.encode(&vault, &plaintext)?;
+        let ciphertext = file.encode_storage(&vault, &plaintext)?;
         crate::secrets::session::write_durable(&file.path(session), &ciphertext)
     }
 

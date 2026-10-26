@@ -38,6 +38,7 @@ import { settingsApi } from "@/lib/api";
 import { applicationRoutingApi } from "@/lib/api/applicationRouting";
 import { LanguageSettings } from "@/components/settings/LanguageSettings";
 import { ThemeSettings } from "@/components/settings/ThemeSettings";
+import { CredentialProtectionPanel } from "@/components/relay/CredentialProtectionPanel";
 import { WindowSettings } from "@/components/settings/WindowSettings";
 import { AppVisibilitySettings } from "@/components/settings/AppVisibilitySettings";
 import { TerminalSettings } from "@/components/settings/TerminalSettings";
@@ -49,7 +50,6 @@ import { BackupListSection } from "@/components/settings/BackupListSection";
 import { WebdavSyncSection } from "@/components/settings/WebdavSyncSection";
 import { AboutSection } from "@/components/settings/AboutSection";
 import { ConnectionSettingsTabContent } from "@/components/settings/ConnectionSettingsTabContent";
-import { SecretProtectionSettings } from "@/components/settings/SecretProtectionSettings";
 import { RectifierConfigPanel } from "@/components/settings/RectifierConfigPanel";
 import { GlobalProxySettings } from "@/components/settings/GlobalProxySettings";
 import { ConnectivityCheckConfigPanel } from "@/components/usage/ConnectivityCheckConfigPanel";
@@ -140,6 +140,7 @@ export function SettingsPage({
   });
   const manageAccountsRef = useRef(onManageAccounts);
   manageAccountsRef.current = onManageAccounts;
+  const [showStorageProtection, setShowStorageProtection] = useState(false);
   const [activeTab, setActiveTab] = useState<string>("general");
   const [showRestartPrompt, setShowRestartPrompt] = useState(false);
   const tabScrollContainerRef = useRef<HTMLDivElement>(null);
@@ -147,7 +148,11 @@ export function SettingsPage({
   useEffect(() => {
     if (open) {
       if (defaultTab === "auth") manageAccountsRef.current?.();
-      setActiveTab(defaultTab === "auth" ? "general" : defaultTab);
+      setActiveTab(
+        defaultTab === "auth" || defaultTab === "security"
+          ? "general"
+          : defaultTab,
+      );
       resetStatus();
     }
   }, [open, resetStatus, defaultTab]);
@@ -258,15 +263,12 @@ export function SettingsPage({
           onValueChange={setActiveTab}
           className="flex flex-col h-full"
         >
-          <TabsList className="grid w-full mb-6 shrink-0 grid-cols-5">
+          <TabsList className="grid w-full mb-6 shrink-0 grid-cols-4">
             <TabsTrigger value="general">
               {t("settings.tabGeneral")}
             </TabsTrigger>
             <TabsTrigger value="proxy">
               {t("settings.tabConnection", { defaultValue: "连接设置" })}
-            </TabsTrigger>
-            <TabsTrigger value="security">
-              {t("secrets.protectionTitle")}
             </TabsTrigger>
             <TabsTrigger value="advanced">
               {t("settings.tabAdvanced")}
@@ -287,6 +289,24 @@ export function SettingsPage({
                       onChange={(lang) => handleAutoSave({ language: lang })}
                     />
                     <ThemeSettings />
+                    <div className="space-y-4">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        aria-expanded={showStorageProtection}
+                        aria-controls="settings-storage-protection"
+                        onClick={() =>
+                          setShowStorageProtection((visible) => !visible)
+                        }
+                      >
+                        {t("storageProtection.manage")}
+                      </Button>
+                      {showStorageProtection && (
+                        <div id="settings-storage-protection">
+                          <CredentialProtectionPanel />
+                        </div>
+                      )}
+                    </div>
                     <AppVisibilitySettings
                       settings={settings}
                       onChange={handleAutoSave}
@@ -345,12 +365,6 @@ export function SettingsPage({
                     onAutoSave={handleAutoSave}
                   />
                 ) : null}
-              </TabsContent>
-
-              <TabsContent value="security" className="space-y-6 mt-0 pb-4">
-                <div className="space-y-6">
-                  <SecretProtectionSettings />
-                </div>
               </TabsContent>
 
               <TabsContent value="advanced" className="space-y-6 mt-0 pb-4">

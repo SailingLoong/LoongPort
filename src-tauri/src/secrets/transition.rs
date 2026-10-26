@@ -133,6 +133,24 @@ fn invalid() -> AppError {
 fn db_error(error: rusqlite::Error) -> AppError {
     AppError::Database(error.to_string())
 }
+
+/// Legacy generation publishers do not own the durable protection choice.
+/// Reuse its strict reader: malformed records must never become "missing".
+pub(crate) fn ensure_legacy_generation_owner(root: &Path) -> Result<(), AppError> {
+    if super::protection::read(root)?.is_some() {
+        return Err(AppError::Config("protection.generation_owner_required".into()));
+    }
+    Ok(())
+}
+
+/// User-text generations require the protection-aware publication owner even
+/// when a legacy destination has not yet acquired a protection record.
+pub(crate) fn ensure_legacy_metadata(metadata: &super::VaultMetadata) -> Result<(), AppError> {
+    if metadata.user_text_key.is_some() {
+        return Err(AppError::Config("protection.generation_owner_required".into()));
+    }
+    Ok(())
+}
 fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
@@ -356,7 +374,10 @@ pub(crate) fn install_upgrade_database<F>(
 where
     F: FnOnce(&Connection, &VaultContext, &VaultContext) -> Result<Connection, AppError>,
 {
-    let automatic = read_metadata(db.secret_session().root())?.automatic_unlock;
+    ensure_legacy_generation_owner(db.secret_session().root())?;
+    let saved = read_metadata(db.secret_session().root())?;
+    ensure_legacy_metadata(&saved.metadata)?;
+    let automatic = saved.automatic_unlock;
     install_with_roots_scoped(
         db,
         store,
@@ -453,8 +474,11 @@ where
     F: FnOnce(&Connection, &VaultContext, &VaultContext) -> Result<Connection, AppError>,
 {
     let session = &db.secrets;
-    let mut current = session.write()?;
+    let mut context = session.write()?;
     let root = session.root();
+    ensure_legacy_generation_owner(root)?;
+    let current = context.encrypted()?;
+    ensure_legacy_metadata(current.metadata())?;
     let roots = Roots {
         data: root,
         device: device_root,
@@ -515,6 +539,7 @@ where
         return Err(AppError::Config("secret.migration_required".into()));
     }
     let next = make_next(&current)?;
+    ensure_legacy_metadata(next.metadata())?;
     if next.metadata().wrapped_key.is_none()
         && !(automatic_unlock && previous.automatic_unlock && next.metadata() == current.metadata())
     {
@@ -763,7 +788,7 @@ where
         Some(&mut conn),
         hook,
     )?;
-    *current = next;
+    *context = next.into();
     session.set_blocked(false);
     Ok(())
 }
@@ -800,7 +825,7 @@ fn stage_database(
     stage_bytes(root, id, manifest, destination, &bytes)?;
     Ok(())
 }
-fn database_backups(root: &Path) -> Result<Vec<PathBuf>, AppError> {
+pub(crate) fn database_backups(root: &Path) -> Result<Vec<PathBuf>, AppError> {
     let directory = root.join("backups");
     if !self::directory(&directory)? {
         return Ok(Vec::new());
@@ -1171,6 +1196,10 @@ fn finish(
     hook: &mut dyn FnMut(Checkpoint) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
     let root = roots.data;
+    ensure_legacy_generation_owner(root)?;
+    ensure_legacy_metadata(next.metadata())?;
+    ensure_legacy_metadata(&manifest.previous.metadata)?;
+    ensure_legacy_metadata(&manifest.next.metadata)?;
     device::validate_bindings(roots, intent.version, manifest)?;
     validate_authorization(root, intent, manifest)?;
     let upgrade_versions = validate_stages(roots, &intent.id, next, manifest)?;
@@ -1373,6 +1402,7 @@ fn recover_record(
     password: Option<&str>,
     expected: Option<&[u8]>,
 ) -> Result<(), AppError> {
+    ensure_legacy_generation_owner(root)?;
     let Some(bytes) = pending_record(root)? else {
         return if expected.is_some() {
             Err(AppError::Config("upgrade.source_changed".into()))
@@ -1390,6 +1420,7 @@ fn recover_record(
     if ![LEGACY_FORMAT, FORMAT].contains(&intent.version) {
         return Err(invalid());
     }
+    ensure_legacy_metadata(&intent.next.metadata)?;
     stage_root(root, &intent.id)?;
     let next = if let Some(password) = password {
         VaultContext::from_password(intent.next.metadata.clone(), password)
@@ -1608,7 +1639,7 @@ mod tests {
             let session = SecretSession::open(&root, &store, None).unwrap();
             let conn = vault::prepare(
                 &root.join(crate::config::DB_FILE_NAME),
-                &session.read().unwrap(),
+                session.read().unwrap().encrypted().unwrap(),
             )
             .unwrap();
             let db = Database::from_connection(conn, session.clone());
@@ -1750,7 +1781,7 @@ mod tests {
         set_test_checkpoint_version(&fixture.db.conn.lock().unwrap(), source_version);
         let vault = fixture.db.secrets.read().unwrap().clone();
         let source_digest = Database::content_digest(&fixture.db.conn.lock().unwrap()).unwrap();
-        let id = crate::secrets::upgrade::checkpoint::create(&fixture.root, &device, &vault, &[])
+        let id = crate::secrets::upgrade::checkpoint::create(&fixture.root, &device, vault.encrypted().unwrap(), &[])
             .unwrap();
         let checkpoint_path = device
             .root()
@@ -1804,7 +1835,7 @@ mod tests {
                 crate::secrets::upgrade::checkpoint::verified_database_id(
                     &fixture.root,
                     &device,
-                    &vault,
+                    vault.encrypted().unwrap(),
                 )
                 .unwrap()
                 .as_deref(),
@@ -1999,8 +2030,8 @@ mod tests {
                 crate::database::loongport_schema::read_stored_version(&conn).unwrap(),
                 crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION
             );
-            vault::check_identity(&conn, &vault).unwrap();
-            inventory::validate_database(&conn, &vault).unwrap();
+            vault::check_identity(&conn, vault.encrypted().unwrap()).unwrap();
+            inventory::validate_database(&conn, vault.encrypted().unwrap()).unwrap();
             let cursor: (i64, String) = conn.query_row("SELECT last_byte_offset,last_tail_fingerprint FROM session_log_sync WHERE file_path='synthetic-replay-session'", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
             assert_eq!(cursor, (1234, "synthetic-tail".into()));
             assert_eq!(
@@ -2013,7 +2044,7 @@ mod tests {
             assert_eq!(
                 &*CredentialFile::Codex
                     .decode(
-                        &vault,
+                        vault.encrypted().unwrap(),
                         &std::fs::read(fixture.root.join("codex_oauth_auth.json")).unwrap()
                     )
                     .unwrap(),
@@ -2069,7 +2100,7 @@ mod tests {
         let fixture = Fixture::new();
         let pending = fixture.root.join("zcode_account_transaction.json");
         write_durable(&pending, b"pending transaction fixture").unwrap();
-        let original = fixture.db.secrets.read().unwrap().metadata().clone();
+        let original = fixture.db.secrets.read().unwrap().encrypted().unwrap().metadata().clone();
         let key = fixture
             .store
             .load(&original.vault_id, &original.key_id)
@@ -2109,7 +2140,7 @@ mod tests {
         assert!(
             matches!(error, AppError::Config(code) if code == "secret.zcode_recovery_required")
         );
-        assert_eq!(fixture.db.secrets.read().unwrap().metadata(), &original);
+        assert_eq!(fixture.db.secrets.read().unwrap().encrypted().unwrap().metadata(), &original);
         assert_eq!(
             fixture
                 .store
@@ -2147,7 +2178,7 @@ mod tests {
     #[serial_test::serial]
     fn pending_zcode_transaction_does_not_block_existing_vault_transition_recovery() {
         let fixture = Fixture::new();
-        let original = fixture.db.secrets.read().unwrap().metadata().clone();
+        let original = fixture.db.secrets.read().unwrap().encrypted().unwrap().metadata().clone();
         fixture.interrupt(Checkpoint::Intent);
         let pending = fixture.root.join("zcode_account_transaction.json");
         write_durable(&pending, b"pending transaction fixture").unwrap();
@@ -2160,14 +2191,14 @@ mod tests {
         .unwrap();
 
         let next = recovered.read().unwrap();
-        assert_ne!(next.metadata().key_id, original.key_id);
+        assert_ne!(next.encrypted().unwrap().metadata().key_id, original.key_id);
         let connection = Connection::open(fixture.root.join(crate::config::DB_FILE_NAME)).unwrap();
-        vault::check_identity(&connection, &next).unwrap();
-        inventory::validate_database(&connection, &next).unwrap();
+        vault::check_identity(&connection, next.encrypted().unwrap()).unwrap();
+        inventory::validate_database(&connection, next.encrypted().unwrap()).unwrap();
         assert_eq!(
             &*CredentialFile::Codex
                 .decode(
-                    &next,
+                    next.encrypted().unwrap(),
                     &std::fs::read(fixture.root.join("codex_oauth_auth.json")).unwrap(),
                 )
                 .unwrap(),
@@ -2232,14 +2263,14 @@ mod tests {
             )
             .unwrap();
             let next = recovered.read().unwrap();
-            assert_ne!(old.metadata.key_id, next.metadata().key_id);
+            assert_ne!(old.metadata.key_id, next.encrypted().unwrap().metadata().key_id);
             let connection =
                 Connection::open(fixture.root.join(crate::config::DB_FILE_NAME)).unwrap();
-            vault::check_identity(&connection, &next).unwrap();
-            inventory::validate_database(&connection, &next).unwrap();
+            vault::check_identity(&connection, next.encrypted().unwrap()).unwrap();
+            inventory::validate_database(&connection, next.encrypted().unwrap()).unwrap();
             assert!(CredentialFile::Codex
                 .decode(
-                    &next,
+                    next.encrypted().unwrap(),
                     &std::fs::read(fixture.root.join("codex_oauth_auth.json")).unwrap()
                 )
                 .is_ok());
@@ -2360,7 +2391,7 @@ mod tests {
         .unwrap();
         assert_ne!(
             old.metadata.key_id,
-            recovered.read().unwrap().metadata().key_id
+            recovered.read().unwrap().encrypted().unwrap().metadata().key_id
         );
         assert!(fixture
             .store
@@ -2413,7 +2444,7 @@ mod tests {
         );
         let recovered = SecretSession::open_existing(&fixture.root, &fixture.store, None).unwrap();
         assert_eq!(
-            recovered.read().unwrap().metadata().key_id,
+            recovered.read().unwrap().encrypted().unwrap().metadata().key_id,
             old.metadata.key_id
         );
         assert!(fixture
@@ -2457,7 +2488,7 @@ mod tests {
         install_generation(
             &fixture.db,
             &fixture.store,
-            current.clone(),
+            current.clone().encrypted().unwrap().clone(),
             true,
             |conn, _, _| {
                 let mut staged = Connection::open_in_memory().unwrap();
@@ -2480,15 +2511,15 @@ mod tests {
             Some("kept")
         );
         assert_eq!(
-            fixture.db.secrets.read().unwrap().metadata(),
-            current.metadata()
+            fixture.db.secrets.read().unwrap().encrypted().unwrap().metadata(),
+            current.encrypted().unwrap().metadata()
         );
         let reopened = SecretSession::open_existing(&fixture.root, &fixture.store, None).unwrap();
-        assert_eq!(reopened.read().unwrap().metadata(), current.metadata());
+        assert_eq!(reopened.read().unwrap().encrypted().unwrap().metadata(), current.encrypted().unwrap().metadata());
         assert!(install_generation(
             &fixture.db,
             &fixture.store,
-            current.clone(),
+            current.clone().encrypted().unwrap().clone(),
             false,
             |_, _, _| unreachable!(),
             None
@@ -2497,7 +2528,7 @@ mod tests {
         assert!(install_generation(
             &fixture.db,
             &fixture.store,
-            current.rotate_key().unwrap(),
+            current.encrypted().unwrap().rotate_key().unwrap(),
             true,
             |_, _, _| unreachable!(),
             None
@@ -2526,7 +2557,7 @@ mod tests {
         let session = SecretSession::open(&root, &store, None).unwrap();
         let conn = crate::database::vault::prepare(
             &root.join(crate::config::DB_FILE_NAME),
-            &session.read().unwrap(),
+            session.read().unwrap().encrypted().unwrap(),
         )
         .unwrap();
         let db = Database::from_connection(conn, session.clone());
@@ -2544,7 +2575,7 @@ mod tests {
         zcode_profile.write(&session, profile_plaintext).unwrap();
         let settings = crate::settings::encrypt_legacy_settings_with_vault(
             br#"{"webdavBackup":{"password":"rotation-canary"}}"#,
-            &session.read().unwrap(),
+            session.read().unwrap().encrypted().unwrap(),
         )
         .unwrap();
         write_durable(&crate::settings::settings_path(), &settings).unwrap();
@@ -2555,14 +2586,14 @@ mod tests {
         .unwrap();
         session.complete_migration().unwrap();
         let old = super::super::VaultContext::from_key(
-            session.read().unwrap().metadata().clone(),
-            session.read().unwrap().export_key(),
+            session.read().unwrap().encrypted().unwrap().metadata().clone(),
+            session.read().unwrap().encrypted().unwrap().export_key(),
         )
         .unwrap();
         rotate(&db, &store, "new generation protection password", false).unwrap();
         let next = session.read().unwrap();
-        assert_eq!(old.metadata().vault_id, next.metadata().vault_id);
-        assert_ne!(old.metadata().key_id, next.metadata().key_id);
+        assert_eq!(old.metadata().vault_id, next.encrypted().unwrap().metadata().vault_id);
+        assert_ne!(old.metadata().key_id, next.encrypted().unwrap().metadata().key_id);
         assert_eq!(
             db.conn
                 .lock()
@@ -2584,7 +2615,7 @@ mod tests {
             "rotation-canary"
         );
         assert!(
-            super::super::VaultContext::from_key(next.metadata().clone(), old.export_key())
+            super::super::VaultContext::from_key(next.encrypted().unwrap().metadata().clone(), old.export_key())
                 .is_err()
         );
         assert!(CredentialFile::Codex
@@ -2595,19 +2626,19 @@ mod tests {
             .is_err());
         let profile_bytes = std::fs::read(root.join(zcode_profile.relative_path())).unwrap();
         assert_eq!(
-            &*zcode_profile.decode(&next, &profile_bytes).unwrap(),
+            &*zcode_profile.decode(next.encrypted().unwrap(), &profile_bytes).unwrap(),
             profile_plaintext
         );
         assert!(zcode_profile.decode(&old, &profile_bytes).is_err());
         assert!(!String::from_utf8_lossy(&profile_bytes).contains("fresh-profile-canary"));
-        let plans = super::super::files::stage_owned_files_with_vault(&root, &next, false).unwrap();
+        let plans = super::super::files::stage_owned_files_with_vault(&root, next.encrypted().unwrap(), false).unwrap();
         assert!(!plans.is_empty());
         for name in [
             crate::settings::settings_path(),
             root.join("backups/vault-recovery/settings.json"),
         ] {
             let bytes = std::fs::read(name).unwrap();
-            crate::settings::decode_settings_with_vault(&bytes, &next).unwrap();
+            crate::settings::decode_settings_with_vault(&bytes, next.encrypted().unwrap()).unwrap();
             assert!(crate::settings::decode_settings_with_vault(&bytes, &old).is_err());
             assert!(!String::from_utf8_lossy(&bytes).contains("rotation-canary"));
         }
@@ -2619,8 +2650,8 @@ mod tests {
                     rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
                 )
                 .unwrap();
-                crate::database::vault::check_identity(&conn, &next).unwrap();
-                inventory::validate_database(&conn, &next).unwrap();
+                crate::database::vault::check_identity(&conn, next.encrypted().unwrap()).unwrap();
+                inventory::validate_database(&conn, next.encrypted().unwrap()).unwrap();
             }
         }
         assert!(store
@@ -2628,7 +2659,7 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(store
-            .load(&next.metadata().vault_id, &next.metadata().key_id)
+            .load(&next.encrypted().unwrap().metadata().vault_id, &next.encrypted().unwrap().metadata().key_id)
             .unwrap()
             .is_none());
         drop(next);
@@ -2638,3 +2669,12 @@ mod tests {
     }
     include!("transition/device_tests.rs");
 }
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "legacy_generation_fence_test_support.rs"]
+pub(crate) mod fence_test_support;
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "transition_legacy_fence_tests.rs"]
+mod legacy_fence_tests;
+#[cfg(feature = "test-hooks")]
+pub(crate) use legacy_fence_tests::verify as verify_legacy_generation_fence_case;

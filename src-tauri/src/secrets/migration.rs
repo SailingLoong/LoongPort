@@ -8,7 +8,9 @@ use super::{
 use crate::error::AppError;
 
 pub(crate) fn prepare_files(session: &SecretSession, legacy_allowed: bool) -> Result<(), AppError> {
-    let vault = session.read()?;
+    let context = session.read()?;
+    if context.is_plaintext() { return Ok(()); }
+    let vault = context.encrypted()?;
     let settings_path = crate::settings::settings_path();
     let settings = match std::fs::read(&settings_path) {
         Ok(bytes) => {

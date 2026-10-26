@@ -41,7 +41,7 @@ impl Fixture {
                 row
             })
             .collect();
-        let ids = rows.iter().map(|r| r.account.id(&b.vault_id)).collect();
+        let ids = rows.iter().map(|r| r.account.id(b.store_id())).collect();
         store::save(&session, &b, rows).unwrap();
         Self {
             _root: root,
@@ -176,7 +176,7 @@ async fn legacy_rows_are_not_inference_authorized_and_keep_existing_ui_dto() {
     assert!(encoded.get("inference").is_none());
     let read: SavedAccount = serde_json::from_value(encoded).unwrap();
     assert!(read.inference.is_none());
-    let ui = serde_json::to_string(&read.view(&b.vault_id, "2026-10-18")).unwrap();
+    let ui = serde_json::to_string(&read.view(b.store_id(), "2026-10-18")).unwrap();
     assert!(!ui.contains("token"));
     assert!(!ui.contains("inference"));
 }
@@ -197,7 +197,7 @@ async fn explicit_new_grant_binds_only_matching_original_row_and_keeps_checkin()
     assert!(rows[0].account.token.is_empty());
     assert!(rows[0].shared_authorization);
     assert!(rows[0].inference_allowed());
-    assert_eq!(rows[0].account.id(&b.vault_id), f.ids[0]);
+    assert_eq!(rows[0].account.id(b.store_id()), f.ids[0]);
     assert_eq!(rows[0].inference.as_ref().unwrap().access, "new-authorized");
     assert!(rows[1].inference.is_none());
     let calls = t.requests.lock().unwrap();
@@ -211,7 +211,7 @@ async fn explicit_new_grant_binds_only_matching_original_row_and_keeps_checkin()
     let file = std::fs::read(f._root.path().join(store::FILE)).unwrap();
     assert!(!String::from_utf8_lossy(&file).contains("new-authorized"));
     assert!(
-        !serde_json::to_string(&rows[0].view(&b.vault_id, "2026-10-18"))
+        !serde_json::to_string(&rows[0].view(b.store_id(), "2026-10-18"))
             .unwrap()
             .contains("new-authorized")
     );

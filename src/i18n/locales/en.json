@@ -123,6 +123,7 @@
     "windowClose": "Close window"
   },
   "provider": {
+    "readFailed": "Could not read configurations. Existing data has not been cleared; any displayed rows are from the last successful read.",
     "connectivityCheck": "Connectivity check",
     "tabProvider": "Provider",
     "tabUniversal": "Universal",
@@ -234,7 +235,7 @@
       "invalidFormat": "The configuration format is invalid. Return to editing.",
       "readOnly": "A required file is read-only. Saving is unavailable.",
       "sourceChanged": "The configuration or files changed. Generate a new preview.",
-      "vaultLocked": "Credential storage is locked. Unlock it first.",
+      "vaultLocked": "Saved credential data is currently unavailable. Existing data is preserved; this operation cannot continue.",
       "pendingOperation": "An original operation needs verification. Recheck it first.",
       "ownerUnavailable": "The existing configuration or authentication owner cannot prove this write.",
       "credentialConflict": "A key cannot be deleted and replaced together. Clear its input first.",
@@ -4300,7 +4301,7 @@
       "invalidFormat": "The settings or selected reasoning intent are not supported by this endpoint.",
       "readOnly": "This configuration cannot currently be edited.",
       "sourceChanged": "The configuration changed. Reopen and review it.",
-      "vaultLocked": "Unlock the credential vault first.",
+      "vaultLocked": "Saved credential data is currently unavailable. Existing data is preserved; this operation cannot continue.",
       "pendingOperation": "Another configuration operation is unfinished.",
       "ownerUnavailable": "The configuration owner is unavailable.",
       "credentialConflict": "Existing credentials conflict. Review them in advanced configuration.",
@@ -4335,6 +4336,7 @@
     }
   },
   "secrets": {
+    "runtimeUnavailable": "Saved credential data is currently unavailable. Existing data is preserved; actions requiring it are unavailable.",
     "recoveryTitle": "Resume recovery",
     "recoveryDescription": "An interrupted data protection operation needs your recovery password.",
     "resumeRecovery": "Resume recovery",
@@ -4775,7 +4777,7 @@
         "writer_state_unknown": "ZCode's process state could not be verified. Check that ZCode and its other writers have stopped.",
         "context_changed": "The selected source changed. Inspect it again and review the latest account status.",
         "target_scope_mismatch": "Choose a saved personal account in the inspected source's account family.",
-        "vault_unavailable": "Unlock the local LoongPort vault, then refresh account status.",
+        "vault_unavailable": "Saved credential data is currently unavailable. Existing data is preserved; this operation cannot continue.",
         "operation_failed": "The account operation could not be verified. Inspect the selected source again and refresh status.",
         "committed_recovery_required": "The account switch committed, but recovery requires attention. Review local recovery before continuing.",
         "pending_or_locked": "Quit ZCode normally, then review and preserve any pending local recovery.",
@@ -5055,7 +5057,7 @@
       "invalidFormat": "Invalid TOML. Edit the content and preview again.",
       "sourceChanged": "The source file changed. Read or preview again.",
       "ownerUnavailable": "The current configuration is unavailable. Shared settings cannot be saved yet.",
-      "vaultLocked": "The credential vault is locked. Unlock it and read again.",
+      "vaultLocked": "Saved credential data is currently unavailable. Existing data is preserved; this operation cannot continue.",
       "pendingOperation": "An operation awaits verification. Check the original save result first.",
       "legacyDisabled": "The legacy snippet is disabled and cannot be imported."
     },
@@ -5291,5 +5293,57 @@
     "inferenceUnverified": "Actual inference consumption has not been verified. A successful claim, saved authorization or discovered model does not prove actual inference consumption.",
     "authorizationSaved": "Account authorization saved; actual inference consumption is not verified",
     "reauthorize": "Reauthorization required"
+  },
+  "storageProtection": {
+    "title": "Storage protection",
+    "manage": "Manage storage protection",
+    "description": "Choose encryption with a key you supply, or store LoongPort data unencrypted. The app does not generate a key for you.",
+    "mode": {
+      "unconfigured": "Storage protection has not been chosen",
+      "encrypted": "Current mode: your encryption key",
+      "plaintext": "Current mode: unencrypted storage"
+    },
+    "status": {
+      "needs_configuration": "Choose a storage protection option.",
+      "available": "The current configuration is available.",
+      "key_required": "The original key could not be retrieved from system storage. Existing encrypted files are unchanged.",
+      "blocked": "The configuration cannot yet be confirmed safe to use. Original files are unchanged; resolve the configuration issue first."
+    },
+    "chooseEncrypted": "Use my own key",
+    "choosePlaintext": "Store unencrypted",
+    "skipPlaintext": "Skip key and store unencrypted",
+    "applyEncrypted": "Save and enable key protection",
+    "applyPlaintext": "Confirm unencrypted storage",
+    "unlock": "Unlock with the original key",
+    "keyLabel": "Set key",
+    "confirmKeyLabel": "Enter the key again",
+    "keyFormat": "Your input is used exactly as entered, without character-type or length rules. Spaces, capitalization and characters are preserved; the repeated input must match exactly.",
+    "keepKeyCopy": "Keep a separate, secure copy of the exact text you entered. System key storage retains that same text; if it is lost, enter the same text again.",
+    "localOnlyNotice": "LoongPort stores this key locally and does not automatically sync it to other devices. Other devices without the same key cannot decrypt this data. This does not mean every program on this computer is prevented from reading data.",
+    "sameKeyRequired": "Enter the same key originally used to encrypt this data. A new key cannot unlock old files. Unlock successfully before changing protection.",
+    "plaintextRisk": "Unencrypted storage: anyone or any program that can read local LoongPort data files can directly obtain API keys, tokens and other credentials in them.",
+    "plaintextConversion": "This converts currently decryptable data to plaintext. It can proceed only after all original data have been decrypted and verified.",
+    "acknowledgePlaintext": "I understand local files will expose credentials directly and choose unencrypted storage.",
+    "createSeparate": "Keep originals and create a separate configuration",
+    "originalsPreserved": "A new configuration will be created elsewhere, keeping the original files. It will not unlock or recover the original encrypted data. Restart to switch configurations.",
+    "cancelSeparate": "Return to the original configuration",
+    "actionFailed": "The operation was not completed. The original key may not match, or the configuration may be unavailable. Check and retry; the app will not fall back to plaintext.",
+    "statusFailed": "Storage protection status could not be read. Changes are temporarily unavailable.",
+    "saved": "The storage protection operation is complete.",
+    "restartRequired": "Your choice is saved. Restart LoongPort to use the new configuration; current-session availability has not changed.",
+    "keyCacheUnavailable": "This session is available, but the same key could not be saved or verified in system storage. Keep your key; you may need to enter it at the next launch.",
+    "backupIndependent": "Backup-file encryption passwords are separate from this key. Existing backup-password settings are unchanged.",
+    "promptTitle": "Set your storage key",
+    "promptDescription": "Supply your own key and enter it twice, or explicitly skip and use unencrypted storage. Closing this window changes nothing; you can choose later in Settings.",
+    "forgotKey": "Forgot your key? Recovery on this computer",
+    "recovery": {
+      "mac": "Open Keychain Access, select the login keychain and search for LoongPort credential vault. Check the item for the current configuration, open it, select Show password and authenticate when prompted. Do not edit or delete the item.",
+      "windows": "Open Credential Manager → Windows Credentials → Generic Credentials. Look for an item containing LoongPort credential vault and check it matches the current configuration. This confirms whether the item exists; it is not a Show password interface for this app’s raw key. Do not edit or delete it.",
+      "linux": "The key is stored in the current login session’s Secret Service. If you use GNOME Keyring and already have Passwords and Keys, open it, unlock the appropriate keyring, search for LoongPort credential vault and inspect the item’s properties. Other desktops do not have one universal viewer. Do not edit or delete the item.",
+      "unknown": "The current operating system could not be identified. Find your own copy of the original key, or check the LoongPort credential vault item in your system key-store tool. Do not edit or delete the item.",
+      "binaryNotice": "Whether a system tool can reveal the original text depends on the platform and entry format. Legacy binary entries or version-tagged storage records may not be directly reusable as key input. This help does not read, reveal or export system keys. Keep your original input; if it cannot be recovered, preserve the original files. A new key cannot decrypt them."
+    },
+    "keyPlaceholder": "Enter your key exactly as you want it",
+    "confirmKeyPlaceholder": "Enter the exact same text again"
   }
 }

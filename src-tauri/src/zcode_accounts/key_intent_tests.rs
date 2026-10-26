@@ -1,4 +1,6 @@
 use super::*;
+use crate::secrets::storage::StorageContext;
+use crate::secrets::VaultContext;
 
 fn scope(account: &str, project: &str) -> KeyScope {
     KeyScope::new(OAuthFamily::BigModel, account, "synthetic-org", project).unwrap()
@@ -12,7 +14,7 @@ fn fresh(ledger: &mut KeyIntentLedger, scope: KeyScope) -> FreshIntent {
 
 #[test]
 fn persisted_intent_requires_readback_after_restart_not_another_creation_grant() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let mut ledger = KeyIntentLedger::default();
     let scope = scope("synthetic-user-a", "synthetic-project");
     let _grant = fresh(&mut ledger, scope.clone());
@@ -23,7 +25,11 @@ fn persisted_intent_requires_readback_after_restart_not_another_creation_grant()
         panic!("restart must not grant another POST")
     };
     assert_eq!(record.state, IntentState::Pending);
-    assert!(KeyIntentLedger::open(&bytes, &VaultContext::generate().unwrap()).is_err());
+    assert!(KeyIntentLedger::open(
+        &bytes,
+        &StorageContext::Encrypted(VaultContext::generate().unwrap())
+    )
+    .is_err());
 }
 
 #[test]
@@ -47,7 +53,7 @@ fn no_post_cleanup_is_exact_and_cannot_remove_created_or_other_intent() {
 
 #[test]
 fn duplicate_or_unknown_fields_are_rejected_after_authentication() {
-    let vault = VaultContext::generate().unwrap();
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
     let mut ledger = KeyIntentLedger::default();
     let _ = fresh(&mut ledger, scope("synthetic-user", "synthetic-project"));
     let mut value = serde_json::to_value(&ledger).unwrap();
@@ -55,13 +61,13 @@ fn duplicate_or_unknown_fields_are_rejected_after_authentication() {
     value["entries"].as_array_mut().unwrap().push(duplicate);
     let file = OwnedFile::registered(KEY_INTENT_FILE).unwrap();
     let sealed = file
-        .encode(&vault, &serde_json::to_vec(&value).unwrap())
+        .encode_storage(&vault, &serde_json::to_vec(&value).unwrap())
         .unwrap();
     assert!(KeyIntentLedger::open(&sealed, &vault).is_err());
     value["entries"].as_array_mut().unwrap().pop();
     value["unexpected"] = serde_json::json!(true);
     let sealed = file
-        .encode(&vault, &serde_json::to_vec(&value).unwrap())
+        .encode_storage(&vault, &serde_json::to_vec(&value).unwrap())
         .unwrap();
     assert!(KeyIntentLedger::open(&sealed, &vault).is_err());
 }
@@ -98,4 +104,32 @@ fn cache_identity_aliases_share_the_same_remote_project_intent() {
         "a cache slot cannot grant a second POST to the same remote project"
     );
     assert!(ledger.get(&alias).is_some());
+}
+
+#[cfg_attr(test, test)]
+fn plaintext_intent_restart_keeps_the_existing_no_duplicate_creation_decision() {
+    let storage = StorageContext::Plaintext(crate::secrets::storage::PlaintextIdentity {
+        format_version: 1,
+        store_id: "11111111-1111-4111-8111-111111111111".into(),
+        generation_id: "22222222-2222-4222-8222-222222222222".into(),
+        revision: 1,
+    });
+    let mut ledger = KeyIntentLedger::default();
+    let scope = scope("synthetic-plaintext-user", "synthetic-project");
+    let _grant = fresh(&mut ledger, scope.clone());
+    let bytes = ledger.seal(&storage).unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("synthetic-plaintext-user"));
+    let mut reopened = KeyIntentLedger::open(&bytes, &storage).unwrap();
+    assert!(matches!(
+        reopened.reserve(scope).unwrap(),
+        Reservation::Existing(_)
+    ));
+    assert!(KeyIntentLedger::open(b"lpenc:damaged", &storage).is_err());
+    let encrypted = StorageContext::Encrypted(VaultContext::generate().unwrap());
+    assert!(KeyIntentLedger::open(&bytes, &encrypted).is_err());
+}
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn run_plaintext() {
+    plaintext_intent_restart_keeps_the_existing_no_duplicate_creation_decision();
 }

@@ -24,7 +24,7 @@ impl Fixture {
         let vault = self.session.read().unwrap();
         let file = OwnedFile::registered(FILE).unwrap();
         let bytes = file
-            .encode(&vault, &serde_json::to_vec(&doc).unwrap())
+            .encode_storage(&vault, &serde_json::to_vec(&doc).unwrap())
             .unwrap();
         crate::config_file_io::write_durable(&self.root.path().join(FILE), &bytes).unwrap();
     }

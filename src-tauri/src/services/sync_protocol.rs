@@ -409,10 +409,10 @@ pub(crate) fn validate_manifest_compat(
         ));
     }
     let vault = manifest.vault_metadata()?;
-    vault
-        .validate()
-        .map_err(crate::secrets::inventory::secret_error)?;
-    if vault.wrapped_key.is_none() {
+    if !vault
+        .recovery_input_available()
+        .map_err(crate::secrets::inventory::secret_error)?
+    {
         return Err(AppError::Config("sync.recovery_password_required".into()));
     }
     snapshot_artifact_path(manifest, REMOTE_DB_SQL)?;
@@ -522,7 +522,7 @@ fn apply_snapshot_with_store(
     store: &dyn crate::secrets::key_store::KeyStore,
 ) -> Result<(), AppError> {
     validate_manifest_compat(manifest, RemoteLayout::Current)?;
-    let next = db.secrets.read()?.clone();
+    let next = db.secrets.read()?.encrypted()?.clone();
     let sql =
         std::str::from_utf8(db_sql).map_err(|_| AppError::Config("sync.sql_not_utf8".into()))?;
     let staged = db.validate_sync_snapshot_for_current(sql, manifest.vault_metadata()?, &next)?;
@@ -562,11 +562,7 @@ pub(crate) fn restore_from_sync(
             .ok_or_else(|| AppError::Config("sync.artifact_missing".into()))?;
         verify_artifact(bytes, name, meta)?;
     }
-    let next = crate::secrets::VaultContext::from_password(
-        snapshot.manifest.vault_metadata()?.clone(),
-        password,
-    )
-    .map_err(crate::secrets::inventory::secret_error)?;
+    let next = authenticate_restore_source(snapshot.manifest.vault_metadata()?, password)?;
     let sql = std::str::from_utf8(&snapshot.db_sql)
         .map_err(|_| AppError::Config("sync.sql_not_utf8".into()))?;
     let staged =
@@ -580,6 +576,15 @@ pub(crate) fn restore_from_sync(
             crate::database::Database::prepare_sync_join(staged, connection, current, next)
         },
     )
+}
+
+/// Source authentication only; installation remains with the original generation owner.
+fn authenticate_restore_source(
+    metadata: &VaultMetadata,
+    password: &str,
+) -> Result<crate::secrets::VaultContext, AppError> {
+    crate::secrets::VaultContext::from_recovery_input(metadata.clone(), password)
+        .map_err(crate::secrets::inventory::secret_error)
 }
 
 fn install_sync_snapshot<F>(
@@ -1550,7 +1555,7 @@ mod adoption_tests {
         let secrets = SecretSession::open(root, store, password).unwrap();
         let conn = vault::prepare(
             &root.join(crate::config::DB_FILE_NAME),
-            &secrets.read().unwrap(),
+            secrets.read().unwrap().encrypted().unwrap(),
         )
         .unwrap();
         // These fixtures exercise the current-schema sync owner, independently
@@ -1849,7 +1854,11 @@ mod adoption_tests {
                 password: "local-sync-canary".into(),
                 ..Default::default()
             });
-            let bytes = crate::settings::encode_settings_with_vault(&settings, &context).unwrap();
+            let bytes = crate::settings::encode_settings_with_vault(
+                &settings,
+                context.encrypted().unwrap(),
+            )
+            .unwrap();
             crate::secrets::session::write_durable(&crate::settings::settings_path(), &bytes)
                 .unwrap();
         }
@@ -1882,7 +1891,7 @@ mod adoption_tests {
         let current = local.secrets.read().unwrap();
         let settings = crate::settings::decode_settings_with_vault(
             &std::fs::read(crate::settings::settings_path()).unwrap(),
-            &current,
+            current.encrypted().unwrap(),
         )
         .unwrap();
         assert_eq!(settings.webdav_sync.unwrap().password, "local-sync-canary");
@@ -1891,10 +1900,13 @@ mod adoption_tests {
                 .auth_token,
             "local-vendor-canary"
         );
-        Database::validate_sync_source(&current, incoming.manifest.vault_metadata().unwrap())
-            .unwrap();
+        Database::validate_sync_source(
+            current.encrypted().unwrap(),
+            incoming.manifest.vault_metadata().unwrap(),
+        )
+        .unwrap();
         assert_eq!(
-            current.metadata(),
+            current.encrypted().unwrap().metadata(),
             incoming.manifest.vault_metadata().unwrap()
         );
         drop(current);
@@ -1938,6 +1950,8 @@ mod adoption_tests {
             .secrets
             .read()
             .unwrap()
+            .encrypted()
+            .unwrap()
             .rotate_key()
             .unwrap()
             .with_password("rotated recovery password")
@@ -1954,7 +1968,7 @@ mod adoption_tests {
         crate::settings::unlock_settings_for_test(local.secrets.clone()).unwrap();
         let incoming = snapshot(&source);
         assert!(Database::validate_sync_source(
-            &local.secrets.read().unwrap(),
+            local.secrets.read().unwrap().encrypted().unwrap(),
             incoming.manifest.vault_metadata().unwrap()
         )
         .is_err());
@@ -1973,7 +1987,16 @@ mod adoption_tests {
                 .as_deref(),
             Some("rotated-source-canary")
         );
-        assert_eq!(local.secrets.read().unwrap().metadata(), next.metadata());
+        assert_eq!(
+            local
+                .secrets
+                .read()
+                .unwrap()
+                .encrypted()
+                .unwrap()
+                .metadata(),
+            next.metadata()
+        );
         assert!(SecretSession::open_existing(local.secrets.root(), &store, None).is_ok());
     }
 
@@ -2046,3 +2069,7 @@ pub(crate) fn ensure_upgrade_sync_admitted() -> Result<(), AppError> {
     )?;
     crate::settings::ensure_upgrade_sync_resumed()
 }
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "sync_protocol/text_archive_tests.rs"]
+pub(crate) mod text_archive_tests;

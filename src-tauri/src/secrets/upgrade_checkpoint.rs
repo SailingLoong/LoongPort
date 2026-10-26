@@ -1,5 +1,6 @@
 //! Authenticated, device-local upgrade checkpoint and private staging only.
 //! Publication remains with the startup and credential-generation owners.
+use crate::secrets::storage::StorageContext;
 
 use super::*;
 use crate::config_file_io;
@@ -845,7 +846,7 @@ pub(crate) fn restored_archive_files(
 pub(crate) fn read_completed_result(
     db: &Database,
     device: &DeviceStore,
-    vault: &std::sync::RwLockReadGuard<'_, VaultContext>,
+    vault: &std::sync::RwLockReadGuard<'_, StorageContext>,
 ) -> Result<Option<crate::settings::UpgradeCompletion>, AppError> {
     let active = path(device);
     let revision = inspection::file_revision(&active)?;
@@ -855,12 +856,12 @@ pub(crate) fn read_completed_result(
     {
         return Ok(None);
     }
-    let record = crate::settings::read_upgrade_completion_with_vault(db.secret_session(), vault)?;
+    let record = crate::settings::read_upgrade_completion_with_storage(db.secret_session(), vault)?;
     if let Some(record) = &record {
         restored_archive_files(
             db.secret_session().root(),
             device,
-            vault,
+            vault.encrypted()?,
             &record.checkpoint_id,
         )?;
     }
@@ -881,7 +882,7 @@ pub(crate) enum CompletionBoundary {
 pub(crate) fn archive_and_release(
     db: &Database,
     device: &DeviceStore,
-    vault: &std::sync::RwLockReadGuard<'_, VaultContext>,
+    vault: &std::sync::RwLockReadGuard<'_, StorageContext>,
     id: &str,
     hook: &mut dyn FnMut(CompletionBoundary) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
@@ -896,15 +897,15 @@ pub(crate) fn archive_and_release(
             return Err(changed());
         }
         inspection::verify_unchanged(&active_path, &revision)?;
-        return db.migrate_released_checkpoint_schema(device, vault);
+        return db.migrate_released_checkpoint_schema(device, vault.encrypted()?);
     };
-    if verified_database_id(root, device, vault)?.as_deref() != Some(id) {
+    if verified_database_id(root, device, vault.encrypted()?)?.as_deref() != Some(id) {
         return Err(changed());
     }
-    let plain = descriptor()?.decode(vault, &active)?;
+    let plain = descriptor()?.decode(vault.encrypted()?, &active)?;
     let manifest: Manifest = serde_json::from_slice(&plain).map_err(|_| invalid())?;
-    let source = manifest.database(vault)?;
-    let backup = db.archive_upgrade_database(&source, id, vault)?;
+    let source = manifest.database(vault.encrypted()?)?;
+    let backup = db.archive_upgrade_database(&source, id, vault.encrypted()?)?;
     hook(CompletionBoundary::DatabaseArchived)?;
     let archived = archive_path(device);
     {
@@ -924,7 +925,7 @@ pub(crate) fn archive_and_release(
                     .as_ref()
                     .map(|bytes| match kind {
                         ArchivedKind::Settings => {
-                            crate::settings::export_settings_archive_with_vault(bytes, vault)
+                            crate::settings::export_settings_archive_with_vault(bytes, vault.encrypted()?)
                                 .map(|v| v.to_vec())
                         }
                         ArchivedKind::Device => DeviceFile::registered(
@@ -932,7 +933,7 @@ pub(crate) fn archive_and_release(
                                 .strip_prefix(device.root())
                                 .map_err(|_| invalid())?,
                         )?
-                        .decode(vault, bytes)
+                        .decode(vault.encrypted()?, bytes)
                         .map(|v| v.to_vec()),
                         ArchivedKind::Native => Ok(bytes.clone()),
                     })
@@ -955,7 +956,7 @@ pub(crate) fn archive_and_release(
                 .ok_or_else(invalid)?
                 .into(),
             database_digest: crate::secrets::inventory::upgrade_archive_content_digest(
-                &source, vault,
+                &source, vault.encrypted()?,
             )?,
             source_versions: manifest.source_versions,
             files,
@@ -964,12 +965,12 @@ pub(crate) fn archive_and_release(
         if plain.len() as u64 > MAX_BYTES / 2 {
             return Err(AppError::Config("upgrade.checkpoint_too_large".into()));
         }
-        let bytes = archive_descriptor()?.encode(vault, &plain)?;
+        let bytes = archive_descriptor()?.encode(vault.encrypted()?, &plain)?;
         match config_file_io::read_regular_file(&archived, MAX_BYTES)
             .map_err(|e| AppError::io(&archived, e))?
         {
             Some(existing) => {
-                let decoded = archive_descriptor()?.decode(vault, &existing)?;
+                let decoded = archive_descriptor()?.decode(vault.encrypted()?, &existing)?;
                 let recorded: CompletionArchive =
                     serde_json::from_slice(&decoded).map_err(|_| invalid())?;
                 // Normalize only the historical absent version field in memory.
@@ -981,13 +982,13 @@ pub(crate) fn archive_and_release(
             None => config_file_io::write_durable_new(&archived, &bytes)?,
         }
     }
-    restored_archive_files(root, device, vault, id)?;
+    restored_archive_files(root, device, vault.encrypted()?, id)?;
     hook(CompletionBoundary::ArchiveVerified)?;
-    crate::settings::set_upgrade_completion_with_vault(id, db.secret_session(), vault)?;
+    crate::settings::set_upgrade_completion_with_storage(id, db.secret_session(), vault)?;
     hook(CompletionBoundary::PausePersisted)?;
     hook(CompletionBoundary::BeforeRelease)?;
-    crate::settings::set_upgrade_completion_with_vault(id, db.secret_session(), vault)?;
-    if verified_database_id(root, device, vault)?.as_deref() != Some(id) {
+    crate::settings::set_upgrade_completion_with_storage(id, db.secret_session(), vault)?;
+    if verified_database_id(root, device, vault.encrypted()?)?.as_deref() != Some(id) {
         return Err(changed());
     }
     inspection::verify_unchanged(&active_path, &revision)?;
@@ -996,8 +997,8 @@ pub(crate) fn archive_and_release(
     if resume_candidate_bytes(device)?.is_some() {
         return Err(changed());
     }
-    restored_archive_files(root, device, vault, id)?;
-    db.migrate_released_checkpoint_schema(device, vault)
+    restored_archive_files(root, device, vault.encrypted()?, id)?;
+    db.migrate_released_checkpoint_schema(device, vault.encrypted()?)
 }
 
 #[cfg(test)]
@@ -1110,7 +1111,7 @@ mod paperclip_schema_lifecycle_tests {
                 .execute_batch(include_str!("test_fixtures/client_credentials_v28.sql"))
                 .unwrap();
             let sealed = crate::secrets::inventory::seal_db(
-                &f.vault,
+                &f.vault.clone().into(),
                 "loongport_client_credentials",
                 "secret",
                 &["synthetic-client-credential"],

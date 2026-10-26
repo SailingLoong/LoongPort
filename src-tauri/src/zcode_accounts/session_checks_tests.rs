@@ -929,7 +929,9 @@ async fn rejection_survives_transient_checks_and_catalog_reopen_per_connection_u
             catalog
                 .set_evidence(snapshot.identity(), &native, report)
                 .unwrap();
-            let vault = crate::secrets::VaultContext::generate().unwrap();
+            let vault = crate::secrets::storage::StorageContext::Encrypted(
+                crate::secrets::VaultContext::generate().unwrap(),
+            );
             catalog =
                 ProfileCatalog::open(&catalog.seal(&vault, &native).unwrap(), &vault, &native)
                     .unwrap();

@@ -2007,4 +2007,26 @@ describe("SettingsPage Component", () => {
     fireEvent.click(screen.getByText("change-app-config"));
     expect(settingsMock.updateAppConfigDir).toHaveBeenCalledWith("/app/new");
   });
+
+  it("opens storage protection only from a voluntary settings control", async () => {
+    renderSettingsPage();
+    const entry = await screen.findByRole("button", {
+      name: "storageProtection.manage",
+    });
+    expect(
+      screen.queryByText("storageProtection.description"),
+    ).not.toBeInTheDocument();
+    fireEvent.click(entry);
+    expect(
+      await screen.findByText("storageProtection.description"),
+    ).toBeVisible();
+    expect(
+      screen.queryByText("secrets.protectionTitle"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    fireEvent.click(entry);
+    expect(
+      screen.queryByText("storageProtection.description"),
+    ).not.toBeInTheDocument();
+  });
 });
