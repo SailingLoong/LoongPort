@@ -299,3 +299,129 @@ pub(crate) fn tauri_test_origin() -> url::Url {
     .parse()
     .expect("Tauri test origin is a static valid URL")
 }
+
+#[cfg(feature = "gui")]
+#[path = "services/routing_groups_fixture.rs"]
+mod routing_groups_fixture;
+
+#[cfg(feature = "gui")]
+pub async fn verify_shared_routing_flow(case: &str) {
+    routing_groups_fixture::verify(case).await;
+}
+
+#[cfg(feature = "gui")]
+pub fn shared_routing_wire_fixture() -> serde_json::Value {
+    routing_groups_fixture::wire_fixture()
+}
+
+#[cfg(feature = "gui")]
+#[path = "services/shared_routing_fixture.rs"]
+mod shared_routing_fixture;
+#[cfg(feature = "gui")]
+pub async fn verify_shared_routing_target_owner(state: &AppState, case: &str) {
+    shared_routing_fixture::verify(state, case).await;
+}
+
+/// Synthetic relay discovery/selection, real credential reconciliation and persistence.
+#[cfg(feature = "gui")]
+pub async fn verify_selected_relay_provisioning(case: &str) {
+    crate::commands::verify_selected_provisioning_fixture(case).await;
+}
+
+#[cfg(feature = "gui")]
+pub async fn verify_minimax_shared_source(session: Arc<SecretSession>, case: &str) {
+    // The existing constructor performs the fresh HOME/database/mode guard
+    // before creating this fixture's state; do not require it again afterward.
+    let state = direct_state(session, None, &[AppType::Claude, AppType::Codex]).unwrap();
+    crate::minimax_code::routing_source_fixture::verify(&state, case).await;
+}
+
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+pub async fn verify_minimax_shared_flow(session: Arc<SecretSession>, case: &str) {
+    let state = direct_state(session, None, &[AppType::Claude, AppType::Codex]).unwrap();
+    crate::minimax_code::shared_flow_fixture::verify(&state, case).await;
+}
+
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+pub async fn verify_workbuddy_shared_flow(session: Arc<SecretSession>, case: &str) {
+    let state = direct_state(session, None, &[AppType::Claude, AppType::Codex]).unwrap();
+    crate::workbuddy::shared_routing_fixture::verify(&state, case).await;
+}
+
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+pub fn verify_qoder_shared_source(case: &str) {
+    crate::database::verify_routing_source_fixture(case);
+}
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+pub async fn verify_qoder_shared_flow(case: &str) {
+    crate::proxy::server::verify_qoder_shared_flow(case).await;
+}
+
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+pub async fn verify_opencode_shared_flow(case: &str) {
+    crate::proxy::opencode_shared_fixture::verify(case).await;
+}
+
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+pub fn verify_openrouter_source_fixture(case: &str) {
+    crate::services::openrouter_source::verify_fixture(case);
+}
+
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+pub async fn verify_openrouter_shared_flow(case: &str) {
+    crate::proxy::openrouter_shared_fixture::verify(case).await;
+}
+
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+pub fn verify_database_replacement_lease_epoch() {
+    // Pure session lifecycle only: no backup, restore, import or userdata call.
+    let db = Database::memory().unwrap();
+    let session = db.secret_session();
+    let vault = session.read().unwrap();
+    let original = session.lifecycle_epoch();
+    session.invalidate_database_leases();
+    assert_ne!(
+        original,
+        session.lifecycle_epoch(),
+        "old database lease must retire"
+    );
+    session.ensure_available().unwrap();
+    drop(vault);
+    session.set_blocked(true);
+    let blocked = session.lifecycle_epoch();
+    session.invalidate_database_leases();
+    assert_ne!(blocked, session.lifecycle_epoch());
+    assert!(
+        session.ensure_available().is_err(),
+        "invalidation must not unlock recovery"
+    );
+    session.set_blocked(false);
+    assert_ne!(
+        original,
+        session.lifecycle_epoch(),
+        "unblock must not revive old lease"
+    );
+}
+
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+pub fn verify_shared_final_model_override() {
+    crate::proxy::verify_shared_final_model_override();
+}
+
+#[cfg(all(feature = "gui", feature = "test-hooks", unix))]
+pub async fn verify_zcode_shared_flow(case: &str) {
+    crate::proxy::zcode_shared_fixture::verify(case).await;
+}
+
+#[cfg(all(feature = "gui", feature = "test-hooks", unix))]
+pub async fn verify_zcode_routing_owner(case: &str) {
+    let _home = crate::secrets::testing::TestHome::new().unwrap();
+    let db = crate::database::Database::memory().unwrap();
+    crate::zcode_accounts::inference::verify_routing_owner(db.secrets.clone(), case).await;
+}
+
+/// Synthetic fresh plaintext owners, not a real-account or conversion acceptance test.
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+pub async fn verify_shared_pool_storage(case: &str) {
+    crate::services::native_source_guard::storage_fixture::verify(case).await;
+}

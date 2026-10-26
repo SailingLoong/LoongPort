@@ -207,6 +207,10 @@ fn select_locked_with_request(
     catalog_decision: Option<&CatalogDecision>,
     request: Option<&crate::mode::state::SaveRequest>,
 ) -> Result<crate::services::SwitchResult, AppError> {
+    crate::services::shared_routing::ensure_legacy_selection_allowed(&state.db, app)?;
+    if order.is_some() {
+        crate::services::shared_routing::ensure_legacy_policy_edit_allowed(&state.db, app)?;
+    }
     crate::mode::operation::AppWrite::begin_mode(&state.proxy_service, app)?;
     let previous = state
         .db
@@ -219,6 +223,7 @@ fn select_locked_with_request(
     };
     if let Some(model) = &selection.model {
         target.saved_row = Some(crate::mode::state::SavedRow {
+            credential_write: None,
             before: crate::database::Database::provider_update_digest(&previous)?,
             provider: crate::database::Database::provider_update_value(&provider)?,
             clear_model_preference: false,
@@ -263,6 +268,7 @@ fn apply_order_locked_with_request(
     order: &RoutingOrder,
     request: Option<&crate::mode::state::SaveRequest>,
 ) -> Result<(), AppError> {
+    crate::services::shared_routing::ensure_legacy_policy_edit_allowed(&state.db, app)?;
     if !crate::mode::operation::uses_upstream4_schema(&state.db)? {
         return crate::services::order_profiles::apply_order(
             &state.db,
@@ -493,6 +499,18 @@ fn verify_legacy_routing_review(
     Ok(())
 }
 
+fn ensure_legacy_change_allowed(
+    state: &AppState,
+    app: &AppType,
+    change: &ApplicationRoutingChange,
+) -> Result<(), AppError> {
+    if change.order.is_some() {
+        crate::services::shared_routing::ensure_legacy_policy_edit_allowed(&state.db, app)
+    } else {
+        crate::services::shared_routing::ensure_legacy_selection_allowed(&state.db, app)
+    }
+}
+
 pub(crate) fn prepare_routing_strategy(
     state: &AppState,
     app: &AppType,
@@ -501,6 +519,7 @@ pub(crate) fn prepare_routing_strategy(
 ) -> Result<PreparedRoutingRequest, AppError> {
     let _switch =
         futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.as_str()));
+    ensure_legacy_change_allowed(state, app, change)?;
     if app.supports_local_proxy() && !crate::mode::operation::uses_upstream4_schema(&state.db)? {
         let review = LegacyRoutingReview {
             draft_digest: routing_request_digest(app, change)?,
@@ -532,6 +551,7 @@ fn prepare_native_routing_request_locked(
     change: &ApplicationRoutingChange,
     id: &str,
 ) -> Result<crate::mode::state::SaveRequest, AppError> {
+    ensure_legacy_change_allowed(state, app, change)?;
     let request = crate::mode::state::SaveRequest {
         id: id.into(),
         scope: crate::mode::state::SaveScope::ApplicationRouting,
@@ -708,6 +728,7 @@ pub(crate) fn apply_requested_routing_locked(
             None,
         ));
     }
+    ensure_legacy_change_allowed(state, app, change)?;
     // Another receipt is unknown, not proof of failure. Only a freshly reviewed
     // request pinned to these original owners may begin a new write.
     if request.revision != routing_request_revision(state, app, change)? {
@@ -1537,6 +1558,7 @@ pub(crate) async fn initialize_manual_routing(
     app: &AppType,
 ) -> Result<(), AppError> {
     let _guard = state.proxy_service.lock_switch_for_app(app.as_str()).await;
+    crate::services::shared_routing::ensure_legacy_policy_edit_allowed(&state.db, app)?;
     crate::mode::operation::admit_metadata_write(&state.proxy_service, app)?;
     crate::proxy::application_routing::migrate(&state.db, app.as_str())
 }

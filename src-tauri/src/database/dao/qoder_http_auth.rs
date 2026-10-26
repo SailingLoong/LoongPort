@@ -6,6 +6,7 @@ use crate::secrets::{
 use crate::services::provider::qoder_http_auth::*;
 use crate::{database::Database, error::AppError, provider::Provider};
 use rusqlite::{params, Connection, Transaction, TransactionBehavior};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 pub(crate) const COLUMN: &str = "qoder_http_secret";
@@ -101,6 +102,150 @@ fn read_on(
     let plaintext = Zeroizing::new(open_db(vault, "providers", COLUMN, &[id, "codex"], &raw)?);
     Ok((raw, Record::decode(&plaintext)?))
 }
+/// Credential-free original-owner facts for shared routing. Not a public DTO.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct RoutingSourceFact {
+    pub account_id: String,
+    pub platform: &'static str,
+    pub stable_evidence: String,
+}
+
+/// The caller owns the existing vault and connection guards; never locks,
+/// refreshes, discovers models, or writes an account from this read path.
+pub(crate) fn routing_source_on(
+    conn: &Connection,
+    vault: &StorageContext,
+    provider: &Provider,
+    now_ms: i64,
+) -> Result<Option<RoutingSourceFact>, AppError> {
+    if now_ms < 0 {
+        return Err(denied("clock_invalid"));
+    }
+    if SourceKind::from_provider(provider).is_err() {
+        return Ok(None);
+    }
+    validate_column(conn)?;
+    let (source, _pat) = SourceBinding::from_provider(provider)?;
+    let (_, record) = read_on(conn, vault, &provider.id)?;
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    source_matches(&record, &source)?;
+    routing_fact_from_record(vault, &record, now_ms)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RoutingSourceAvailability {
+    Ready,
+    RefreshPending,
+    CredentialsExpired,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RoutingIdentityFact {
+    pub fact: RoutingSourceFact,
+    pub availability: RoutingSourceAvailability,
+}
+
+/// Known identity and original-owner availability, not send admission.
+pub(crate) fn routing_identity_on(
+    conn: &Connection,
+    vault: &StorageContext,
+    provider: &Provider,
+    now_ms: i64,
+) -> Result<Option<RoutingIdentityFact>, AppError> {
+    if now_ms < 0 {
+        return Err(denied("clock_invalid"));
+    }
+    if SourceKind::from_provider(provider).is_err() {
+        return Ok(None);
+    }
+    validate_column(conn)?;
+    let (source, _pat) = SourceBinding::from_provider(provider)?;
+    let (_, record) = read_on(conn, vault, &provider.id)?;
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    source_matches(&record, &source)?;
+    let (identity, availability) = match &record.phase {
+        Phase::Ready { identity, tokens } => {
+            let unavailable = tokens.expires_at_ms <= now_ms.saturating_add(REFRESH_MARGIN_MS)
+                && tokens.refresh_token.trim().is_empty();
+            (
+                identity,
+                if unavailable {
+                    RoutingSourceAvailability::CredentialsExpired
+                } else {
+                    RoutingSourceAvailability::Ready
+                },
+            )
+        }
+        Phase::RefreshPending { identity, .. } => {
+            (identity, RoutingSourceAvailability::RefreshPending)
+        }
+        Phase::Establishing { .. } | Phase::Unknown { .. } => return Ok(None),
+    };
+    Ok(Some(RoutingIdentityFact {
+        fact: routing_fact_for_identity(vault, &record, identity)?,
+        availability,
+    }))
+}
+
+fn routing_fact_from_record(
+    vault: &StorageContext,
+    record: &Record,
+    now_ms: i64,
+) -> Result<Option<RoutingSourceFact>, AppError> {
+    let Phase::Ready { identity, tokens } = &record.phase else {
+        return Ok(None);
+    };
+    // Match original acquire admission without spending its refresh budget.
+    if tokens.expires_at_ms <= now_ms.saturating_add(REFRESH_MARGIN_MS)
+        && tokens.refresh_token.trim().is_empty()
+    {
+        return Ok(None);
+    }
+    Ok(Some(routing_fact_for_identity(vault, record, identity)?))
+}
+
+fn routing_fact_for_identity(
+    vault: &StorageContext,
+    record: &Record,
+    identity: &Identity,
+) -> Result<RoutingSourceFact, AppError> {
+    let (realm, platform) = match record.source.source {
+        SourceKind::InternationalQoderPat => ("international", "qoder_sdk"),
+        SourceKind::ChinaQoderPat | SourceKind::ChinaQoderDevice => ("cn", "qoder_cn"),
+    };
+    let opaque = |domain: &[u8], value: serde_json::Value| -> Result<String, AppError> {
+        let encoded =
+            Zeroizing::new(serde_json::to_vec(&value).map_err(|_| denied("invalid_record"))?);
+        let mut digest = Sha256::new();
+        digest.update(domain);
+        digest.update(encoded.as_slice());
+        Ok(hex::encode(digest.finalize()))
+    };
+    Ok(RoutingSourceFact {
+        account_id: opaque(
+            b"loongport.qoder-routing.account.v1\0",
+            serde_json::json!([realm, identity.uid]),
+        )?,
+        platform,
+        // The exact original declaration and identity incarnation survive normal
+        // refresh. Token/record generations and session epochs are runtime fences,
+        // not a persistent identity that changes whenever an access token rotates.
+        stable_evidence: opaque(
+            b"loongport.qoder-routing.evidence.v1\0",
+            serde_json::json!([
+                vault.identity().store_id(),
+                record.format,
+                record.source,
+                identity.uid,
+                identity.machine_id
+            ]),
+        )?,
+    })
+}
+
 fn publish_on(
     conn: &Connection,
     vault: &StorageContext,
@@ -316,11 +461,26 @@ impl Database {
         expected: &SourceBinding,
         now_ms: i64,
     ) -> Result<Acquisition, AppError> {
+        self.qoder_http_acquire_for_route(expected, now_ms, None, None)
+    }
+
+    /// Consume reviewed routing identity in the original acquisition transaction,
+    /// before either returning credentials or reserving a refresh token.
+    pub(crate) fn qoder_http_acquire_for_route(
+        &self,
+        expected: &SourceBinding,
+        now_ms: i64,
+        expected_routing: Option<&RoutingSourceFact>,
+        expected_epoch: Option<u64>,
+    ) -> Result<Acquisition, AppError> {
         if now_ms < 0 {
             return Err(denied("clock_invalid"));
         }
         let provider_id = &expected.provider_id;
         self.with_qoder_http(provider_id, |tx, vault, epoch, _, source, _| {
+            if expected_epoch.is_some_and(|expected| expected != epoch) {
+                return Err(denied("stale_owner"));
+            }
             // Bind the request's already-selected Provider before spending a
             // refresh for the current row. This comparison and Pending CAS
             // share the same original Immediate transaction (no TOCTOU gap).
@@ -338,6 +498,12 @@ impl Database {
                     _ => "outcome_unknown_reestablish_required",
                 }));
             };
+            if let Some(expected) = expected_routing {
+                let current = routing_fact_from_record(vault, &record, now_ms)?;
+                if current.as_ref() != Some(expected) {
+                    return Err(denied("selected_identity_changed"));
+                }
+            }
             if tokens.expires_at_ms > now_ms.saturating_add(REFRESH_MARGIN_MS) {
                 return Ok(Acquisition::Ready(snapshot(&record, epoch)?));
             }
@@ -682,3 +848,12 @@ impl Database {
 #[cfg(test)]
 #[path = "qoder_http_auth_read_tests.rs"]
 mod read_tests;
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "qoder_shared_source_tests.rs"]
+mod shared_source_tests;
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_routing_source_fixture(case: &str) {
+    shared_source_tests::verify(case);
+}

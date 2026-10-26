@@ -109,11 +109,13 @@ export function useProviderActions(activeApp: AppId) {
       provider: Provider,
       originalId?: string,
       edit?: ProviderUpdateInput["edit"],
+      credentialWrite?: boolean,
     ) => {
       const result = await updateProviderMutation.mutateAsync({
         provider,
         originalId,
         ...(edit ? { edit } : {}),
+        ...(credentialWrite ? { credentialWrite: true } : {}),
       });
       if (edit && !completedProviderEdit(result, activeApp, edit.request))
         return result;

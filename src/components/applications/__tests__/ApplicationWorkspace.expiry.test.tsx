@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, cleanup } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { ApplicationWorkspace } from "../ApplicationWorkspace";
+import { ExpiryStrategySelect } from "../ExpiryStrategySelect";
 
 const boundary = vi.hoisted(() => ({
   stored: "cheapest",
@@ -13,7 +13,7 @@ const boundary = vi.hoisted(() => ({
   loseReply: false,
   setFailover: vi.fn(),
 }));
-// Only IPC is replaced. The production API, query cache, select and Workspace
+// Only IPC is replaced. The production API, query cache and strategy select
 // remain real; Rust tests exercise this exact command against the real database.
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: async (command: string, payload: Record<string, string>) => {
@@ -38,40 +38,6 @@ vi.mock("@tauri-apps/api/core", () => ({
       return;
     }
     throw new Error(`unexpected IPC ${command}`);
-  },
-}));
-vi.mock("../useApplicationOverview", () => ({
-  useApplicationOverview: () => ({
-    data: { configurations: [], recentProviderIds: [], isAdditive: false },
-    isPending: false,
-    error: null,
-    busy: false,
-    refetch: vi.fn(),
-  }),
-}));
-vi.mock("../useApplicationRouting", () => ({
-  useApplicationRouting: () => ({
-    data: { tiers: [], autoFailoverEnabled: false, model: null },
-    isPending: false,
-    error: null,
-    busy: false,
-    refetch: vi.fn(),
-    setFailover: boundary.setFailover,
-  }),
-}));
-vi.mock("@/lib/api/orderProfiles", () => ({
-  orderProfilesApi: {
-    list: vi.fn().mockResolvedValue({ profiles: [], current: null }),
-  },
-}));
-vi.mock("@/lib/api/modelVerification", () => ({
-  modelVerificationApi: { listSummaries: vi.fn().mockResolvedValue([]) },
-}));
-vi.mock("@/lib/api/startupUpgrade", () => ({
-  startupUpgradeApi: {
-    query: vi
-      .fn()
-      .mockResolvedValue({ status: "runtime_active", reviewToken: null }),
   },
 }));
 vi.mock("react-i18next", () => ({
@@ -104,14 +70,7 @@ function mount(
   clients.push(client);
   return render(
     <QueryClientProvider client={client}>
-      <ApplicationWorkspace
-        appId={appId}
-        providers={{}}
-        onSwitchProvider={vi.fn()}
-        onOpenAccount={vi.fn()}
-        onAdd={vi.fn()}
-        children={null}
-      />
+      <ExpiryStrategySelect appId={appId} disabled={false} />
     </QueryClientProvider>,
   );
 }

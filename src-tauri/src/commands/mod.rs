@@ -147,3 +147,6 @@ pub(crate) use minimax_code::*;
 pub(crate) mod trae_accounts;
 #[cfg(any(feature = "gui", test))]
 pub(crate) mod trae_models;
+
+mod shared_routing;
+pub use shared_routing::*;

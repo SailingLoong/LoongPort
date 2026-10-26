@@ -24,6 +24,7 @@
 //! ```
 
 pub(crate) mod backup;
+pub(crate) mod credential_revision;
 mod dao;
 pub(crate) mod inspection;
 /// LoongPort 自己的迁移，与上游 cc-switch 的完全分离（各记各的版本号）。
@@ -62,10 +63,16 @@ pub(crate) use dao::proxy::{
     PRICING_SOURCE_RESPONSE,
 };
 #[cfg(test)]
-pub(crate) use dao::qoder_campaign_operations::{
-    create_schema as create_qoder_campaign_operations_schema,
-    read_rows as read_qoder_campaign_operation_rows,
-};
+pub(crate) use dao::qoder_campaign_operations::create_schema as create_qoder_campaign_operations_schema;
+
+// The same original unit-test aliases, only for the explicit native test harness.
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) use dao::qoder_campaign_operations::read_rows as read_qoder_campaign_operation_rows;
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) use dao::qoder_http_auth::create_column as create_qoder_http_auth_column;
+
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) use dao::qoder_campaign_operations::migrate_cn_schema as migrate_qoder_cn_schema_for_test;
 
 // Narrow CN operation hooks for the original claim service. Keep the DAO private.
 pub(crate) use dao::qoder_campaign_operations::{
@@ -78,7 +85,6 @@ pub(crate) use dao::qoder_campaign_operations::{
 
 #[cfg(test)]
 pub(crate) use dao::qoder_http_auth::{
-    create_column as create_qoder_http_auth_column,
     validate_column as validate_qoder_http_auth_column, COLUMN as QODER_HTTP_AUTH_COLUMN,
 };
 
@@ -485,6 +491,19 @@ impl Database {
         Ok(count == 0)
     }
 }
+
+#[cfg(feature = "test-hooks")]
+pub(crate) use dao::qoder_http_auth::verify_routing_source_fixture;
+
+pub(crate) use dao::qoder_http_auth::{
+    routing_source_on as qoder_routing_source_on, RoutingSourceFact as QoderRoutingSourceFact,
+};
+
+pub(crate) use dao::qoder_http_auth::{
+    routing_identity_on as qoder_routing_identity_on,
+    RoutingIdentityFact as QoderRoutingIdentityFact,
+    RoutingSourceAvailability as QoderRoutingSourceAvailability,
+};
 
 #[cfg(test)]
 mod diagnostic_connection_tests {

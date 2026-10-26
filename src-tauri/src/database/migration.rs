@@ -123,6 +123,12 @@ impl Database {
                 )
                 .map_err(|e| AppError::Database(format!("Migrate provider failed: {e}")))?;
 
+                // Original import is a fresh credential issuance, even for the same row ID.
+                tx.execute(
+                    "UPDATE providers SET credential_revision=?1 WHERE id=?2 AND app_type=?3",
+                    params![super::credential_revision::new_revision(), id, app_type],
+                )?;
+
                 // 迁移 Endpoints
                 for (url, endpoint) in endpoints {
                     super::dao::providers::insert_endpoint_on_tx(

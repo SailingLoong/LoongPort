@@ -28,13 +28,24 @@ impl Fixture {
         Self::for_app_with_schema(app, true)
     }
     fn for_app_with_schema(app: AppType, modern: bool) -> Self {
+        Self::for_app_with_database(
+            app,
+            modern,
+            if modern {
+                || initialize_database().unwrap()
+            } else {
+                || crate::secrets::testing::initialize_source17_database().unwrap()
+            },
+        )
+    }
+    fn for_app_with_database(
+        app: AppType,
+        modern: bool,
+        initialize: fn() -> crate::Database,
+    ) -> Self {
         let home = TestHome::new().unwrap();
         crate::settings::reload_settings().unwrap();
-        let db = Arc::new(if modern {
-            initialize_database().unwrap()
-        } else {
-            crate::secrets::testing::initialize_source17_database().unwrap()
-        });
+        let db = Arc::new(initialize());
         let mut proxy_config = crate::rt::block_on(db.get_global_proxy_config()).unwrap();
         proxy_config.listen_port = 0;
         crate::rt::block_on(db.update_global_proxy_config(proxy_config)).unwrap();
@@ -749,6 +760,7 @@ fn row_commit_and_readback_finish_while_key_writer_waits() {
         planned.name = "after".into();
         let target = state::PendingTarget {
             saved_row: Some(state::SavedRow {
+                credential_write: None,
                 before: crate::Database::provider_update_digest(&previous).unwrap(),
                 provider: crate::Database::provider_update_value(&planned).unwrap(),
                 clear_model_preference: false,
@@ -3158,6 +3170,7 @@ fn r3_target_readback_finishes_with_a_waiting_vault_writer() {
         let target = state::PendingTarget {
             pointer: Some("b".into()),
             saved_row: Some(state::SavedRow {
+                credential_write: None,
                 before: crate::database::Database::provider_update_digest(&before).unwrap(),
                 provider: crate::database::Database::provider_update_value(&after).unwrap(),
                 clear_model_preference: false,
@@ -5212,6 +5225,7 @@ fn editor_row_target(previous: &Provider, planned: &Provider) -> state::PendingT
             revision: "e".repeat(64),
         }),
         saved_row: Some(state::SavedRow {
+            credential_write: None,
             before: crate::database::Database::provider_update_digest(previous).unwrap(),
             provider: crate::database::Database::provider_update_value(planned).unwrap(),
             clear_model_preference: false,
@@ -8586,3 +8600,347 @@ fn u01_reviewed_direct_pointer_change_with_identical_native_bytes_rejects_old_re
 #[cfg(test)]
 #[path = "model_settings_controller_tests.rs"]
 mod model_settings_controller_tests;
+
+/// Real original editor/journal/SQL consumers; no new recovery owner.
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+pub(super) fn verify_credential_write(case: &str) {
+    use crate::{database::credential_revision, services::provider::edit};
+    let (plaintext, case) = case
+        .strip_prefix("plaintext_")
+        .map_or((false, case), |case| (true, case));
+    let (app, case) = case
+        .strip_prefix("codex_")
+        .map_or((AppType::Claude, case), |case| (AppType::Codex, case));
+    let fx = if plaintext {
+        Fixture::for_app_with_database(app.clone(), true, || {
+            let db =
+                crate::services::native_source_guard::storage_fixture::fresh_plaintext_database();
+            crate::settings::unlock_settings_for_test(db.secrets.clone()).unwrap();
+            db
+        })
+    } else {
+        Fixture::for_app(app.clone())
+    };
+    let pending = || {
+        state::pending(
+            &DeviceStore::for_device(),
+            &fx.state.db.secret_session().read().unwrap(),
+            app.as_str(),
+        )
+        .unwrap()
+    };
+    if case == "vendor_binding" {
+        use crate::{
+            provider::ProviderMeta,
+            vendor::{self, Vendor},
+        };
+        let account = "synthetic-binding-original";
+        let source = vendor::provision::provider_id_for("opencode", account);
+        {
+            let storage = fx.state.db.secrets.read().unwrap();
+            let conn = fx.state.db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO loongport_vendor(id,vendor_id,account_id) VALUES(701,'opencode',?1)",
+                [account],
+            )
+            .unwrap();
+            vendor::creds::set_api_key(&conn, &storage, 701, "synthetic-vendor-key").unwrap();
+        }
+        let bundle = vendor::provision::plan_rows_for(Vendor::OpenCode, account, "")
+            .into_iter()
+            .find(|b| b.plan.id_segment == "opencode")
+            .unwrap();
+        let settings = bundle
+            .rows
+            .into_iter()
+            .find(|(app, _)| *app == AppType::Codex)
+            .unwrap()
+            .1;
+        let mut origin =
+            Provider::with_id(source.clone(), "Synthetic vendor".into(), settings, None);
+        origin.meta = Some(ProviderMeta {
+            loongport_vendor_account: Some(account.into()),
+            ..Default::default()
+        });
+        fx.state.db.save_provider("codex", &origin).unwrap();
+        crate::services::vendor_source_binding::bind_vendor_source(&fx.state.db, &source, &app)
+            .unwrap();
+        let bound = fx
+            .state
+            .db
+            .get_provider_by_id(&source, "claude")
+            .unwrap()
+            .unwrap();
+        crate::mode::controller::plan_row_save(
+            &fx.state.proxy_service,
+            &app,
+            &bound,
+            &bound,
+            "d15d3030-2000-4000-8000-000000000099",
+            None,
+        )
+        .expect("original bound vendor projection must remain editable after schema31");
+        return;
+    }
+    let id = if case == "before_sql" { "a" } else { "b" };
+    let row = fx
+        .state
+        .db
+        .get_provider_by_id(id, app.as_str())
+        .unwrap()
+        .unwrap();
+    let revision = || {
+        credential_revision::provider_on(&fx.state.db.conn.lock().unwrap(), app.as_str(), id)
+            .unwrap()
+    };
+    let before = revision();
+    let request_id = "d15d3030-2000-4000-8000-000000000001";
+    if case == "legacy_replay" {
+        let preview = edit::preview(&fx.state, &app, row.clone(), id, request_id, false).unwrap();
+        assert_eq!(preview["status"], "ready");
+        let request: state::SaveRequest =
+            serde_json::from_value(preview["request"].clone()).unwrap();
+        {
+            let _fault = Fault::at("target");
+            let outcome =
+                edit::confirm(&fx.state, &app, row.clone(), id, request.clone(), false).unwrap();
+            assert_ne!(outcome["status"], "completed");
+        }
+        let journal = pending().unwrap();
+        let saved = journal.target.saved_row.as_ref().unwrap();
+        assert!(saved.credential_write.is_none());
+        let old_wire = serde_json::to_value(saved).unwrap();
+        assert!(old_wire.get("credential_write").is_none());
+        assert!(serde_json::from_value::<state::SavedRow>(old_wire)
+            .unwrap()
+            .credential_write
+            .is_none());
+        assert_eq!(revision(), before);
+        crate::mode::controller::recover_locked(&fx.state.proxy_service, &app).unwrap();
+        assert!(pending().is_none());
+        assert_eq!(
+            revision(),
+            before,
+            "old missing-proof journal cannot synthesize issuance authority"
+        );
+        let repeated = edit::confirm(&fx.state, &app, row, id, request, false).unwrap();
+        assert_eq!(repeated["status"], "completed");
+        assert_eq!(revision(), before);
+        return;
+    }
+    let preview = edit::preview_with_intent(
+        &fx.state,
+        &app,
+        row.clone(),
+        id,
+        request_id,
+        false,
+        None,
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        preview["status"], "ready",
+        "original editor must admit explicit same-key intent"
+    );
+    assert!(!preview.to_string().contains("synthetic-key"));
+    assert!(!preview.to_string().contains(&before));
+    let request: state::SaveRequest = serde_json::from_value(preview["request"].clone()).unwrap();
+    let conflict = edit::confirm_with_intent(
+        &fx.state,
+        &app,
+        row.clone(),
+        id,
+        request.clone(),
+        false,
+        None,
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        conflict["status"], "conflict",
+        "intent cannot change after preview"
+    );
+    assert_eq!(revision(), before);
+    if case == "stale" {
+        fx.state
+            .db
+            .save_provider_with_credential_intent(app.as_str(), &row, true)
+            .unwrap();
+        let current = revision();
+        assert_ne!(current, before);
+        let outcome =
+            edit::confirm_with_intent(&fx.state, &app, row, id, request, false, None, true)
+                .unwrap();
+        assert_eq!(outcome["status"], "stale");
+        assert_eq!(revision(), current);
+        return;
+    }
+    if matches!(
+        case,
+        "cleanup_reissue" | "recover_cleanup_reissue" | "legacy_cleanup_reissue"
+    ) {
+        let recovering = case == "recover_cleanup_reissue";
+        if recovering {
+            let result = {
+                let _fault = Fault::at("target");
+                edit::confirm_with_intent(
+                    &fx.state,
+                    &app,
+                    row.clone(),
+                    id,
+                    request.clone(),
+                    false,
+                    None,
+                    true,
+                )
+                .unwrap()
+            };
+            assert_ne!(result["status"], "completed");
+            assert!(pending().is_some());
+        }
+        let db = fx.state.db.clone();
+        let hit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = hit.clone();
+        let owner_id = id.to_owned();
+        let owner_app = app.as_str().to_owned();
+        failpoint::on_boundary(Some(Box::new(move |point| {
+            if point
+                == if recovering {
+                    "recover:verified"
+                } else {
+                    "target"
+                }
+            {
+                let other = db
+                    .get_provider_by_id(&owner_id, &owner_app)
+                    .unwrap()
+                    .unwrap();
+                let digest = crate::database::Database::provider_update_digest(&other).unwrap();
+                let old = credential_revision::provider_on(
+                    &db.conn.lock().unwrap(),
+                    &owner_app,
+                    &owner_id,
+                )
+                .unwrap();
+                db.save_provider_with_credential_intent(&owner_app, &other, true)
+                    .unwrap();
+                let after = db
+                    .get_provider_by_id(&owner_id, &owner_app)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    crate::database::Database::provider_update_digest(&after).unwrap(),
+                    digest
+                );
+                assert_ne!(
+                    credential_revision::provider_on(
+                        &db.conn.lock().unwrap(),
+                        &owner_app,
+                        &owner_id
+                    )
+                    .unwrap(),
+                    old
+                );
+                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        })));
+        let completed = if recovering {
+            matches!(
+                crate::mode::controller::recover_locked(&fx.state.proxy_service, &app),
+                Ok(Some(crate::mode::operation::RecoveryOutcome::RolledForward))
+            )
+        } else if case == "legacy_cleanup_reissue" {
+            ProviderService::update_with_credential_intent(
+                &fx.state,
+                app.clone(),
+                Some(id),
+                row,
+                true,
+            )
+            .is_ok()
+        } else {
+            edit::confirm_with_intent(&fx.state, &app, row, id, request, false, None, true).unwrap()
+                ["status"]
+                == "completed"
+        };
+        failpoint::on_boundary(None);
+        assert!(
+            hit.load(std::sync::atomic::Ordering::SeqCst),
+            "must reach the post-SQL/pre-cleanup boundary"
+        );
+        assert!(
+            !completed,
+            "final original readback cannot accept a third same-content issuance"
+        );
+        assert!(
+            pending().is_some(),
+            "conflicting issuance must leave original recovery evidence"
+        );
+        return;
+    }
+    let point = match case {
+        "before_sql" => Some("published:0"),
+        "after_sql" => Some("target"),
+        "replay" => None,
+        _ => panic!("unknown journal credential case"),
+    };
+    let result = {
+        let _fault = point.map(Fault::at);
+        edit::confirm_with_intent(
+            &fx.state,
+            &app,
+            row.clone(),
+            id,
+            request.clone(),
+            false,
+            None,
+            true,
+        )
+        .unwrap()
+    };
+    let next = if point.is_some() {
+        let pending_snapshot =
+            pending().expect("original journal must retain exact issuance proof");
+        let proof = pending_snapshot
+            .target
+            .saved_row
+            .as_ref()
+            .unwrap()
+            .credential_write
+            .as_ref()
+            .unwrap();
+        assert_eq!(proof.before, before);
+        proof.validate().unwrap();
+        let next = proof.next.clone();
+        if case == "before_sql" {
+            assert_eq!(revision(), before);
+        } else {
+            assert_eq!(revision(), next);
+        }
+        crate::mode::controller::recover_locked(&fx.state.proxy_service, &app).unwrap();
+        assert!(pending().is_none());
+        assert_eq!(revision(), next);
+        next
+    } else {
+        assert_eq!(result["status"], "completed");
+        let next = revision();
+        assert_ne!(next, before);
+        next
+    };
+    let repeat =
+        edit::confirm_with_intent(&fx.state, &app, row, id, request.clone(), false, None, true)
+            .unwrap();
+    assert_eq!(repeat["status"], "completed");
+    assert_eq!(
+        revision(),
+        next,
+        "same original receipt cannot rotate twice"
+    );
+    crate::mode::controller::recover_locked(&fx.state.proxy_service, &app).unwrap();
+    assert_eq!(revision(), next);
+    let result = edit::query(&fx.state, &app, request).unwrap();
+    assert_eq!(result["status"], "completed");
+    assert!(!result.to_string().contains("synthetic-key"));
+    assert!(!result.to_string().contains(&next));
+}

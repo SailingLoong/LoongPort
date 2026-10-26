@@ -504,6 +504,9 @@ function ProviderFormFull({
     onSubmittingChange?.(isSubmitting || isConfirmSubmitting);
   }, [isSubmitting, isConfirmSubmitting, onSubmittingChange]);
 
+  // Explicit original key-input interaction survives A→empty→A edits. Model,
+  // label and route controls never set this marker; it is not a credential copy.
+  const credentialTouched = useRef(false);
   const {
     apiKey,
     handleApiKeyChange,
@@ -1670,6 +1673,7 @@ function ProviderFormFull({
 
     const payload: ProviderFormValues = {
       ...values,
+      ...(credentialTouched.current ? { credentialWrite: true } : {}),
       name: values.name.trim(),
       websiteUrl: values.websiteUrl?.trim() ?? "",
       settingsConfig,
@@ -2391,7 +2395,10 @@ function ProviderFormFull({
                 shouldShowApiKey(form.getValues("settingsConfig"), isEditMode)
               }
               apiKey={apiKey}
-              onApiKeyChange={handleApiKeyChange}
+              onApiKeyChange={(value) => {
+                credentialTouched.current = true;
+                handleApiKeyChange(value);
+              }}
               category={category}
               shouldShowApiKeyLink={shouldShowClaudeApiKeyLink}
               websiteUrl={claudeWebsiteUrl}
@@ -2478,7 +2485,10 @@ function ProviderFormFull({
               selectedXaiAccountId={selectedXaiAccountId}
               onXaiAccountSelect={setSelectedXaiAccountId}
               codexApiKey={codexApiKey}
-              onApiKeyChange={handleCodexApiKeyChange}
+              onApiKeyChange={(value) => {
+                credentialTouched.current = true;
+                handleCodexApiKeyChange(value);
+              }}
               category={category}
               shouldShowApiKeyLink={shouldShowCodexApiKeyLink}
               websiteUrl={codexWebsiteUrl}
@@ -2548,7 +2558,10 @@ function ProviderFormFull({
                 isEditMode,
               )}
               apiKey={geminiApiKey}
-              onApiKeyChange={handleGeminiApiKeyChange}
+              onApiKeyChange={(value) => {
+                credentialTouched.current = true;
+                handleGeminiApiKeyChange(value);
+              }}
               category={category}
               shouldShowApiKeyLink={shouldShowGeminiApiKeyLink}
               websiteUrl={geminiWebsiteUrl}
@@ -2936,6 +2949,8 @@ function ProviderFormFull({
 }
 
 export type ProviderFormValues = ProviderFormData & {
+  /** Explicit original credential-input action; never an owner revision. */
+  credentialWrite?: boolean;
   presetId?: string;
   presetCategory?: ProviderCategory;
   meta?: ProviderMeta;

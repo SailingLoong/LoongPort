@@ -268,6 +268,15 @@ impl HttpFixture {
         terminal_fault: Option<&str>,
         source: &str,
     ) -> Self {
+        Self::new_with_refresh(accounts, reply, terminal_fault, source, false).await
+    }
+    async fn new_with_refresh(
+        accounts: &[(&str, bool)],
+        reply: Reply,
+        terminal_fault: Option<&str>,
+        source: &str,
+        refreshable: bool,
+    ) -> Self {
         let home = crate::secrets::testing::TestHome::new().unwrap();
         assert!(
             std::env::var_os("CC_SWITCH_TEST_HOME").is_some(),
@@ -359,7 +368,11 @@ impl HttpFixture {
                         uid: format!("synthetic-http-uid:{id}"),
                         tokens: TokenPair {
                             access_token: format!("synthetic-http-access:{id}"),
-                            refresh_token: String::new(),
+                            refresh_token: if refreshable {
+                                "synthetic-http-refresh".into()
+                            } else {
+                                String::new()
+                            },
                             expires_at_ms: now + 3_600_000,
                         },
                     },
@@ -581,6 +594,7 @@ fn final_response(text: &str, streaming: bool) -> Value {
     completed[0]["response"].clone()
 }
 
+#[cfg(test)]
 #[tokio::test]
 #[serial_test::serial]
 async fn http_responses_two_round_tools_preserve_id_full_history_and_schema() {
@@ -689,6 +703,7 @@ async fn http_responses_two_round_tools_preserve_id_full_history_and_schema() {
     }
 }
 
+#[cfg(test)]
 #[tokio::test]
 #[serial_test::serial]
 async fn http_original_pool_selects_authorized_second_account_for_responses_and_chat() {
@@ -713,6 +728,7 @@ async fn http_original_pool_selects_authorized_second_account_for_responses_and_
     }
 }
 
+#[cfg(test)]
 #[tokio::test]
 #[serial_test::serial]
 async fn http_unknown_submission_never_replays_on_second_account() {
@@ -735,6 +751,7 @@ async fn http_unknown_submission_never_replays_on_second_account() {
     }
 }
 
+#[cfg(test)]
 #[tokio::test]
 #[serial_test::serial]
 async fn http_partial_failure_never_completes_or_replays() {
@@ -779,6 +796,7 @@ async fn http_partial_failure_never_completes_or_replays() {
     f.idle().await;
 }
 
+#[cfg(test)]
 #[tokio::test]
 #[serial_test::serial]
 async fn http_client_body_drop_closes_upstream_without_account_replay() {
@@ -818,6 +836,7 @@ async fn http_client_body_drop_closes_upstream_without_account_replay() {
     }
 }
 
+#[cfg(test)]
 #[tokio::test]
 #[serial_test::serial]
 async fn http_revocation_before_first_final_body_poll_rejects_buffered_bytes() {
@@ -839,6 +858,7 @@ async fn http_revocation_before_first_final_body_poll_rejects_buffered_bytes() {
     assert_eq!(*f.upstream.posts.lock().await, vec!["qoder-a"]);
 }
 
+#[cfg(test)]
 #[tokio::test]
 #[serial_test::serial]
 async fn http_revocation_after_visible_prefix_blocks_notify_released_tail() {
@@ -892,6 +912,7 @@ async fn http_revocation_after_visible_prefix_blocks_notify_released_tail() {
     );
 }
 
+#[cfg(test)]
 #[tokio::test]
 #[serial_test::serial]
 async fn http_original_override_exclusion_keeps_compatible_account() {
@@ -910,6 +931,7 @@ async fn http_original_override_exclusion_keeps_compatible_account() {
     f.idle().await;
 }
 
+#[cfg(test)]
 #[tokio::test]
 #[serial_test::serial]
 async fn http_invalid_model_and_unsupported_capabilities_never_launch_worker() {
@@ -940,6 +962,7 @@ async fn http_invalid_model_and_unsupported_capabilities_never_launch_worker() {
     }
 }
 
+#[cfg(test)]
 #[tokio::test]
 #[serial_test::serial]
 async fn http_free_intent_remains_original_preflight_policy() {
@@ -967,6 +990,7 @@ async fn http_free_intent_remains_original_preflight_policy() {
     }
 }
 
+#[cfg(test)]
 #[tokio::test]
 #[serial_test::serial]
 async fn http_worker_rejects_invalid_tool_policy_before_any_upstream_get_or_post() {
@@ -996,6 +1020,7 @@ async fn http_worker_rejects_invalid_tool_policy_before_any_upstream_get_or_post
     }
 }
 
+#[cfg(test)]
 #[tokio::test]
 #[serial_test::serial]
 async fn http_supported_responses_image_is_forwarded_without_local_url_fetch() {
@@ -1011,6 +1036,7 @@ async fn http_supported_responses_image_is_forwarded_without_local_url_fetch() {
     f.idle().await;
 }
 
+#[cfg(test)]
 #[tokio::test]
 #[serial_test::serial]
 async fn http_free_only_provider_and_untrusted_runtime_hints_remain_preflight_rejections() {
@@ -1052,6 +1078,7 @@ async fn http_free_only_provider_and_untrusted_runtime_hints_remain_preflight_re
     f.idle().await;
 }
 
+#[cfg(test)]
 #[tokio::test]
 #[serial_test::serial]
 async fn http_complete_chat_done_cannot_hide_missing_end_or_nonzero_worker_exit() {
@@ -1113,6 +1140,7 @@ async fn http_complete_chat_done_cannot_hide_missing_end_or_nonzero_worker_exit(
     }
 }
 
+#[cfg(test)]
 #[tokio::test]
 #[serial_test::serial]
 async fn http_concurrent_chat_requests_have_independent_completion_ids() {
@@ -1143,6 +1171,7 @@ async fn http_concurrent_chat_requests_have_independent_completion_ids() {
     f.idle().await;
 }
 
+#[cfg(test)]
 #[tokio::test]
 #[serial_test::serial]
 async fn http_fragmented_private_jsonl_still_completes_chat() {
@@ -1184,6 +1213,7 @@ async fn http_fragmented_private_jsonl_still_completes_chat() {
     f.idle().await;
 }
 
+#[cfg(test)]
 #[tokio::test]
 #[serial_test::serial]
 async fn http_cleanup_failure_after_complete_chat_cannot_publish_success() {
@@ -1245,6 +1275,7 @@ async fn http_cleanup_failure_after_complete_chat_cannot_publish_success() {
     }
 }
 
+#[cfg(test)]
 #[tokio::test]
 #[serial_test::serial]
 async fn http_chat_three_message_history_ignores_request_auth_and_runtime_hints() {
@@ -1318,6 +1349,7 @@ async fn http_chat_three_message_history_ignores_request_auth_and_runtime_hints(
     }
 }
 
+#[cfg(test)]
 #[tokio::test]
 #[serial_test::serial]
 async fn http_nonstream_source_error_is_bad_gateway_without_completion_or_replay() {
@@ -1360,6 +1392,7 @@ async fn http_nonstream_source_error_is_bad_gateway_without_completion_or_replay
     }
 }
 
+#[cfg(test)]
 #[tokio::test]
 #[serial_test::serial]
 async fn http_cn_device_original_pool_selects_ready_account_without_pat_or_auth_exchange() {
@@ -1390,6 +1423,7 @@ async fn http_cn_device_original_pool_selects_ready_account_without_pat_or_auth_
     }
 }
 
+#[cfg(test)]
 #[tokio::test]
 #[serial_test::serial]
 async fn http_cn_device_unknown_post_and_partial_output_never_replay_or_complete() {
@@ -1426,6 +1460,7 @@ async fn http_cn_device_unknown_post_and_partial_output_never_replay_or_complete
     }
 }
 
+#[cfg(test)]
 #[tokio::test]
 #[serial_test::serial]
 async fn http_cn_device_auth_refusal_retires_exact_owner_without_replaying_second_account() {
@@ -1450,6 +1485,7 @@ async fn http_cn_device_auth_refusal_retires_exact_owner_without_replaying_secon
     f.idle().await;
 }
 
+#[cfg(test)]
 #[tokio::test]
 #[serial_test::serial]
 async fn http_cn_device_business_403_keeps_ready_credentials_and_never_replays() {
@@ -1473,4 +1509,725 @@ async fn http_cn_device_business_403_keeps_ready_credentials_and_never_replays()
         assert_eq!(serde_json::to_value(context).unwrap()["status"], "ready");
     }
     f.idle().await;
+}
+
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+pub(crate) async fn verify_shared(case: &str) {
+    if matches!(
+        case,
+        "mixed"
+            | "mixed_review"
+            | "bad_mm"
+            | "bad_wb"
+            | "bad_qoder"
+            | "pending_auto"
+            | "pending_manual"
+            | "pending_new_group"
+            | "bad_qoder_runtime"
+            | "unsupported_manual"
+            | "unknown_member"
+            | "conflicting_member_model"
+            | "all_unsupported"
+    ) {
+        return verify_mixed(case).await;
+    }
+    use crate::services::{routing_groups as groups, shared_routing as routing};
+    let source = if case == "cn" {
+        "qoder_cn_device"
+    } else {
+        "qoder_sdk"
+    };
+    let f = HttpFixture::new_with_source(
+        &[("qoder-a", true), ("qoder-b", true)],
+        match case {
+            "tools" => Reply::ToolsThenText,
+            "submitted_unknown" => Reply::Unknown,
+            "submitted_partial" => Reply::PartialFailure,
+            _ => Reply::Plain,
+        },
+        None,
+        source,
+    )
+    .await;
+    for id in ["qoder-a", "qoder-b"] {
+        let mut p = f.db.get_provider_by_id(id, "codex").unwrap().unwrap();
+        let config = p.settings_config["config"].as_str().unwrap();
+        p.settings_config["config"] = json!(format!("model = {MODEL:?}\n{config}"));
+        if case == "model_options" {
+            p.meta
+                .get_or_insert_with(Default::default)
+                .local_proxy_request_overrides =
+                Some(crate::provider::LocalProxyRequestOverrides {
+                    body: Some(json!({"model":"synthetic-forbidden-late-qoder-model"})),
+                    ..Default::default()
+                });
+        }
+        f.db.save_provider("codex", &p).unwrap();
+    }
+    crate::settings::unlock_settings_for_test(f.db.secrets.clone()).unwrap();
+    let state = crate::store::AppState::new(f.db.clone()).unwrap();
+    let sources = crate::commands::get_service_sources_impl(&state).unwrap();
+    let mut members = Vec::new();
+    for id in ["qoder-a", "qoder-b"] {
+        let row = sources
+            .iter()
+            .find(|s| s.bindings.iter().any(|b| b.provider_id == id));
+        assert!(row.is_some(), "original authorized Qoder account must project an explicit configured-model shared source");
+        let row = row.unwrap();
+        assert_eq!(row.bindings.len(), 1);
+        assert_eq!(row.bindings[0].app_id, "codex");
+        assert_eq!(row.bindings[0].model.as_deref(), Some(MODEL));
+        let dto = serde_json::to_string(row).unwrap();
+        for private in [
+            "synthetic-http-uid",
+            "synthetic-http-access",
+            "synthetic-original-pat",
+            "machineId",
+            "stableEvidence",
+        ] {
+            assert!(!dto.contains(private));
+        }
+        members.push(groups::Member {
+            source_id: row.source_id.clone(),
+            model: MODEL.into(),
+        });
+    }
+    if case == "source" {
+        return;
+    }
+    if matches!(
+        case,
+        "review" | "tools" | "group_epoch" | "target_epoch" | "model_options"
+    ) {
+        Database::apply_upstream4_migrations_on_conn(&f.db.conn.lock().unwrap()).unwrap();
+        {
+            let vault = f.db.secret_session().read().unwrap();
+            crate::mode::state::update_app(
+                &crate::live::engine::DeviceStore::for_device(),
+                &vault,
+                "codex",
+                |entry| {
+                    entry.mode = Some(crate::mode::state::Mode::Direct);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        }
+        let prepared = tokio::task::block_in_place(|| {
+            routing::prepare_group(
+                &state,
+                routing::GroupDraft {
+                    id: None,
+                    expected_revision: None,
+                    name: "Qoder shared".into(),
+                    members: members.clone(),
+                },
+            )
+        })
+        .unwrap();
+        if case == "group_epoch" {
+            let session = f.db.secrets.clone();
+            let result = tokio::task::block_in_place(|| {
+                crate::mode::operation::failpoint::on_boundary(Some(Box::new(move |point| {
+                    if point == "shared_group:validated" {
+                        session.set_blocked(true);
+                        session.set_blocked(false);
+                    }
+                })));
+                let result = routing::confirm_group(&state, prepared.clone());
+                crate::mode::operation::failpoint::on_boundary(None);
+                result
+            });
+            assert!(
+                result.is_err(),
+                "Qoder-only group CAS must reject block/unblock during this operation"
+            );
+            assert!(groups::read(&f.db.conn.lock().unwrap(), &prepared.group.id)
+                .unwrap()
+                .is_none());
+            tokio::task::block_in_place(|| routing::confirm_group(&state, prepared)).unwrap();
+            return;
+        }
+        let group =
+            tokio::task::block_in_place(|| routing::confirm_group(&state, prepared)).unwrap();
+        let app = crate::app_config::AppType::Codex;
+        let bootstrap = Provider::with_id(
+            "synthetic-bootstrap".into(),
+            "Bootstrap".into(),
+            crate::relay::provider_config::settings_config_for(
+                &app,
+                "synthetic-bootstrap-key",
+                "Fixture",
+                "http://127.0.0.1:9",
+                "bootstrap-model",
+            )
+            .unwrap(),
+            None,
+        );
+        f.db.save_provider("codex", &bootstrap).unwrap();
+        tokio::task::block_in_place(|| {
+            crate::services::ProviderService::switch(&state, app.clone(), &bootstrap.id)
+        })
+        .unwrap();
+        state
+            .proxy_service
+            .set_takeover_for_app("codex", true)
+            .await
+            .unwrap();
+        let target = groups::RouteTarget::OrderedGroup { group_id: group.id };
+        let prepared =
+            tokio::task::block_in_place(|| routing::prepare_target(&state, &app, target)).unwrap();
+        if case == "target_epoch" {
+            let session = f.db.secrets.clone();
+            let result = tokio::task::block_in_place(|| {
+                crate::mode::operation::failpoint::on_boundary(Some(Box::new(move |point| {
+                    if point == "route_target:validated" {
+                        session.set_blocked(true);
+                        session.set_blocked(false);
+                    }
+                })));
+                let result = routing::apply_target(&state, &app, prepared.clone());
+                crate::mode::operation::failpoint::on_boundary(None);
+                result
+            });
+            assert!(
+                result.is_err(),
+                "Qoder-only target CAS must reject block/unblock during this operation"
+            );
+            assert!(groups::binding(&f.db.conn.lock().unwrap(), "codex")
+                .unwrap()
+                .is_none());
+            let recovered = tokio::task::block_in_place(|| {
+                routing::recover_target(&state, &app, prepared.request.clone())
+            })
+            .unwrap();
+            assert_eq!(
+                recovered.status, "completed",
+                "persisted intent must recover under the new operation epoch"
+            );
+            state.proxy_service.stop().await.unwrap();
+            return;
+        }
+        let result =
+            tokio::task::block_in_place(|| routing::apply_target(&state, &app, prepared)).unwrap();
+        assert_eq!(result.status, "completed");
+    } else {
+        let mut conn = f.db.conn.lock().unwrap();
+        let group = groups::save(&mut conn, "qoder-shared", None, &members).unwrap();
+        let target = if case == "manual" {
+            groups::RouteTarget::Manual {
+                source_id: members[0].source_id.clone(),
+                model: MODEL.into(),
+            }
+        } else {
+            groups::RouteTarget::OrderedGroup {
+                group_id: group.id.clone(),
+            }
+        };
+        groups::set_target(
+            &mut conn,
+            "codex",
+            target,
+            None,
+            (case != "manual").then_some(group.revision),
+        )
+        .unwrap();
+    }
+    if matches!(case, "submitted_unknown" | "submitted_partial") {
+        let response = f
+            .request(
+                "/v1/responses",
+                json!({"model":"caller-alias","stream":true,"input":"hello"}),
+            )
+            .await;
+        if case == "submitted_unknown" {
+            assert!(!response.status().is_success());
+            let _ = text(response).await;
+        } else {
+            assert_eq!(response.status(), StatusCode::OK);
+            let mut stream = response.into_body().into_data_stream();
+            let mut captured = Vec::new();
+            let mut failed = false;
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while let Some(chunk) = stream.next().await {
+                    match chunk {
+                        Ok(bytes) => captured.extend_from_slice(&bytes),
+                        Err(_) => {
+                            failed = true;
+                            break;
+                        }
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            drop(stream);
+            let body = String::from_utf8(captured).unwrap();
+            assert!(failed || body.contains("response.failed") || body.contains("\"error\""));
+            assert!(body.contains("partial-before-failure"));
+            assert!(!body.contains("response.completed"));
+            assert!(!body.contains("PRIVATE_UPSTREAM_ERROR"));
+        }
+        assert_eq!(*f.upstream.posts.lock().await, vec!["qoder-a"]);
+        verify_shared_trace(&f, 1);
+        f.idle().await;
+        return;
+    }
+    if case == "tools" {
+        let first = f
+            .request(
+                "/v1/responses",
+                json!({"model":"caller-alias","tools":response_tools(),"input":"Read fixture"}),
+            )
+            .await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let value = final_response(&text(first).await, false);
+        let output = value["output"].as_array().unwrap();
+        let call = output
+            .iter()
+            .find(|v| v["type"] == "function_call")
+            .unwrap();
+        assert_eq!(call["call_id"], TOOL_ID);
+        let mut input = vec![json!({"role":"user","content":"Read fixture"})];
+        input.extend(output.iter().cloned());
+        input.push(json!({"type":"function_call_output","call_id":TOOL_ID,"output":"synthetic client result"}));
+        let second = f
+            .request(
+                "/v1/responses",
+                json!({"model":"caller-alias","tools":response_tools(),"input":input}),
+            )
+            .await;
+        assert_eq!(second.status(), StatusCode::OK);
+        assert!(text(second).await.contains("tool-result-summary"));
+        let sent = f.sent();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(
+            sent[1]["body"]["tools"][0]["function"]["parameters"],
+            response_tools()[0]["parameters"]
+        );
+        assert!(sent[1]["body"]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["role"] == "tool"
+                && v["tool_call_id"] == TOOL_ID
+                && v["content"] == "synthetic client result"));
+        assert_eq!(*f.upstream.posts.lock().await, vec!["qoder-a", "qoder-a"]);
+        verify_shared_trace(&f, 2);
+        state.proxy_service.stop().await.unwrap();
+        f.idle().await;
+        return;
+    }
+    let response = f
+        .request(
+            "/v1/responses",
+            json!({"model":"caller-alias", "input":"hello"}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(text(response).await.contains("ordered-history-and-auth-ok"));
+    assert_eq!(*f.upstream.posts.lock().await, vec!["qoder-a"]);
+    verify_shared_trace(&f, 1);
+    if matches!(case, "review" | "model_options") {
+        state.proxy_service.stop().await.unwrap();
+    }
+    f.idle().await;
+}
+
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+fn verify_shared_trace(f: &HttpFixture, requests: usize) {
+    let trace = f.trace();
+    let network = trace
+        .iter()
+        .filter(|v| v["kind"] == "network")
+        .collect::<Vec<_>>();
+    assert_eq!(network.len(), requests * 2);
+    for pair in network.chunks_exact(2) {
+        assert_eq!(pair[0]["method"], "GET");
+        assert_eq!(pair[1]["method"], "POST");
+        assert_eq!(pair[0]["origin"], pair[1]["origin"]);
+        assert!(matches!(
+            pair[0]["origin"].as_str(),
+            Some("https://api3.qoder.sh" | "https://gateway.qoder.com.cn")
+        ));
+        assert_eq!(pair[0]["cosyPresent"], true);
+        assert_eq!(pair[1]["cosyPresent"], true);
+        assert_eq!(pair[1]["body"]["model_config"]["key"], MODEL);
+    }
+    assert!(trace
+        .iter()
+        .filter(|v| v["kind"] == "start")
+        .all(|v| v["chat"]["model"] == MODEL));
+}
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+async fn verify_mixed(case: &str) {
+    use crate::{
+        app_config::AppType,
+        services::{routing_groups as groups, shared_routing as routing},
+    };
+    let f = HttpFixture::new_with_refresh(
+        &[("qoder-a", true)],
+        Reply::Plain,
+        None,
+        "qoder_sdk",
+        case.starts_with("pending_"),
+    )
+    .await;
+    let mut q =
+        f.db.get_provider_by_id("qoder-a", "codex")
+            .unwrap()
+            .unwrap();
+    q.settings_config["config"] = json!(format!(
+        "model = {MODEL:?}\n{}",
+        q.settings_config["config"].as_str().unwrap()
+    ));
+    f.db.save_provider("codex", &q).unwrap();
+    let platform = if case == "bad_wb" {
+        "workbuddy"
+    } else {
+        "minimax_code"
+    };
+    let model = if platform == "workbuddy" {
+        "synthetic-wb-model"
+    } else {
+        "MiniMax-M2.7"
+    };
+    let account = "synthetic-mixed-mm";
+    let owner = if platform == "minimax_code" {
+        Some(
+            crate::minimax_code::inference::FixtureTransport::seed_accounts(
+                f.db.secret_session(),
+                &[(account, crate::minimax_code::catalog::Region::Global)],
+            )
+            .await
+            .unwrap(),
+        )
+    } else {
+        None
+    };
+    for app in [AppType::Claude, AppType::Codex] {
+        let config = if matches!(app, AppType::Claude) {
+            json!({"env":{"ANTHROPIC_MODEL":model}})
+        } else {
+            json!({"auth":{},"config":format!("model = {model:?}\n")})
+        };
+        let mut p = Provider::with_id(
+            format!("mixed-{}", app.as_str()),
+            "Mixed native".into(),
+            config,
+            None,
+        );
+        p.category = Some("custom".into());
+        p.meta=Some(serde_json::from_value(json!({"authBinding":{"source":"managed_account","authProvider":platform,"accountId":account},"apiFormat":if platform=="workbuddy"{"openai_chat"}else{"anthropic"},"commonConfigEnabled":false})).unwrap());
+        crate::services::provider::managed_inference::validate(&app, &p).unwrap();
+        f.db.save_provider(app.as_str(), &p).unwrap();
+        if matches!(app, AppType::Claude) {
+            f.db.set_current_provider("claude", &p.id).unwrap();
+        }
+    }
+    crate::settings::unlock_settings_for_test(f.db.secrets.clone()).unwrap();
+    let state = crate::store::AppState::new(f.db.clone()).unwrap();
+    if case == "bad_qoder" {
+        f.db.conn.lock().unwrap().execute("UPDATE providers SET qoder_http_secret='synthetic malformed envelope' WHERE id='qoder-a' AND app_type='codex'",[]).unwrap();
+        let rows = crate::commands::get_service_sources_impl(&state)
+            .expect("bad Qoder row must not hide verified MiniMax sources");
+        assert!(rows
+            .iter()
+            .any(|s| s.bindings.iter().any(|b| b.provider_id == "mixed-codex")));
+        assert!(rows
+            .iter()
+            .all(|s| s.bindings.iter().all(|b| b.provider_id != "qoder-a")));
+        let view = crate::commands::application_overview(&state, &AppType::Codex).unwrap();
+        let bad = view
+            .configurations
+            .iter()
+            .find(|c| c.provider_id == "qoder-a")
+            .unwrap();
+        assert!(!bad.can_select);
+        assert!(bad.account.is_none());
+        assert_eq!(
+            serde_json::to_value(&bad.presentation).unwrap()["switchBlockedReason"],
+            "nativeSourceUnavailable"
+        );
+        return;
+    }
+    if matches!(case, "bad_mm" | "bad_wb") {
+        let file = if platform == "workbuddy" {
+            crate::secrets::owned_file::WORKBUDDY_FILE
+        } else {
+            crate::minimax_code::catalog::FILE
+        };
+        std::fs::write(
+            f.db.secret_session().root().join(file),
+            b"synthetic corrupt owned document",
+        )
+        .unwrap();
+        let rows = crate::commands::get_service_sources_impl(&state)
+            .expect("unrelated bad owner must not hide verified Qoder source");
+        assert_eq!(
+            rows.iter()
+                .filter(|s| s.bindings.iter().any(|b| b.provider_id == "qoder-a"))
+                .count(),
+            1
+        );
+        assert!(rows.iter().all(|s| s
+            .bindings
+            .iter()
+            .all(|b| !b.provider_id.starts_with("mixed-"))));
+        let overview = crate::commands::application_overview(&state, &AppType::Codex).unwrap();
+        let bad = overview
+            .configurations
+            .iter()
+            .find(|c| c.provider_id == "mixed-codex")
+            .unwrap();
+        assert!(!bad.can_select);
+        assert!(bad.account.is_none());
+        assert_eq!(
+            serde_json::to_value(&bad.presentation).unwrap()["switchBlockedReason"],
+            "nativeSourceUnavailable"
+        );
+        return;
+    }
+    let rows = crate::commands::get_service_sources_impl(&state).unwrap();
+    let q = rows
+        .iter()
+        .find(|s| s.bindings.iter().any(|b| b.provider_id == "qoder-a"))
+        .unwrap();
+    let mm = rows
+        .iter()
+        .find(|s| s.bindings.iter().any(|b| b.provider_id == "mixed-codex"))
+        .unwrap();
+    let mut members = vec![
+        groups::Member {
+            source_id: q.source_id.clone(),
+            model: MODEL.into(),
+        },
+        groups::Member {
+            source_id: mm.source_id.clone(),
+            model: model.into(),
+        },
+    ];
+    let invalid_capability = matches!(
+        case,
+        "unsupported_manual" | "unknown_member" | "conflicting_member_model" | "all_unsupported"
+    );
+    match case {
+        "bad_qoder_runtime" => {
+            members.remove(0);
+        }
+        "unknown_member" => {
+            members[0].source_id = "native:qoder_sdk:unknown-synthetic-source".into();
+        }
+        "conflicting_member_model" => {
+            members[0].model = "different-configured-model".into();
+        }
+        "all_unsupported" => {
+            members.truncate(1);
+        }
+        _ => {}
+    }
+    let group = if invalid_capability {
+        // Seed previously bound intent to exercise runtime safety, not publication success.
+        groups::save(
+            &mut f.db.conn.lock().unwrap(),
+            "qoder-capability-negative",
+            None,
+            &members,
+        )
+        .unwrap()
+    } else {
+        let prepared = tokio::task::block_in_place(|| {
+            routing::prepare_group(
+                &state,
+                routing::GroupDraft {
+                    id: None,
+                    expected_revision: None,
+                    name: "One mixed group".into(),
+                    members: members.clone(),
+                },
+            )
+        })
+        .unwrap();
+        tokio::task::block_in_place(|| routing::confirm_group(&state, prepared)).unwrap()
+    };
+    for app in ["claude", "codex"] {
+        groups::set_target(
+            &mut f.db.conn.lock().unwrap(),
+            app,
+            groups::RouteTarget::OrderedGroup {
+                group_id: group.id.clone(),
+            },
+            None,
+            Some(group.revision),
+        )
+        .unwrap();
+    }
+    if case == "bad_qoder_runtime" {
+        f.db.conn.lock().unwrap().execute("UPDATE providers SET qoder_http_secret='synthetic malformed envelope' WHERE id='qoder-a' AND app_type='codex'", []).unwrap();
+    }
+    if case == "unsupported_manual" {
+        groups::set_target(
+            &mut f.db.conn.lock().unwrap(),
+            "claude",
+            groups::RouteTarget::Manual {
+                source_id: members[0].source_id.clone(),
+                model: MODEL.into(),
+            },
+            Some(1),
+            None,
+        )
+        .unwrap();
+    }
+    if case.starts_with("pending_") {
+        let provider =
+            f.db.get_provider_by_id("qoder-a", "codex")
+                .unwrap()
+                .unwrap();
+        let source =
+            crate::services::provider::qoder_http_auth::SourceBinding::from_provider(&provider)
+                .unwrap()
+                .0;
+        assert!(matches!(
+            f.db.qoder_http_acquire(&source, chrono::Utc::now().timestamp_millis() + 3_600_000)
+                .unwrap(),
+            crate::services::provider::qoder_http_auth::Acquisition::Refresh(_)
+        ));
+        if case == "pending_new_group" {
+            let result = tokio::task::block_in_place(|| {
+                routing::prepare_group(
+                    &state,
+                    routing::GroupDraft {
+                        id: None,
+                        expected_revision: None,
+                        name: "Unavailable new group".into(),
+                        members: vec![members[0].clone()],
+                    },
+                )
+            });
+            assert!(result.is_err(), "UnsupportedApp is identity evidence, not a ready supported projection for a new group");
+            assert!(f.trace().is_empty());
+            assert!(f.upstream.posts.lock().await.is_empty());
+            return;
+        }
+        if case == "pending_manual" {
+            groups::set_target(
+                &mut f.db.conn.lock().unwrap(),
+                "codex",
+                groups::RouteTarget::Manual {
+                    source_id: members[0].source_id.clone(),
+                    model: MODEL.into(),
+                },
+                Some(1),
+                None,
+            )
+            .unwrap();
+            let response = f
+                .request(
+                    "/v1/responses",
+                    json!({"model":"caller-alias","input":"hello"}),
+                )
+                .await;
+            assert!(!response.status().is_success());
+            let _ = text(response).await;
+            assert!(f.upstream.posts.lock().await.is_empty());
+            return;
+        }
+    }
+    if case == "mixed_review" {
+        let update = tokio::task::block_in_place(|| {
+            routing::prepare_group(
+                &state,
+                routing::GroupDraft {
+                    id: Some(group.id),
+                    expected_revision: Some(group.revision),
+                    name: "Same mixed group".into(),
+                    members,
+                },
+            )
+        })
+        .expect("one bound global group must keep valid per-app capabilities");
+        tokio::task::block_in_place(|| routing::confirm_group(&state, update)).unwrap();
+        return;
+    }
+    let calls = Arc::new(AtomicUsize::new(0));
+    let captured = calls.clone();
+    let upstream=axum::Router::new().route("/global/mavis/api/v1/llm/v1/messages",axum::routing::post(move |headers:axum::http::HeaderMap,axum::Json(body):axum::Json<Value>|{let calls=captured.clone();async move{calls.fetch_add(1,Ordering::SeqCst);assert_eq!(body["model"],"MiniMax-M2.7");assert_eq!(headers["authorization"],"Bearer synthetic-mixed-mm-access");axum::Json(json!({"id":"synthetic-mm","type":"message","role":"assistant","model":body["model"],"content":[{"type":"text","text":"mixed-native-ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}))}}));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let transport = crate::minimax_code::inference::FixtureTransport::loopback(
+        owner.as_ref().unwrap(),
+        &format!("http://{}", listener.local_addr().unwrap()),
+    )
+    .await
+    .unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let response=f.proxy.build_router().layer(axum::Extension(transport.clone())).oneshot(axum::http::Request::builder().method("POST").uri("/v1/messages").header("content-type","application/json").body(axum::body::Body::from(json!({"model":"caller-alias","max_tokens":32,"messages":[{"role":"user","content":"hello"}]}).to_string())).unwrap()).await.unwrap();
+    if invalid_capability {
+        assert!(
+            !response.status().is_success(),
+            "unsupported manual/unknown/model-conflict/empty app capability must not route"
+        );
+        let _ = text(response).await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "must not skip unknown/conflicting intent and send to MiniMax"
+        );
+        assert!(f.upstream.posts.lock().await.is_empty());
+        assert!(
+            f.trace().is_empty(),
+            "invalid intent must not launch Qoder worker"
+        );
+        server.abort();
+        return;
+    }
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(text(response).await.contains("mixed-native-ok"));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(f.upstream.posts.lock().await.is_empty());
+    if matches!(case, "pending_auto" | "bad_qoder_runtime") {
+        let response = f
+            .proxy
+            .build_router()
+            .layer(axum::Extension(transport))
+            .layer(axum::Extension(f.runtime.clone()))
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({"model":"caller-alias","input":"hello"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(text(response).await.contains("mixed-native-ok"));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(f.upstream.posts.lock().await.is_empty());
+        assert!(
+            f.trace().is_empty(),
+            "unrelated/pending Qoder owner must not launch its worker"
+        );
+        server.abort();
+        return;
+    }
+    let response = f
+        .request(
+            "/v1/responses",
+            json!({"model":"caller-alias","input":"hello"}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(text(response).await.contains("ordered-history-and-auth-ok"));
+    assert_eq!(*f.upstream.posts.lock().await, vec!["qoder-a"]);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let conn = f.db.conn.lock().unwrap();
+    assert_eq!(
+        groups::binding(&conn, "claude").unwrap().unwrap().target,
+        groups::binding(&conn, "codex").unwrap().unwrap().target
+    );
+    drop(conn);
+    server.abort();
 }

@@ -21,7 +21,7 @@ pub mod model_fetch;
 pub mod model_pricing;
 pub mod models_dev;
 pub mod omo;
-#[cfg(any(feature = "gui", test))]
+pub(crate) mod openrouter_source;
 pub mod service_sources;
 pub mod vendor_source_binding;
 pub use crate::database::order_profiles;
@@ -75,5 +75,13 @@ pub use usage_stats::{
 };
 pub mod codex_reset;
 
-#[cfg(any(feature = "gui", feature = "test-hooks", test))]
+// Pure original SQL/vault owner evidence is also consumed by shared routing in CLI builds.
 pub(crate) mod vendor_response_fence;
+
+pub(crate) mod routing_groups;
+pub(crate) mod service_source_identity;
+
+pub(crate) mod shared_routing;
+
+#[cfg(any(feature = "gui", test))]
+pub(crate) mod native_source_guard;

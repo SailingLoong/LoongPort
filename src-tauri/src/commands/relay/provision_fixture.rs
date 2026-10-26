@@ -1,0 +1,602 @@
+//! Narrow debug/test-hook fixtures exercising the production relay boundary.
+//! Only loopback HTTP and an in-memory provider database are used.
+use super::*;
+use axum::{body::Body, extract::Request, routing::any, Json, Router};
+use serde_json::{json, Value};
+
+#[derive(Default)]
+struct FixtureState {
+    keys: Vec<Value>,
+    tokens: Vec<Value>,
+    requests: Vec<(String, String)>,
+    inactive: bool,
+    models: Option<Vec<String>>,
+    invalid_models: bool,
+}
+
+struct Fixture {
+    origin: String,
+    state: Arc<Mutex<FixtureState>>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+impl Fixture {
+    async fn start() -> Self {
+        static LOOPBACK: std::sync::Once = std::sync::Once::new();
+        LOOPBACK.call_once(|| {
+            for name in ["NO_PROXY", "no_proxy"] {
+                let previous = std::env::var(name).unwrap_or_default();
+                std::env::set_var(name, format!("{previous},127.0.0.1,localhost,::1"));
+            }
+        });
+        let state = Arc::new(Mutex::new(FixtureState::default()));
+        let shared = state.clone();
+        let app = Router::new().fallback(any(move |request: Request<Body>| {
+            let state = shared.clone();
+            async move {
+                let method = request.method().to_string();
+                let path = request.uri().path().to_string();
+                let body = axum::body::to_bytes(request.into_body(), 1024 * 1024).await.unwrap();
+                let mut state = state.lock().unwrap();
+                state.requests.push((method.clone(), path.clone()));
+                let data = match (method.as_str(), path.as_str()) {
+                    ("GET", "/v1/models") => {
+                        if state.invalid_models {
+                            return Json(json!({"data":[{"id":42}]}));
+                        }
+                        let models = state.models.clone().unwrap_or_else(|| vec!["gpt-5.4".into(), "claude-sonnet-4-5".into()]);
+                        return Json(json!({"data": models.iter().map(|id| json!({"id":id})).collect::<Vec<_>>()}));
+                    }
+                    ("GET", "/.well-known/loongport.json") => return Json(json!({})),
+                    ("GET", "/api/user/self") => return Json(json!({"success":true,"data":{"id":7,"username":"fixture","display_name":"Fixture","email":"fixture@example.test","group":"default","quota":0,"used_quota":0}})),
+                    ("GET", "/api/user/self/groups") => return Json(json!({"success":true,"data":{"alpha":{"ratio":1,"desc":"Alpha"},"beta":{"ratio":1,"desc":"Beta"}}})),
+                    ("GET", "/api/token/") => return Json(json!({"success":true,"data":{"page":1,"page_size":100,"total":state.tokens.len(),"items":state.tokens}})),
+                    ("POST", "/api/token/") => {
+                        let body: Value = serde_json::from_slice(&body).unwrap();
+                        let id = state.tokens.len() as i64 + 100;
+                        state.tokens.push(json!({"id":id,"key":"masked-fixture-key","name":body["name"],"group":body["group"],"status":1}));
+                        return Json(json!({"success":true}));
+                    }
+                    ("POST", path) if path.starts_with("/api/token/") && path.ends_with("/key") => {
+                        let id = path.trim_start_matches("/api/token/").trim_end_matches("/key");
+                        return Json(json!({"success":true,"data":{"key":format!("fixture-revealed-{id}")}}));
+                    }
+                    ("DELETE", path) if path.starts_with("/api/token/") => {
+                        let id = path.trim_start_matches("/api/token/").parse::<i64>().unwrap();
+                        state.tokens.retain(|token| token["id"].as_i64() != Some(id));
+                        return Json(json!({"success":true}));
+                    }
+                    ("GET", "/api/v1/groups/available") => json!([
+                        {"id":1,"name":"Alpha","platform":"openai","status":"active","rate_multiplier":1},
+                        {"id":2,"name":"Beta","platform":"anthropic","status":if state.inactive { "inactive" } else { "active" },"rate_multiplier":1},
+                        {"id":3,"name":"Shared","platform":"composite","status":"active","rate_multiplier":1}
+                    ]),
+                    ("GET", "/api/v1/keys") => json!({"items":state.keys,"pages":1}),
+                    ("POST", "/api/v1/keys") => {
+                        let body: Value = serde_json::from_slice(&body).unwrap();
+                        let id = body["group_id"].as_i64().unwrap();
+                        let key = json!({"id":id,"key":format!("fixture-key-{id}"),"name":body["name"],"status":"active"});
+                        state.keys.push(key.clone());
+                        key
+                    }
+                    ("GET", "/api/v1/subscriptions") => json!([]),
+                    ("GET", "/api/v1/groups/rates") => json!({}),
+                    ("DELETE", path) if path.starts_with("/api/v1/keys/") => json!(true),
+                    _ => panic!("unexpected fixture request {method} {path}"),
+                };
+                Json(json!({"code":0,"message":"success","data":data}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        Self {
+            origin,
+            state,
+            server,
+        }
+    }
+
+    fn account(&self, backend: discovery::BackendKind) -> creds::RelayAccount {
+        let mut result = account(7);
+        result.site_origin = self.origin.clone();
+        result.backend_kind = backend;
+        result
+    }
+}
+
+fn account(id: i64) -> creds::RelayAccount {
+    creds::RelayAccount {
+        id,
+        site_origin: "https://relay.example".into(),
+        site_name: "Fixture relay".into(),
+        backend_kind: discovery::BackendKind::NewApi,
+        api_base_url: String::new(),
+        account_id: Some(id),
+        account_label: format!("fixture-{id}"),
+        login_identifier: format!("fixture-{id}"),
+        auth_token: "fixture-session".into(),
+        refresh_token: None,
+        token_expires_at: None,
+        user_agent: None,
+        cf_clearance: None,
+        pricing_synced_at: None,
+        sort_index: 0,
+    }
+}
+
+fn provider(id: String, owner: Option<i64>) -> Provider {
+    Provider {
+        id,
+        name: "Fixture".into(),
+        settings_config: json!({}),
+        website_url: Some("https://relay.example".into()),
+        category: None,
+        created_at: None,
+        sort_index: None,
+        notes: None,
+        meta: owner.map(|owner| managed_meta(&AppType::Codex, Some(owner), None)),
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+        available_models: None,
+    }
+}
+
+fn batch(account: &creds::RelayAccount, group: &str) -> ManagedProvisionBatch {
+    let group = newapi_provision::ReconciledGroup {
+        identity: newapi::GroupIdentity(group.into()),
+        name: group.into(),
+        rate_multiplier: Some(1.0),
+        description: "Fixture".into(),
+        api_key: format!("fixture-{group}-key"),
+        token_was_created: false,
+    };
+    ManagedProvisionBatch {
+        account_id: account.account_id,
+        candidates: newapi_candidates_for_group(
+            &account.site_origin,
+            account.account_id.unwrap(),
+            &group,
+            &[
+                "gpt-5.4".into(),
+                "claude-sonnet-4-5".into(),
+                "gemini-2.5-pro".into(),
+            ],
+            &model_selection::ModelSelectionTables::builtin(),
+        ),
+        ..Default::default()
+    }
+}
+
+fn verify_persistence() {
+    let account = account(7);
+    let db = Arc::new(crate::database::Database::memory().unwrap());
+    let state = AppState::new(db.clone()).unwrap();
+    persist_provision_batch_scope(&state, &account, batch(&account, "old"), false).unwrap();
+    let old_id = managed::newapi_provider_id_for(&account.site_origin, 7, "old");
+    let old_codex = db.get_provider_by_id(&old_id, "codex").unwrap().unwrap();
+    let mut next = batch(&account, "selected");
+    restrict_batch_to_selection(
+        &mut next,
+        &[RelayTierSelection {
+            app: "codex".into(),
+            group_id: "selected".into(),
+        }],
+    );
+    let summary = persist_provision_batch_scope(&state, &account, next, false).unwrap();
+    assert_eq!(summary.tiers.len(), 1);
+    for app in ["claude", "codex", "gemini"] {
+        assert!(db.get_provider_by_id(&old_id, app).unwrap().is_some());
+    }
+    assert_eq!(
+        db.get_provider_by_id(&old_id, "codex")
+            .unwrap()
+            .unwrap()
+            .settings_config,
+        old_codex.settings_config
+    );
+    let new_id = managed::newapi_provider_id_for(&account.site_origin, 7, "selected");
+    assert!(db.get_provider_by_id(&new_id, "codex").unwrap().is_some());
+    assert!(db.get_provider_by_id(&new_id, "claude").unwrap().is_none());
+    assert!(db.get_provider_by_id(&new_id, "gemini").unwrap().is_none());
+}
+
+fn verify_legacy() {
+    let account = account(7);
+    let id = managed::newapi_provider_id_for(&account.site_origin, 7, "active");
+    let providers = vec![
+        provider(id.clone(), None),
+        provider(
+            managed::newapi_provider_id_for(&account.site_origin, 8, "active"),
+            Some(8),
+        ),
+        provider(
+            managed::newapi_provider_id_for(&account.site_origin, 7, "removed"),
+            Some(7),
+        ),
+    ];
+    let choices = vec![discovered_tier(
+        AppType::Codex,
+        id,
+        "active".into(),
+        "Renamed".into(),
+    )];
+    let selected = configured_selection(&account, &AppType::Codex, &providers, &choices);
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].group_id, "active");
+    assert!(configured_selection(&account, &AppType::Claude, &providers, &choices).is_empty());
+}
+
+async fn verify_sub2api(inactive: bool) {
+    let fixture = Fixture::start().await;
+    let client =
+        sub2api::Client::new(&fixture.origin, "fixture-session", Some(7), None, None).unwrap();
+    let tables = model_selection::ModelSelectionTables::builtin();
+    if inactive {
+        fixture.state.lock().unwrap().inactive = true;
+        assert!(provision::provision_selected(&client, &tables, &[1, 2])
+            .await
+            .is_err());
+        assert!(fixture
+            .state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .all(|(method, _)| method == "GET"));
+        return;
+    }
+    let empty = provision::provision_selected(&client, &tables, &[])
+        .await
+        .unwrap();
+    assert!(empty.tiers.is_empty());
+    assert!(fixture.state.lock().unwrap().requests.is_empty());
+    assert!(provision::provision_selected(&client, &tables, &[1, 99])
+        .await
+        .is_err());
+    assert!(fixture
+        .state
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .all(|(method, _)| method == "GET"));
+    fixture.state.lock().unwrap().keys = [2, 99].into_iter().map(|id| json!({"id":id,"key":format!("fixture-old-{id}"),"name":format!("LoongPort/a7/anthropic/{id}"),"status":"active"})).collect();
+    let first = provision::provision_selected(&client, &tables, &[1, 1])
+        .await
+        .unwrap();
+    let repeated = provision::provision_selected(&client, &tables, &[1])
+        .await
+        .unwrap();
+    assert_eq!(first.tiers.len(), 1);
+    assert_eq!(first.tiers[0].tier.group_id, 1);
+    assert!(first.tiers[0].tier.key_was_created);
+    assert!(!repeated.tiers[0].tier.key_was_created);
+    assert_eq!(first.tiers[0].tier.api_key, repeated.tiers[0].tier.api_key);
+    // The unselected composite resource must still be absent before its own
+    // later confirmation, not merely filtered out of the returned projections.
+    assert_eq!(fixture.state.lock().unwrap().keys.len(), 3);
+    assert!(!fixture
+        .state
+        .lock()
+        .unwrap()
+        .keys
+        .iter()
+        .any(|key| key["id"] == 3));
+    let composite = provision::provision_selected(&client, &tables, &[3, 3])
+        .await
+        .unwrap();
+    assert_eq!(composite.tiers.len(), 2);
+    assert!(composite
+        .tiers
+        .iter()
+        .all(|tier| tier.tier.api_key == composite.tiers[0].tier.api_key));
+    let state = fixture.state.lock().unwrap();
+    assert_eq!(
+        state
+            .requests
+            .iter()
+            .filter(|(method, path)| method == "POST" && path == "/api/v1/keys")
+            .count(),
+        2
+    );
+    assert!(!state.requests.iter().any(|(method, _)| method == "DELETE"));
+    assert_eq!(state.keys.len(), 4);
+}
+
+async fn verify_newapi() {
+    let fixture = Fixture::start().await;
+    let client = newapi::NewApiClient::new(&fixture.origin, "fixture-session").unwrap();
+    let selected = [
+        newapi::GroupIdentity("alpha".into()),
+        newapi::GroupIdentity("alpha".into()),
+    ];
+    let empty = newapi_provision::reconcile_selected_for_account(&client, 7, &[])
+        .await
+        .unwrap();
+    assert!(empty.groups.is_empty());
+    assert!(fixture
+        .state
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .all(|(method, _)| method == "GET"));
+    assert!(newapi_provision::reconcile_selected_for_account(
+        &client,
+        7,
+        &[
+            newapi::GroupIdentity("alpha".into()),
+            newapi::GroupIdentity("missing".into())
+        ]
+    )
+    .await
+    .is_err());
+    assert!(fixture
+        .state
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .all(|(method, _)| method == "GET"));
+    fixture.state.lock().unwrap().tokens = ["beta", "removed"].into_iter().enumerate().map(|(id, group)| json!({"id":id+10,"key":"masked","name":if group == "beta" { "LoongPort/napi/a7/9E5k5185SOn3P436lHIcTOjLtPJlxHkM" } else { "LoongPort/napi/a7/4feXWMxC5v5gN5QSBdH7w39XgPE6oHfQ" },"group":group,"status":1})).collect();
+    let first = newapi_provision::reconcile_selected_for_account(&client, 7, &selected)
+        .await
+        .unwrap();
+    let second = newapi_provision::reconcile_selected_for_account(&client, 7, &selected)
+        .await
+        .unwrap();
+    assert_eq!(first.tokens_created, 1);
+    assert_eq!(first.groups.len(), 1);
+    assert_eq!(first.groups[0].identity.0, "alpha");
+    assert_eq!(first.observed_groups.len(), 2);
+    assert_eq!(second.tokens_created, 0);
+    assert_eq!(first.groups[0].api_key, second.groups[0].api_key);
+    {
+        let state = fixture.state.lock().unwrap();
+        assert_eq!(state.tokens.len(), 3);
+        assert_eq!(
+            state
+                .requests
+                .iter()
+                .filter(|(method, path)| method == "POST" && path == "/api/token/")
+                .count(),
+            1
+        );
+        assert!(!state.requests.iter().any(|(method, _)| method == "DELETE"));
+    }
+    // The removed fixture is a genuine managed token: full reconciliation must
+    // delete it. Otherwise the selected-path retention check would be vacuous.
+    let full = newapi_provision::reconcile_for_account(&client, 7)
+        .await
+        .unwrap();
+    assert_eq!(full.stale_tokens_deleted, 1);
+    let state = fixture.state.lock().unwrap();
+    assert_eq!(state.tokens.len(), 2);
+    assert!(state
+        .requests
+        .iter()
+        .any(|(method, path)| method == "DELETE" && path == "/api/token/11"));
+}
+
+async fn verify_discovery() {
+    for backend in [
+        discovery::BackendKind::Sub2Api,
+        discovery::BackendKind::NewApi,
+    ] {
+        let fixture = Fixture::start().await;
+        let choices = discover_backend_choices(&fixture.account(backend), None)
+            .await
+            .unwrap();
+        assert!(!choices.is_empty());
+        assert!(choices.iter().all(|choice| !choice.prepared));
+        for choice in &choices {
+            assert_eq!(
+                serde_json::to_value(choice).unwrap()["compatibility"],
+                "unknown"
+            );
+        }
+        let state = fixture.state.lock().unwrap();
+        assert!(state.requests.iter().all(|(method, path)| method == "GET"
+            && (path.ends_with("/groups/available")
+                || path == "/api/user/self"
+                || path == "/api/user/self/groups")));
+        assert!(state.keys.is_empty() && state.tokens.is_empty());
+    }
+}
+
+async fn verify_capabilities() {
+    // A group listing cannot establish model compatibility before a key-backed
+    // catalog read. Exercise the real backend projection and persistence policy
+    // after the user's explicit choice, including recoverable partial creation.
+    for backend in [
+        discovery::BackendKind::Sub2Api,
+        discovery::BackendKind::NewApi,
+    ] {
+        for (models, selected_app, expected_success) in [
+            (vec!["gpt-5.4"], "codex-image", false),
+            (vec!["gpt-5.4", "gpt-image-2"], "codex-image", false),
+            (vec!["gpt-image-2"], "codex-image", true),
+            (vec!["gpt-image-2"], "codex", false),
+            (vec!["gpt-5.4", "gpt-image-2"], "codex", true),
+        ] {
+            let fixture = Fixture::start().await;
+            fixture.state.lock().unwrap().models =
+                Some(models.iter().map(|model| (*model).into()).collect());
+            let account = fixture.account(backend);
+            let group = if matches!(backend, discovery::BackendKind::Sub2Api) {
+                "1"
+            } else {
+                "alpha"
+            };
+            let choices = discover_backend_choices(&account, None).await.unwrap();
+            let choice = choices
+                .iter()
+                .find(|choice| choice.app == selected_app && choice.group_id == group)
+                .unwrap();
+
+            assert!(fixture
+                .state
+                .lock()
+                .unwrap()
+                .requests
+                .iter()
+                .all(|(method, _)| method == "GET"));
+            let id = choice.provider_id.clone();
+            let selected = [RelayTierSelection {
+                app: selected_app.into(),
+                group_id: group.into(),
+            }];
+            let db = Arc::new(crate::database::Database::memory().unwrap());
+            let state = Arc::new(AppState::new(db.clone()).unwrap());
+            for expected_created in [1, 0] {
+                let batch = provision_backend_scope(&account, None, Some(&selected))
+                    .await
+                    .unwrap();
+                assert_eq!(batch.keys_created, expected_created);
+                assert_eq!(batch.candidates.len(), usize::from(expected_success));
+                assert!(batch
+                    .candidates
+                    .iter()
+                    .all(|candidate| candidate.app_type.as_str() == selected_app));
+                if !expected_success {
+                    assert!(!batch.failures.is_empty());
+                }
+                let persist_account = account.clone();
+                let persist_state = state.clone();
+                let summary = tokio::task::spawn_blocking(move || {
+                    persist_provision_batch_scope(&persist_state, &persist_account, batch, false)
+                }).await.unwrap().expect("selected partial creation must return a structured receipt, not erase progress as an error");
+                assert_eq!(summary.keys_created, expected_created);
+                assert_eq!(summary.tiers.len(), usize::from(expected_success));
+                if !expected_success {
+                    assert!(!summary.failures.is_empty());
+                }
+            }
+            for app in ["claude", "codex", "gemini", "codex-image"] {
+                assert_eq!(
+                    db.get_provider_by_id(&id, app).unwrap().is_some(),
+                    expected_success && app == selected_app
+                );
+            }
+            let state = fixture.state.lock().unwrap();
+            assert_eq!(
+                state
+                    .requests
+                    .iter()
+                    .filter(|(method, path)| method == "POST"
+                        && (path == "/api/token/" || path == "/api/v1/keys"))
+                    .count(),
+                1
+            );
+            assert!(!state.requests.iter().any(|(method, _)| method == "DELETE"));
+        }
+    }
+}
+
+async fn verify_composite_partial() {
+    for invalid_models in [false, true] {
+        let fixture = Fixture::start().await;
+        {
+            let mut state = fixture.state.lock().unwrap();
+            state.models = Some(Vec::new());
+            state.invalid_models = invalid_models;
+        }
+        let account = fixture.account(discovery::BackendKind::Sub2Api);
+        let selected = [RelayTierSelection {
+            app: "codex".into(),
+            group_id: "3".into(),
+        }];
+        let db = Arc::new(crate::database::Database::memory().unwrap());
+        let state = Arc::new(AppState::new(db.clone()).unwrap());
+        for expected_created in [1, 0] {
+            let batch = provision_backend_scope(&account, None, Some(&selected))
+                .await
+                .expect(
+                    "a post-create composite catalog failure must preserve the partial receipt",
+                );
+            assert_eq!(batch.keys_created, expected_created);
+            assert!(batch.candidates.is_empty());
+            assert!(!batch.failures.is_empty());
+            let persist_state = state.clone();
+            let persist_account = account.clone();
+            let receipt = tokio::task::spawn_blocking(move || {
+                persist_provision_batch_scope(&persist_state, &persist_account, batch, false)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(receipt.tiers.is_empty());
+            assert_eq!(receipt.keys_created, expected_created);
+            assert!(!receipt.failures.is_empty());
+        }
+        let id = managed::provider_id_for(&account.site_origin, Some(7), 3);
+        for app in ["claude", "codex", "gemini", "codex-image"] {
+            assert!(db.get_provider_by_id(&id, app).unwrap().is_none());
+        }
+        let state = fixture.state.lock().unwrap();
+        assert_eq!(state.keys.len(), 1);
+        assert_eq!(
+            state
+                .requests
+                .iter()
+                .filter(|(method, path)| method == "POST" && path == "/api/v1/keys")
+                .count(),
+            1
+        );
+        assert!(!state.requests.iter().any(|(method, _)| method == "DELETE"));
+    }
+}
+
+/// Invoked only through the existing integration-test support boundary.
+pub(crate) async fn verify(case: &str) {
+    match case {
+        "composite_partial" => verify_composite_partial().await,
+        "capabilities" => verify_capabilities().await,
+        "sub2api_selected" => verify_sub2api(false).await,
+        "sub2api_inactive" => verify_sub2api(true).await,
+        "newapi_selected" => verify_newapi().await,
+        "discovery" => verify_discovery().await,
+        "unresolved_identity" => {
+            for backend in [
+                discovery::BackendKind::Sub2Api,
+                discovery::BackendKind::NewApi,
+            ] {
+                let fixture = Fixture::start().await;
+                let mut account = fixture.account(backend);
+                account.account_id = None;
+                assert!(discover_backend_choices(&account, None).await.is_err());
+                assert!(fixture.state.lock().unwrap().requests.is_empty());
+            }
+        }
+        "persistence" => tokio::task::spawn_blocking(verify_persistence)
+            .await
+            .unwrap(),
+        "legacy" => verify_legacy(),
+        "lock" => {
+            let account = account(7);
+            let first = relay_provision_lock(&account).unwrap();
+            let second = relay_provision_lock(&creds::RelayAccount {
+                id: 999,
+                ..account.clone()
+            })
+            .unwrap();
+            let other = relay_provision_lock(&self::account(8)).unwrap();
+            assert!(Arc::ptr_eq(&first, &second));
+            assert!(!Arc::ptr_eq(&first, &other));
+            let guard = first.lock().await;
+            assert!(second.try_lock().is_err());
+            assert!(other.try_lock().is_ok());
+            drop(guard);
+            assert!(second.try_lock().is_ok());
+        }
+        _ => panic!("unknown relay provision fixture case: {case}"),
+    }
+}

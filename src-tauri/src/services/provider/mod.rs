@@ -255,6 +255,7 @@ pub enum ProviderRoutingBadge {
 #[serde(rename_all = "camelCase")]
 pub enum ProviderSwitchBlockReason {
     OfficialBlockedByProxy,
+    NativeSourceUnavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -5655,8 +5656,24 @@ impl ProviderService {
         original_id: Option<&str>,
         provider: Provider,
     ) -> Result<bool, AppError> {
+        Self::update_with_credential_intent(state, app_type, original_id, provider, false)
+    }
+
+    pub(crate) fn update_with_credential_intent(
+        state: &AppState,
+        app_type: AppType,
+        original_id: Option<&str>,
+        provider: Provider,
+        credential_write: bool,
+    ) -> Result<bool, AppError> {
         if !app_type.supports_local_proxy() {
-            return Self::update_locked(state, app_type, original_id, provider);
+            return Self::update_locked_with_credential_intent(
+                state,
+                app_type,
+                original_id,
+                provider,
+                credential_write,
+            );
         }
         let _guard =
             futures::executor::block_on(state.proxy_service.lock_switch_for_app(app_type.as_str()));
@@ -5673,19 +5690,26 @@ impl ProviderService {
                         &app_type,
                         &provider.settings_config,
                     );
-            crate::mode::controller::save_row_locked(
+            crate::mode::controller::save_row_locked_with_credential_intent(
                 &state.proxy_service,
                 &app_type,
                 &existing,
                 &provider,
                 changed,
+                credential_write,
             )?;
             return Ok(true);
         }
         let current =
             crate::proxy::application_routing::current_provider_id(&state.db, app_type.as_str());
         if current.as_deref() != Some(existing.id.as_str()) {
-            return Self::update_locked(state, app_type, original_id, provider);
+            return Self::update_locked_with_credential_intent(
+                state,
+                app_type,
+                original_id,
+                provider,
+                credential_write,
+            );
         }
         with_provider_config_transaction(state, &app_type, &existing, || {
             let selected_model_changed =
@@ -5694,7 +5718,13 @@ impl ProviderService {
                         &app_type,
                         &provider.settings_config,
                     );
-            let result = Self::update_locked(state, app_type.clone(), original_id, provider)?;
+            let result = Self::update_locked_with_credential_intent(
+                state,
+                app_type.clone(),
+                original_id,
+                provider,
+                credential_write,
+            )?;
             if selected_model_changed && current.as_deref() == Some(existing.id.as_str()) {
                 crate::proxy::auto_strategy::set_model_pref(&state.db, app_type.as_str(), None)?;
             }
@@ -5843,11 +5873,12 @@ impl ProviderService {
         Ok(provider)
     }
 
-    fn update_locked(
+    fn update_locked_with_credential_intent(
         state: &AppState,
         app_type: AppType,
         original_id: Option<&str>,
         provider: Provider,
+        credential_write: bool,
     ) -> Result<bool, AppError> {
         if app_type == AppType::Mcode {
             return mcode::update(state, original_id, provider);
@@ -5925,7 +5956,11 @@ impl ProviderService {
             }
 
             Self::set_provider_live_config_managed(&mut provider, false);
-            state.db.save_provider(app_type.as_str(), &provider)?;
+            state.db.save_provider_with_credential_intent(
+                app_type.as_str(),
+                &provider,
+                credential_write,
+            )?;
             state.db.delete_provider(app_type.as_str(), &original_id)?;
 
             if crate::settings::get_current_provider(&app_type).as_deref() == Some(&original_id) {
@@ -5956,7 +5991,11 @@ impl ProviderService {
                 if is_current {
                     crate::services::OmoService::write_provider_config_to_file(&provider, variant)?;
                 }
-                if let Err(err) = state.db.save_provider(app_type.as_str(), &provider) {
+                if let Err(err) = state.db.save_provider_with_credential_intent(
+                    app_type.as_str(),
+                    &provider,
+                    credential_write,
+                ) {
                     if is_current {
                         if let Err(rollback_err) =
                             crate::services::OmoService::write_config_to_file(state, variant)
@@ -5985,7 +6024,11 @@ impl ProviderService {
 
             // Save to database after live-config presence is resolved so parse errors
             // do not report failure after already mutating DB state.
-            state.db.save_provider(app_type.as_str(), &provider)?;
+            state.db.save_provider_with_credential_intent(
+                app_type.as_str(),
+                &provider,
+                credential_write,
+            )?;
 
             if !live_config_managed {
                 return Ok(true);
@@ -6018,7 +6061,11 @@ impl ProviderService {
             // released first, a switch could activate the old binding and leave
             // DB current/live inconsistent with the subsequent save.
             if !is_current {
-                state.db.save_provider(app_type.as_str(), &provider)?;
+                state.db.save_provider_with_credential_intent(
+                    app_type.as_str(),
+                    &provider,
+                    credential_write,
+                )?;
                 return Ok(true);
             }
 
@@ -6058,7 +6105,11 @@ impl ProviderService {
                         outgoing_managed_codex_account_id.as_deref(),
                         outgoing_live_refresh_token.as_deref(),
                     )?;
-                    state.db.save_provider(app_type.as_str(), &provider)?;
+                    state.db.save_provider_with_credential_intent(
+                        app_type.as_str(),
+                        &provider,
+                        credential_write,
+                    )?;
                     Ok::<(), AppError>(())
                 })();
                 if let Err(error) = commit_result {
@@ -6128,7 +6179,11 @@ impl ProviderService {
 
                 // DB is the final commit. Every fallible side effect above can be
                 // restored exactly while the previous provider row is untouched.
-                state.db.save_provider(app_type.as_str(), &provider)?;
+                state.db.save_provider_with_credential_intent(
+                    app_type.as_str(),
+                    &provider,
+                    credential_write,
+                )?;
                 Ok::<(), AppError>(())
             })();
             if let Err(error) = commit_result {
@@ -6146,7 +6201,11 @@ impl ProviderService {
         }
 
         // Save to database
-        state.db.save_provider(app_type.as_str(), &provider)?;
+        state.db.save_provider_with_credential_intent(
+            app_type.as_str(),
+            &provider,
+            credential_write,
+        )?;
 
         if is_current {
             // 如果 Claude 代理接管处于激活状态，并且代理服务正在运行：
@@ -6461,6 +6520,24 @@ impl ProviderService {
             None
         };
 
+        Self::switch_with_catalog_locked(state, app_type, id, catalog)
+    }
+
+    /// Same native/legacy switch dispatch with the original app lock already
+    /// held across an enclosing user action (for example official-login restore).
+    pub(crate) fn switch_with_catalog_locked(
+        state: &AppState,
+        app_type: AppType,
+        id: &str,
+        catalog: Option<&codex_direct::CatalogDecision>,
+    ) -> Result<SwitchResult, AppError> {
+        if catalog.is_some() && app_type != AppType::Codex {
+            return Err(AppError::Config(
+                "codex.catalog_takeover_unavailable".into(),
+            ));
+        }
+        crate::services::shared_routing::ensure_legacy_selection_allowed(&state.db, &app_type)?;
+
         // Schema20 direct writes use the upstream forward-recovery owner. Do not
         // wrap them in the legacy snapshot rollback, which would undo published
         // files behind a retained mode journal. Normal schema17 startup is unchanged.
@@ -6557,6 +6634,7 @@ impl ProviderService {
         app_type: AppType,
         id: &str,
     ) -> Result<SwitchResult, AppError> {
+        crate::services::shared_routing::ensure_legacy_selection_allowed(&state.db, &app_type)?;
         if app_type == AppType::Mcode {
             return mcode::enable(state, id);
         }

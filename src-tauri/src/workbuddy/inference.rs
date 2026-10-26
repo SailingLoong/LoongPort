@@ -702,6 +702,93 @@ pub(crate) async fn list_inference_accounts(
         })
         .collect())
 }
+fn routing_stamp(
+    session: &SecretSession,
+    binding: &StorageIdentity,
+    row: &SavedAccount,
+) -> Option<crate::services::service_source_identity::WorkBuddyStamp> {
+    let grant = row.inference.as_ref()?;
+    if !row.inference_allowed()
+        || !valid_grant(grant, row)
+        || (grant.expires_ms <= now_ms().saturating_add(EARLY_MS)
+            && grant
+                .refresh_expires_ms
+                .is_some_and(|expiry| expiry <= now_ms()))
+    {
+        return None;
+    }
+    Some(crate::services::service_source_identity::WorkBuddyStamp {
+        account_id: row.account.id(binding.store_id()),
+        vault_id: binding.store_id().to_owned(),
+        storage: binding.clone(),
+        uid: row.account.uid.clone(),
+        domain: row.account.domain.host().into(),
+        legacy_fingerprint: hex::encode(Sha256::digest(row.account.token.as_bytes())),
+        original_grant_id: grant.grant_id.clone(),
+        inference_revision: row.inference_revision,
+        generation: row.generation,
+        credential_binding: row.credential_binding(),
+        session_epoch: session.lifecycle_epoch(),
+    })
+}
+/// Read only the original encrypted owner under the shared native facts lock.
+/// Configured models are intent; optional credit/model ranking is not authorization.
+pub(crate) fn routing_facts(
+    session: &SecretSession,
+    vault: &crate::secrets::storage::StorageContext,
+    lock: &crate::services::native_source_guard::NativeReadLock,
+) -> Result<
+    (
+        Vec<crate::services::service_source_identity::NativeFact>,
+        Vec<crate::services::service_source_identity::UnavailableNativeAccount>,
+    ),
+    crate::error::AppError,
+> {
+    use crate::services::service_source_identity::{
+        LocalNativeUnavailable, NativeFact, NativeStamp, UnavailableNativeAccount,
+    };
+    lock.check_context(session, vault)?;
+    let failure =
+        || crate::error::AppError::Config("routing_groups.native_source_unavailable".into());
+    let rows = store::load_with_vault(session, vault).map_err(|_| failure())?;
+    let mut facts = vec![];
+    let mut unavailable = vec![];
+    let mut seen = std::collections::HashSet::new();
+    for row in &rows {
+        let account_id = row.account.id(vault.identity().store_id());
+        if !seen.insert(account_id.clone()) {
+            return Err(failure());
+        }
+        if let Some(stamp) = routing_stamp(session, &vault.identity(), row) {
+            facts.push(NativeFact {
+                stamp: NativeStamp::WorkBuddy(stamp),
+                label: row.account.label.clone(),
+            });
+        } else {
+            let reason = if row.inference_consent == Some(false) {
+                Some(LocalNativeUnavailable::UserRevoked)
+            } else if row.inference.is_none() {
+                Some(LocalNativeUnavailable::AuthorizationAbsent)
+            } else if row.inference.as_ref().is_some_and(|grant| {
+                valid_grant(grant, row)
+                    && grant.expires_ms <= now_ms().saturating_add(EARLY_MS)
+                    && grant
+                        .refresh_expires_ms
+                        .is_some_and(|expiry| expiry <= now_ms())
+            }) {
+                Some(LocalNativeUnavailable::CredentialsExpired)
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                unavailable.push(UnavailableNativeAccount { account_id, reason });
+            }
+        }
+    }
+    lock.check_context(session, vault)?;
+    Ok((facts, unavailable))
+}
+
 fn valid_grant(grant: &Authorization, row: &SavedAccount) -> bool {
     grant.platform == PLATFORM
         && grant.uid == row.account.uid
@@ -987,10 +1074,25 @@ impl Lease {
     ) -> Result<Self, Failure> {
         Self::acquire_for_purpose(session, account_id, true).await
     }
+    pub(crate) async fn acquire_for_route(
+        session: Arc<SecretSession>,
+        account_id: &str,
+        expected: &crate::services::service_source_identity::WorkBuddyStamp,
+    ) -> Result<Self, Failure> {
+        Self::acquire_with_expected(session, account_id, true, Some(expected)).await
+    }
     async fn acquire_for_purpose(
         session: Arc<SecretSession>,
         account_id: &str,
         inference: bool,
+    ) -> Result<Self, Failure> {
+        Self::acquire_with_expected(session, account_id, inference, None).await
+    }
+    async fn acquire_with_expected(
+        session: Arc<SecretSession>,
+        account_id: &str,
+        inference: bool,
+        expected: Option<&crate::services::service_source_identity::WorkBuddyStamp>,
     ) -> Result<Self, Failure> {
         let _guard = crate::services::sync_protocol::sync_mutex().lock().await;
         let binding = store::binding(&session)?;
@@ -1005,6 +1107,11 @@ impl Lease {
         let grant = row.inference.clone().ok_or(Failure::NeedsVerification)?;
         if !valid_grant(&grant, row) {
             return Err(Failure::NeedsVerification);
+        }
+        if let Some(expected) = expected {
+            if routing_stamp(&session, &binding, row).as_ref() != Some(expected) {
+                return Err(Failure::ExpiredAuthorization);
+            }
         }
         let mut owner = Owner::from_row(&session, binding, row);
         owner.inference_revision = inference.then_some(row.inference_revision);
@@ -1433,12 +1540,12 @@ fn safe_error_value(upstream_status: u16, code: Option<i64>, refusal: bool) -> V
 #[path = "inference_tests.rs"]
 mod tests;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 type FixtureCapture = Arc<Mutex<Vec<(String, Value)>>>;
 
 /// Original-router fixture seam only. A trusted extension supplies this object;
 /// no client JSON/header or production settings can override upstream origins.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 #[derive(Clone)]
 pub(crate) struct FixtureTransport {
     root: std::path::PathBuf,
@@ -1450,7 +1557,7 @@ pub(crate) struct FixtureTransport {
     attempts: Arc<std::sync::atomic::AtomicUsize>,
     memory: Option<FixtureCapture>,
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 impl FixtureTransport {
     pub(crate) fn loopback(session: &SecretSession, origin: &str) -> Result<Self, Failure> {
         let url = reqwest::Url::parse(origin).map_err(|_| Failure::UnsupportedContext)?;
@@ -1589,6 +1696,37 @@ impl FixtureTransport {
         row.inference = None;
         store::save(session, &binding, rows)
     }
+    /// Test-only original-row mutation, limited to the exact generated fixture identity.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) async fn mutate_fixture_grant(
+        session: &SecretSession,
+        uid: &str,
+        action: &str,
+    ) -> Result<(), Failure> {
+        let _guard = crate::services::sync_protocol::sync_mutex().lock().await;
+        let binding = store::binding(session)?;
+        let mut rows = store::load(session, &binding)?;
+        let row = rows
+            .iter_mut()
+            .find(|row| row.account.uid == uid)
+            .ok_or(Failure::UnsupportedContext)?;
+        if !uid.starts_with("synthetic-") || row.account.token != format!("fixture-checkin-{uid}") {
+            return Err(Failure::UnsupportedContext);
+        }
+        let grant = row.inference.as_mut().ok_or(Failure::UnsupportedContext)?;
+        if grant.access != format!("fixture-access-{uid}")
+            || grant.refresh != format!("fixture-refresh-{uid}")
+            || grant.credential_version != 1
+        {
+            return Err(Failure::UnsupportedContext);
+        }
+        match action {
+            "expire" => grant.expires_ms = 0,
+            "replace" => grant.grant_id = "synthetic-replaced-grant".into(),
+            _ => return Err(Failure::UnsupportedContext),
+        }
+        store::save(session, &binding, rows)
+    }
     /// Generated synthetic credentials only, and ONLY an empty ephemeral owner.
     /// Existing accounts are never replaced by this test helper.
     pub(crate) async fn seed_accounts(
@@ -1637,7 +1775,7 @@ impl FixtureTransport {
         Ok(ids)
     }
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 impl Transport for FixtureTransport {
     fn request(
         &self,
@@ -1695,7 +1833,7 @@ impl Transport for FixtureTransport {
         })
     }
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 impl Lease {
     pub(crate) async fn dispatch_fixture(
         self,

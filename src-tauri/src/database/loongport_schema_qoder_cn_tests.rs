@@ -19,11 +19,13 @@ fn historical(version: i32) -> Connection {
     let conn = Connection::open_in_memory().unwrap();
     crate::paperclip::bindings::ensure_schema(&conn).unwrap();
     conn.execute_batch(
-        "CREATE TABLE providers(id TEXT PRIMARY KEY, qoder_http_secret TEXT NOT NULL DEFAULT '');
+        "CREATE TABLE providers(id TEXT NOT NULL, app_type TEXT NOT NULL, qoder_http_secret TEXT NOT NULL DEFAULT '', PRIMARY KEY(id,app_type));
         CREATE TABLE proxy_request_logs(request_id TEXT PRIMARY KEY);
         PRAGMA user_version=20;",
     )
     .unwrap();
+    // apply runs after original upstream/provider and vendor initialization.
+    super::tests::historical_vendor_owner(&conn);
     conn.execute_batch(LEGACY_LEDGER).unwrap();
     conn.execute("INSERT INTO qoder_campaign_operations VALUES('legacy-attempt','synthetic-subject','international','legacy-campaign','legacy-key',100,200,'legacy-generation','unknown')", []).unwrap();
     if version == 28 {
@@ -79,7 +81,7 @@ fn client_image(conn: &Connection) -> (Vec<rusqlite::types::Value>, Vec<rusqlite
 }
 
 fn assert_final(conn: &Connection, receipt: &[rusqlite::types::Value]) {
-    assert_eq!(read_stored_version(conn).unwrap(), 29);
+    assert_eq!(read_stored_version(conn).unwrap(), LOONGPORT_SCHEMA_VERSION);
     assert_eq!(columns(conn, "qoder_campaign_operations").len(), 10);
     assert_eq!(raw_intl(conn), receipt);
     assert_eq!(
@@ -95,7 +97,7 @@ fn assert_final(conn: &Connection, receipt: &[rusqlite::types::Value]) {
     ledger::read_rows(conn).unwrap();
 }
 
-#[test]
+#[cfg_attr(test, test)]
 fn real_v27_builds_client_owner_then_cn_v29_without_losing_intl_unknown() {
     let conn = historical(27);
     assert_eq!(columns(&conn, "qoder_campaign_operations").len(), 9);
@@ -111,7 +113,7 @@ fn real_v27_builds_client_owner_then_cn_v29_without_losing_intl_unknown() {
     assert_eq!(client_image(&conn), client);
 }
 
-#[test]
+#[cfg_attr(test, test)]
 fn main_v28_migrates_to_v29_preserving_client_ciphertext_revocation_and_log_owner() {
     let conn = historical(28);
     assert_eq!(columns(&conn, "qoder_campaign_operations").len(), 9);
@@ -125,8 +127,8 @@ fn main_v28_migrates_to_v29_preserving_client_ciphertext_revocation_and_log_owne
     assert_eq!(client_image(&conn), client);
 }
 
-#[test]
-fn current_v29_keeps_ten_column_cn_receipt_and_all_existing_owners() {
+#[cfg_attr(test, test)]
+fn historical_v29_upgrades_then_current_is_idempotent_without_changing_existing_owners() {
     let conn = historical(28);
     conn.execute_batch("DROP TABLE qoder_campaign_operations")
         .unwrap();
@@ -135,10 +137,17 @@ fn current_v29_keeps_ten_column_cn_receipt_and_all_existing_owners() {
     set_version(&conn, 29).unwrap();
     let ledger = ledger::read_rows(&conn).unwrap();
     let client = client_image(&conn);
+    assert!(!table_exists(&conn, "loongport_routing_groups").unwrap());
+    assert!(!columns(&conn, "providers").contains(&"credential_revision".into()));
+    apply(&conn).expect("actual historical v29 must migrate through later independent owners");
+    assert_eq!(ledger::read_rows(&conn).unwrap(), ledger);
+    assert_eq!(client_image(&conn), client);
     let schema = schema_image(&conn);
-    apply(&conn).expect("already-current v29 must validate without reconstructing any owner");
     apply(&conn).unwrap();
-    assert_eq!(read_stored_version(&conn).unwrap(), 29);
+    assert_eq!(
+        read_stored_version(&conn).unwrap(),
+        LOONGPORT_SCHEMA_VERSION
+    );
     assert_eq!(columns(&conn, "qoder_campaign_operations").len(), 10);
     assert_eq!(ledger::read_rows(&conn).unwrap(), ledger);
     assert_eq!(client_image(&conn), client);
@@ -150,7 +159,7 @@ fn current_v29_keeps_ten_column_cn_receipt_and_all_existing_owners() {
     );
 }
 
-#[test]
+#[cfg_attr(test, test)]
 fn v28_cn_failures_roll_back_receipt_schema_and_version_without_touching_clients() {
     for point in ["create", "copy", "drop", "stamp"] {
         let conn = historical(28);
@@ -208,7 +217,7 @@ fn v28_cn_failures_roll_back_receipt_schema_and_version_without_touching_clients
     }
 }
 
-#[test]
+#[cfg_attr(test, test)]
 fn experimental_cn_v28_missing_client_owner_is_rejected_without_self_repair() {
     let conn = historical(27);
     conn.execute_batch("DROP TABLE qoder_campaign_operations")
@@ -229,7 +238,7 @@ fn experimental_cn_v28_missing_client_owner_is_rejected_without_self_repair() {
     assert_eq!(columns(&conn, "proxy_request_logs"), ["request_id"]);
 }
 
-#[test]
+#[cfg_attr(test, test)]
 fn real_v27_cn_failure_keeps_completed_v28_client_owner_and_unknown_receipt() {
     let conn = historical(27);
     let receipt = raw_intl(&conn);
@@ -271,4 +280,21 @@ fn real_v27_cn_failure_keeps_completed_v28_client_owner_and_unknown_receipt() {
     assert!(conn.is_autocommit());
     apply(&conn).expect("the legitimate intermediate v28 must remain migratable");
     assert_final(&conn, &receipt);
+}
+
+#[cfg(feature = "test-hooks")]
+pub(super) fn verify_prior_fixture(case: &str) {
+    match case {
+        "v27" => real_v27_builds_client_owner_then_cn_v29_without_losing_intl_unknown(),
+        "v28" => main_v28_migrates_to_v29_preserving_client_ciphertext_revocation_and_log_owner(),
+        "v29" => {
+            historical_v29_upgrades_then_current_is_idempotent_without_changing_existing_owners()
+        }
+        "rollback" => {
+            v28_cn_failures_roll_back_receipt_schema_and_version_without_touching_clients()
+        }
+        "missing" => experimental_cn_v28_missing_client_owner_is_rejected_without_self_repair(),
+        "interrupted" => real_v27_cn_failure_keeps_completed_v28_client_owner_and_unknown_receipt(),
+        _ => panic!("unknown original CN schema fixture"),
+    }
 }

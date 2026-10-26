@@ -232,7 +232,11 @@ impl Drop for ActiveConnectionGuard {
     }
 }
 
+#[derive(Clone)]
+struct GroupMemberModel(String);
+
 pub struct RequestForwarder {
+    group_route: Option<super::provider_router::GroupRouteSnapshot>,
     /// Same request snapshot used to select the original candidate chain.
     automatic_failover: bool,
     diagnostic_id: ProxyDiagnosticId,
@@ -408,7 +412,8 @@ impl RequestForwarder {
             let mut status = self.status.write().await;
             status.success_requests += 1;
             status.last_error = None;
-            let should_switch = matches!(selection_reason, ProviderSelectionReason::Ordered)
+            let should_switch = self.group_route.is_none()
+                && matches!(selection_reason, ProviderSelectionReason::Ordered)
                 && current_provider_id_at_start != provider.id.as_str();
             if should_switch {
                 status.failover_count += 1;
@@ -485,6 +490,7 @@ impl RequestForwarder {
         // saturating_add 防止 u32::MAX + 1 溢出。
         let max_attempts = (max_retries as usize).saturating_add(1);
         Self {
+            group_route: None,
             automatic_failover,
             diagnostic_id,
             request_identity: None,
@@ -523,6 +529,25 @@ impl RequestForwarder {
 
     // Reuse the caller and original applied-chain owners while capacity is
     // queued and after acquiring it. These errors are never candidate skips.
+    /// Group selection never grants a caller access to a different upstream model.
+    fn authorize_group_model(
+        &self,
+        extensions: &Extensions,
+        app: &str,
+        final_model: Option<&str>,
+    ) -> Result<(), ProxyError> {
+        let Some(member) = extensions.get::<GroupMemberModel>() else {
+            return Ok(());
+        };
+        if let Some(caller) = extensions.get::<super::client_access::CallerIdentity>() {
+            self.router
+                .authorize_client_request(caller, app, Some(&member.0))?;
+            self.router
+                .authorize_client_request(caller, app, final_model.or(Some(&member.0)))?;
+        }
+        Ok(())
+    }
+
     fn check_capacity_authorization(
         &self,
         app: &str,
@@ -533,6 +558,7 @@ impl RequestForwarder {
             self.router
                 .authorize_client_request(caller, app, caller.requested_model.as_deref())?;
         }
+        self.authorize_group_model(extensions, app, None)?;
         if let Some(identity) = &self.request_identity {
             let service = self
                 .service_owner
@@ -554,6 +580,14 @@ impl RequestForwarder {
             binding.check_route(&service, app, providers)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn with_group_route(
+        mut self,
+        snapshot: Option<super::provider_router::GroupRouteSnapshot>,
+    ) -> Self {
+        self.group_route = snapshot;
+        self
     }
 
     pub(crate) fn with_personal_session_hint(
@@ -582,6 +616,11 @@ impl RequestForwarder {
         provider: &Provider,
         final_body: &Value,
     ) -> Result<(), ProxyError> {
+        self.authorize_group_model(
+            extensions,
+            app_type.as_str(),
+            final_body.get("model").and_then(Value::as_str),
+        )?;
         if let Some(binding) = extensions.get::<RouteBinding>() {
             let service = self.service_owner.upgrade().ok_or_else(|| {
                 ProxyError::ConfigError("paperclip.request_owner_unavailable".into())
@@ -591,16 +630,67 @@ impl RequestForwarder {
         Ok(())
     }
 
+    fn route_owner<'a>(&'a self, app: &'a str, id: &'a str) -> (&'a str, &'a str) {
+        if let Some(super::provider_router::MemberDispatchProof::LocalProvider(expected)) = self
+            .group_route
+            .as_ref()
+            .and_then(|g| g.members.iter().find(|m| m.provider_id == id))
+            .and_then(|m| m.proof.as_ref())
+        {
+            let origin = expected.origin();
+            return (&origin.origin_app, &origin.provider_id);
+        }
+        (app, id)
+    }
+
+    async fn record_route_result(
+        &self,
+        id: &str,
+        app: &str,
+        permit: bool,
+        success: bool,
+        error: Option<String>,
+    ) -> Result<(), crate::error::AppError> {
+        let (app, id) = self.route_owner(app, id);
+        self.router
+            .record_result(id, app, permit, success, error)
+            .await
+    }
+    async fn record_route_fatal_result(
+        &self,
+        id: &str,
+        app: &str,
+        permit: bool,
+        error: Option<String>,
+    ) -> Result<(), crate::error::AppError> {
+        let (app, id) = self.route_owner(app, id);
+        self.router
+            .record_fatal_result(id, app, permit, error)
+            .await
+    }
+    async fn release_route_permit_neutral(&self, id: &str, app: &str, permit: bool) {
+        let (app, id) = self.route_owner(app, id);
+        self.router.release_permit_neutral(id, app, permit).await;
+    }
+    async fn allow_route_provider_request(
+        &self,
+        id: &str,
+        app: &str,
+    ) -> super::circuit_breaker::AllowResult {
+        let (app, id) = self.route_owner(app, id);
+        self.router.allow_provider_request(id, app).await
+    }
+
     async fn record_success_result(
         &self,
         provider_id: &str,
         app_type: &str,
         used_half_open_permit: bool,
     ) {
+        let (app_type, provider_id) = self.route_owner(app_type, provider_id);
         if used_half_open_permit {
             if let Err(e) = self
-                .router
-                .record_result(provider_id, app_type, true, true, None)
+                .record_route_result(provider_id, app_type, true, true, None)
                 .await
             {
                 log::warn!(
@@ -685,21 +775,20 @@ impl RequestForwarder {
             };
 
         if is_provider_error {
-            self.router
-                .record_result(
-                    &provider.id,
-                    app_type_str,
-                    used_half_open_permit,
-                    false,
-                    Some(retry_err.to_string()),
-                )
-                .await
-                .warn_on_err(
-                    DiagnosticEvent::new("proxy.health.record", "failed")
-                        .field("phase", "rectifier_retry_failure")
-                        .field("app", app_type_str)
-                        .field("provider_id", provider.id.clone()),
-                );
+            self.record_route_result(
+                &provider.id,
+                app_type_str,
+                used_half_open_permit,
+                false,
+                Some(retry_err.to_string()),
+            )
+            .await
+            .warn_on_err(
+                DiagnosticEvent::new("proxy.health.record", "failed")
+                    .field("phase", "rectifier_retry_failure")
+                    .field("app", app_type_str)
+                    .field("provider_id", provider.id.clone()),
+            );
             {
                 let mut status = self.status.write().await;
                 status.last_error = Some(format!(
@@ -712,8 +801,7 @@ impl RequestForwarder {
             return None;
         }
 
-        self.router
-            .release_permit_neutral(&provider.id, app_type_str, used_half_open_permit)
+        self.release_route_permit_neutral(&provider.id, app_type_str, used_half_open_permit)
             .await;
         let mut status = self.status.write().await;
         status.failed_requests += 1;
@@ -769,6 +857,11 @@ impl RequestForwarder {
             s.total_requests = s.total_requests.saturating_add(1);
             s.last_request_at = Some(chrono::Utc::now().to_rfc3339());
         }
+        let group_caller = self.group_route.as_ref().and_then(|_| {
+            extensions
+                .get::<super::client_access::CallerIdentity>()
+                .cloned()
+        });
         let result = self
             .forward_with_retry_inner(
                 app_type, method, endpoint, body, headers, extensions, providers,
@@ -778,7 +871,24 @@ impl RequestForwarder {
         // 在流式 body 的 future 内才真正 drop。
         // Err 路径：guard 在函数 scope 内随返回值落地时自动 drop。
         result.map(|mut fr| {
-            guard.response_lease = ResponseLease::combine(fr.response_lease.take(), caller_lease);
+            let member_lease = group_caller.map(|caller| {
+                let router = self.router.clone();
+                let app = app_type.as_str().to_owned();
+                let actual_model = fr.outbound_model.clone();
+                ResponseLease::new(move || {
+                    let router = router.clone();
+                    let caller = caller.clone();
+                    let app = app.clone();
+                    let actual_model = actual_model.clone();
+                    async move {
+                        router.authorize_client_request(&caller, &app, actual_model.as_deref())
+                    }
+                })
+            });
+            guard.response_lease = ResponseLease::combine(
+                ResponseLease::combine(fr.response_lease.take(), caller_lease),
+                member_lease,
+            );
             fr.connection_guard = Some(guard);
             fr
         })
@@ -819,6 +929,21 @@ impl RequestForwarder {
             .and_then(Value::as_str)
             .is_some_and(crate::services::model_fetch::is_reserved_free_model);
 
+        if self.group_route.as_ref().is_some_and(|group| {
+            group.target_key.is_empty()
+                || group.revision <= 0
+                || group.members.len() != providers.len()
+                || group
+                    .members
+                    .iter()
+                    .zip(&providers)
+                    .any(|(member, provider)| member.provider_id != provider.id)
+        }) {
+            return Err(ForwardError {
+                error: ProxyError::ConfigError("routing_groups.invalid_snapshot".into()),
+                provider: None,
+            });
+        }
         if providers.is_empty() {
             return Err(ForwardError {
                 error: ProxyError::NoAvailableProvider,
@@ -870,7 +995,7 @@ impl RequestForwarder {
         let mut attempted_providers = 0usize;
 
         // 单 Provider 场景下跳过熔断器检查（故障转移关闭时）
-        let bypass_circuit_breaker = providers.len() == 1;
+        let bypass_circuit_breaker = self.group_route.is_none() && providers.len() == 1;
 
         // 致命失败（凭证/余额级）按账号拉黑：同站同账号的其他分组共享同一份
         // 凭证与余额，接着试只会再吃一次 401/402。跨请求由账号级熔断器接管
@@ -884,14 +1009,19 @@ impl RequestForwarder {
             && providers.first().is_some_and(|provider| {
                 super::provider_router::provider_supports_failover(app_type_str, provider)
             });
-        let mut ranked: Vec<_> = providers.iter().map(|p| (p, None)).collect();
+        let mut ranked: Vec<_> = providers
+            .iter()
+            .enumerate()
+            .map(|(index, p)| (p, None, index))
+            .collect();
         let mut expiry_models = std::collections::HashMap::new();
         if probe_capacity
+            && self.group_route.is_none()
             && budget_binding.is_none()
             && self.router.known_expiry_first(app_type_str)
         {
             let now = chrono::Utc::now().timestamp_millis();
-            for (provider, hint) in &mut ranked {
+            for (provider, hint, _) in &mut ranked {
                 if let Some(model) = self.expiry_final_model(app_type, provider, endpoint, &body) {
                     *hint = self.router.expiry_hint(provider, &model, now).await;
                     if hint.is_some() {
@@ -900,22 +1030,22 @@ impl RequestForwarder {
                 }
             }
             // Total, stable key. Unknowns and equal dates retain original order.
-            ranked.sort_by_key(|(_, at)| at.map(|at| (0, at)).unwrap_or((1, 0)));
+            ranked.sort_by_key(|(_, at, _)| at.map(|at| (0, at)).unwrap_or((1, 0)));
         }
         let expiry_reordered = ranked
             .iter()
             .zip(&providers)
-            .any(|((ranked, _), original)| ranked.id != original.id);
+            .any(|((ranked, _, _), original)| ranked.id != original.id);
         let mut attempt_extensions = extensions.clone();
         if expiry_reordered {
             attempt_extensions.insert(ExpiryModels(expiry_models));
         }
         let mut current_attempted = false;
         let mut candidates: std::collections::VecDeque<_> =
-            ranked.into_iter().map(|(p, _)| p).collect();
+            ranked.into_iter().map(|(p, _, index)| (p, index)).collect();
         let mut busy_candidates = std::collections::VecDeque::new();
         let mut waiting_on_busy = false;
-        while let Some(provider) = candidates.pop_front().or_else(|| {
+        while let Some((provider, candidate_index)) = candidates.pop_front().or_else(|| {
             waiting_on_busy = true;
             busy_candidates.pop_front()
         }) {
@@ -925,8 +1055,30 @@ impl RequestForwarder {
             {
                 ProviderSelectionReason::ExpiryPreference
             } else {
-                self.capacity_selection_reason(waiting_on_busy, &busy_candidates)
+                self.capacity_selection_reason(
+                    waiting_on_busy,
+                    &busy_candidates.iter().map(|(p, _)| *p).collect(),
+                )
             };
+            attempt_extensions.remove::<crate::services::service_source_identity::NativeStamp>();
+            attempt_extensions.remove::<crate::services::vendor_response_fence::Expected>();
+            attempt_extensions.remove::<crate::services::openrouter_source::Expected>();
+            if let Some(group) = &self.group_route {
+                let member = &group.members[candidate_index];
+                attempt_extensions.insert(GroupMemberModel(member.model.clone()));
+                match &member.proof {
+                    Some(super::provider_router::MemberDispatchProof::Native(stamp)) => {
+                        attempt_extensions.insert(stamp.clone());
+                    }
+                    Some(super::provider_router::MemberDispatchProof::LocalProvider(expected)) => {
+                        attempt_extensions.insert(expected.clone());
+                    }
+                    Some(super::provider_router::MemberDispatchProof::Vendor(expected)) => {
+                        attempt_extensions.insert(expected.clone());
+                    }
+                    None => {}
+                }
+            }
             // Release the previous candidate before waiting for another
             // account, so two requests cannot hold each other's capacity.
             capacity.release().map_err(|error| ForwardError {
@@ -952,7 +1104,15 @@ impl RequestForwarder {
                     if !matches!(app_type, AppType::Codex) || method != http::Method::POST {
                         Err(ProxyError::InvalidRequest("unsupported_qoder_input".into()))
                     } else {
-                        self.prepare_qoder_request(app_type, provider, endpoint, &body)
+                        self.prepare_qoder_request(
+                            app_type,
+                            provider,
+                            endpoint,
+                            &body,
+                            attempt_extensions
+                                .get::<GroupMemberModel>()
+                                .map(|m| m.0.as_str()),
+                        )
                     };
                 if let Err(error) = admission {
                     last_error = Some(error);
@@ -985,7 +1145,7 @@ impl RequestForwarder {
                 break;
             }
 
-            self.check_capacity_authorization(app_type_str, &providers, &extensions)
+            self.check_capacity_authorization(app_type_str, &providers, &attempt_extensions)
                 .and_then(|()| {
                     self.router
                         .validate_capacity_provider(app_type_str, provider)
@@ -1005,7 +1165,7 @@ impl RequestForwarder {
                     super::account_capacity::CapacityAdmission::Acquired(permit) => Some(permit),
                     super::account_capacity::CapacityAdmission::Busy => {
                         if probe_capacity {
-                            busy_candidates.push_back(provider);
+                            busy_candidates.push_back((provider, candidate_index));
                             continue;
                         }
                         None
@@ -1035,7 +1195,11 @@ impl RequestForwarder {
                     let wait = self.router.acquire_account_capacity(provider);
                     tokio::pin!(wait);
                     loop {
-                        self.check_capacity_authorization(app_type_str, &providers, &extensions)?;
+                        self.check_capacity_authorization(
+                            app_type_str,
+                            &providers,
+                            &attempt_extensions,
+                        )?;
                         self.router
                             .validate_capacity_provider(app_type_str, provider)?;
                         tokio::select! {
@@ -1044,7 +1208,7 @@ impl RequestForwarder {
                         }
                     }
                 };
-                self.check_capacity_authorization(app_type_str, &providers, &extensions)?;
+                self.check_capacity_authorization(app_type_str, &providers, &attempt_extensions)?;
                 self.router
                     .validate_capacity_provider(app_type_str, provider)?;
                 if queue_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
@@ -1068,16 +1232,16 @@ impl RequestForwarder {
             })?;
             // 发起请求前先获取熔断器放行许可（HalfOpen 会占用探测名额）
             // 单 Provider 场景下跳过此检查，避免熔断器阻塞所有请求
-            let (allowed, used_half_open_permit) =
-                if bypass_circuit_breaker || self.current_provider_id_at_start == provider.id {
-                    (true, false)
-                } else {
-                    let permit = self
-                        .router
-                        .allow_provider_request(&provider.id, app_type_str)
-                        .await;
-                    (permit.allowed, permit.used_half_open_permit)
-                };
+            let (allowed, used_half_open_permit) = if bypass_circuit_breaker
+                || (self.group_route.is_none() && self.current_provider_id_at_start == provider.id)
+            {
+                (true, false)
+            } else {
+                let permit = self
+                    .allow_route_provider_request(&provider.id, app_type_str)
+                    .await;
+                (permit.allowed, permit.used_half_open_permit)
+            };
 
             if !allowed {
                 continue;
@@ -1185,13 +1349,12 @@ impl RequestForwarder {
                         // unaffordable candidate. It consumed no send opportunity
                         // or retry allowance, and is not an upstream failure.
                         attempted_providers -= 1;
-                        self.router
-                            .release_permit_neutral(
-                                &provider.id,
-                                app_type_str,
-                                used_half_open_permit,
-                            )
-                            .await;
+                        self.release_route_permit_neutral(
+                            &provider.id,
+                            app_type_str,
+                            used_half_open_permit,
+                        )
+                        .await;
                         last_error = Some(e);
                         last_provider = Some(provider.clone());
                         continue;
@@ -1207,13 +1370,12 @@ impl RequestForwarder {
                         || super::providers::workbuddy_acp::enabled(provider)
                         || is_explicit_upstream_denial(&e)
                     {
-                        self.router
-                            .release_permit_neutral(
-                                &provider.id,
-                                app_type_str,
-                                used_half_open_permit,
-                            )
-                            .await;
+                        self.release_route_permit_neutral(
+                            &provider.id,
+                            app_type_str,
+                            used_half_open_permit,
+                        )
+                        .await;
                         let mut status = self.status.write().await;
                         status.failed_requests += 1;
                         status.last_error = Some(e.to_string());
@@ -1416,13 +1578,12 @@ impl RequestForwarder {
                             if rectifier_retried {
                                 log::warn!("[{app_type_str}] [RECT-005] 整流器已触发过，不再重试");
                                 // 释放 HalfOpen permit（不记录熔断器，这是客户端兼容性问题）
-                                self.router
-                                    .release_permit_neutral(
-                                        &provider.id,
-                                        app_type_str,
-                                        used_half_open_permit,
-                                    )
-                                    .await;
+                                self.release_route_permit_neutral(
+                                    &provider.id,
+                                    app_type_str,
+                                    used_half_open_permit,
+                                )
+                                .await;
                                 let mut status = self.status.write().await;
                                 status.failed_requests += 1;
                                 status.last_error = Some(e.to_string());
@@ -1532,13 +1693,12 @@ impl RequestForwarder {
                                 log::warn!(
                                     "[{app_type_str}] [RECT-013] budget 整流器已触发过，不再重试"
                                 );
-                                self.router
-                                    .release_permit_neutral(
-                                        &provider.id,
-                                        app_type_str,
-                                        used_half_open_permit,
-                                    )
-                                    .await;
+                                self.release_route_permit_neutral(
+                                    &provider.id,
+                                    app_type_str,
+                                    used_half_open_permit,
+                                )
+                                .await;
                                 let mut status = self.status.write().await;
                                 status.failed_requests += 1;
                                 status.last_error = Some(e.to_string());
@@ -1558,13 +1718,12 @@ impl RequestForwarder {
                                 log::warn!(
                                     "[{app_type_str}] [RECT-014] budget 整流器触发但无可整流内容，不做无意义重试"
                                 );
-                                self.router
-                                    .release_permit_neutral(
-                                        &provider.id,
-                                        app_type_str,
-                                        used_half_open_permit,
-                                    )
-                                    .await;
+                                self.release_route_permit_neutral(
+                                    &provider.id,
+                                    app_type_str,
+                                    used_half_open_permit,
+                                )
+                                .await;
                                 let mut status = self.status.write().await;
                                 status.failed_requests += 1;
                                 status.last_error = Some(e.to_string());
@@ -1650,13 +1809,12 @@ impl RequestForwarder {
                     }
 
                     if signature_rectifier_non_retryable_client_error {
-                        self.router
-                            .release_permit_neutral(
-                                &provider.id,
-                                app_type_str,
-                                used_half_open_permit,
-                            )
-                            .await;
+                        self.release_route_permit_neutral(
+                            &provider.id,
+                            app_type_str,
+                            used_half_open_permit,
+                        )
+                        .await;
                         let mut status = self.status.write().await;
                         status.failed_requests += 1;
                         status.last_error = Some(e.to_string());
@@ -1684,24 +1842,22 @@ impl RequestForwarder {
                             // 60s 冷却等于每分钟拿用户请求再撞一次。
                             let fatal = is_fatal_upstream_error(&e);
                             let record = if fatal {
-                                self.router
-                                    .record_fatal_result(
-                                        &provider.id,
-                                        app_type_str,
-                                        used_half_open_permit,
-                                        Some(e.to_string()),
-                                    )
-                                    .await
+                                self.record_route_fatal_result(
+                                    &provider.id,
+                                    app_type_str,
+                                    used_half_open_permit,
+                                    Some(e.to_string()),
+                                )
+                                .await
                             } else {
-                                self.router
-                                    .record_result(
-                                        &provider.id,
-                                        app_type_str,
-                                        used_half_open_permit,
-                                        false,
-                                        Some(e.to_string()),
-                                    )
-                                    .await
+                                self.record_route_result(
+                                    &provider.id,
+                                    app_type_str,
+                                    used_half_open_permit,
+                                    false,
+                                    Some(e.to_string()),
+                                )
+                                .await
                             };
                             record.warn_on_err(
                                 DiagnosticEvent::new("proxy.health.record", "failed")
@@ -1741,13 +1897,12 @@ impl RequestForwarder {
                         }
                         ErrorCategory::NonRetryable | ErrorCategory::ClientAbort => {
                             // 不可重试：客户端层错误或客户端断连 → 不污染健康度，仅释放 HalfOpen permit
-                            self.router
-                                .release_permit_neutral(
-                                    &provider.id,
-                                    app_type_str,
-                                    used_half_open_permit,
-                                )
-                                .await;
+                            self.release_route_permit_neutral(
+                                &provider.id,
+                                app_type_str,
+                                used_half_open_permit,
+                            )
+                            .await;
                             {
                                 let mut status = self.status.write().await;
                                 status.failed_requests += 1;
@@ -1846,6 +2001,7 @@ impl RequestForwarder {
                     caller.requested_model.as_deref(),
                 )?;
             }
+            self.authorize_group_model(extensions, app_type.as_str(), None)?;
             self.forward_attempt(
                 app_type, method, provider, endpoint, body, headers, extensions, adapter, free_only,
             )
@@ -1859,8 +2015,9 @@ impl RequestForwarder {
                 .get::<RouteBinding>()
                 .is_none_or(RouteBinding::has_sent)
         {
+            let (owner_app, owner_id) = self.route_owner(app_type.as_str(), &provider.id);
             self.router
-                .record_attempt(app_type.as_str(), &provider.id, result.is_ok());
+                .record_attempt(owner_app, owner_id, result.is_ok());
         }
         log::debug!(
             "{}",
@@ -1889,6 +2046,7 @@ impl RequestForwarder {
         provider: &Provider,
         endpoint: &str,
         body: &Value,
+        group_model: Option<&str>,
     ) -> Result<PreparedRoutingModel, ProxyError> {
         let mut preserve_claude_role = false;
         let mut claude_default_mapping = false;
@@ -1905,7 +2063,9 @@ impl RequestForwarder {
             mapped
         };
         let mut mapped = normalize_thinking_type(mapped);
-        let application_model = if preserve_claude_role {
+        let application_model = if let Some(model) = group_model {
+            Some(model.to_owned())
+        } else if preserve_claude_role {
             None
         } else {
             self.router.preferred_model(app.as_str(), provider)
@@ -1966,7 +2126,7 @@ impl RequestForwarder {
             return None;
         }
         let mapped = self
-            .prepare_routing_model(app, provider, endpoint, body)
+            .prepare_routing_model(app, provider, endpoint, body, None)
             .ok()?
             .body;
         let mapped = super::model_mapper::strip_one_m_suffix_for_upstream_from_body(mapped);
@@ -1983,13 +2143,17 @@ impl RequestForwarder {
         provider: &Provider,
         endpoint: &str,
         body: &Value,
+        group_model: Option<&str>,
     ) -> Result<Value, ProxyError> {
         // Check the original input as well as provider overrides: a local
         // override must not erase requested tools or unsupported history.
         super::qoder_http::chat_request(body, endpoint)?;
         let (mut mapped, _, _, _) =
             super::model_mapper::apply_model_mapping_detailed(body.clone(), provider);
-        if let Some(model) = self.router.preferred_model(app_type.as_str(), provider) {
+        if let Some(model) = group_model
+            .map(str::to_owned)
+            .or_else(|| self.router.preferred_model(app_type.as_str(), provider))
+        {
             mapped["model"] = Value::String(model);
         } else {
             super::providers::apply_codex_chat_upstream_model(provider, &mut mapped);
@@ -1999,7 +2163,12 @@ impl RequestForwarder {
             .as_ref()
             .and_then(|meta| meta.local_proxy_request_overrides.as_ref())
         {
-            apply_local_proxy_body_overrides(&mut mapped, overrides);
+            let fixed_model = group_model.and_then(|_| mapped.get("model").cloned());
+            apply_local_proxy_body_overrides_preserving_model(
+                &mut mapped,
+                overrides,
+                fixed_model.as_ref(),
+            );
         }
         let chat = super::qoder_http::chat_request(&mapped, endpoint)?;
         if chat["model"]
@@ -2033,7 +2202,18 @@ impl RequestForwarder {
     > {
         // Recheck the resolved owner at the actual output boundary. An HTTP
         // free origin cannot establish free pricing for the fixed account HTTP transport.
-        let chat = self.prepare_qoder_request(app_type, provider, endpoint, body)?;
+        let chat = self.prepare_qoder_request(
+            app_type,
+            provider,
+            endpoint,
+            body,
+            extensions.get::<GroupMemberModel>().map(|m| m.0.as_str()),
+        )?;
+        self.authorize_group_model(
+            extensions,
+            app_type.as_str(),
+            chat.get("model").and_then(Value::as_str),
+        )?;
         super::free_models::enforce(
             free_only,
             body,
@@ -2046,13 +2226,29 @@ impl RequestForwarder {
                 "unsupported_qoder_application".into(),
             ));
         }
-        #[cfg(test)]
+        let expected_route =
+            match extensions.get::<crate::services::service_source_identity::NativeStamp>() {
+                Some(crate::services::service_source_identity::NativeStamp::Qoder(stamp)) => {
+                    Some(stamp)
+                }
+                _ => None,
+            };
+        if extensions.get::<GroupMemberModel>().is_some() && expected_route.is_none() {
+            return Err(ProxyError::InvalidRequest(
+                "qoder_shared_source_proof_required".into(),
+            ));
+        }
+        #[cfg(any(test, feature = "test-hooks"))]
         let test_host = extensions.get::<super::qoder_host::HostConfig>().cloned();
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-hooks")))]
         let test_host: Option<super::qoder_host::HostConfig> = {
             let _ = extensions;
             None
         };
+        #[cfg(feature = "test-hooks")]
+        if test_host.is_none() {
+            return Err(ProxyError::ConfigError("qoder_fixture_required".into()));
+        }
         let host = if let Some(host) = test_host {
             host
         } else {
@@ -2105,6 +2301,7 @@ impl RequestForwarder {
                     self.non_streaming_timeout.as_secs(),
                 ],
                 &transport,
+                expected_route,
             )
             .await?;
         // One selected original owner and one request. A submitted result that
@@ -2141,21 +2338,72 @@ impl RequestForwarder {
                 "paperclip.automatic_retry_blocked".into(),
             ));
         }
+        if self.group_route.is_some()
+            && !extensions.get::<GroupMemberModel>().is_some_and(|member| {
+                super::provider_router::provider_supports_captured_model(
+                    app_type,
+                    provider,
+                    &member.0,
+                    extensions.get::<crate::services::service_source_identity::NativeStamp>(),
+                )
+            })
+        {
+            return Err(ProxyError::ConfigError(
+                "routing_groups.unsupported_transport".into(),
+            ));
+        }
         // Snapshot original authorization before resolving the actual key.
-        let vendor_fence = self.router.vendor_response_fence(app_type, provider)?;
+        let local_expected = extensions.get::<crate::services::openrouter_source::Expected>();
+        let local_resolved = if provider.id.starts_with("local:openrouter:") {
+            let expected = local_expected
+                .filter(|e| e.fact().source_id == provider.id)
+                .ok_or_else(|| ProxyError::Internal("openrouter.authorization_changed".into()))?;
+            Some(self.router.acquire_openrouter_source(app_type, expected)?)
+        } else {
+            if local_expected.is_some() {
+                return Err(ProxyError::Internal(
+                    "openrouter.authorization_changed".into(),
+                ));
+            }
+            None
+        };
+        let (local_provider, local_fence) = match local_resolved {
+            Some((provider, fence)) => (Some(provider), Some(fence)),
+            None => (None, None),
+        };
+        let vendor_expected = extensions.get::<crate::services::vendor_response_fence::Expected>();
+        if extensions.get::<GroupMemberModel>().is_some()
+            && crate::services::vendor_response_fence::owns(provider)
+            && vendor_expected.is_none()
+        {
+            return Err(ProxyError::Internal(
+                "vendor_response.authorization_changed".into(),
+            ));
+        }
+        let vendor_fence =
+            self.router
+                .vendor_response_fence(app_type, provider, vendor_expected)?;
         // Re-read the account owner at the output boundary, including cached routes.
-        let resolved = self
-            .router
-            .resolve_vendor_auth(app_type, provider)
-            .map_err(|_| {
-                if vendor_fence.is_some() {
-                    ProxyError::Internal("vendor_response.authorization_changed".into())
-                } else {
-                    ProxyError::AuthError("Service source authentication unavailable".into())
-                }
-            })?;
+        let resolved = if let Some(provider) = local_provider {
+            provider
+        } else {
+            self.router
+                .resolve_vendor_auth(app_type, provider)
+                .map_err(|_| {
+                    if vendor_fence.is_some() {
+                        ProxyError::Internal("vendor_response.authorization_changed".into())
+                    } else {
+                        ProxyError::AuthError("Service source authentication unavailable".into())
+                    }
+                })?
+        };
         if let Some(fence) = &vendor_fence {
             fence.check()?;
+        }
+        if let Some(fence) = &local_fence {
+            fence
+                .check()
+                .map_err(|_| ProxyError::Internal("openrouter.authorization_changed".into()))?;
         }
         let provider = &resolved;
         let managed_account = super::managed_accounts::selected(provider);
@@ -2247,7 +2495,13 @@ impl RequestForwarder {
             application_model,
             claude_default_mapping,
             grok_applied_model,
-        } = self.prepare_routing_model(app_type, provider, endpoint, body)?;
+        } = self.prepare_routing_model(
+            app_type,
+            provider,
+            endpoint,
+            body,
+            extensions.get::<GroupMemberModel>().map(|m| m.0.as_str()),
+        )?;
         if let Some(applied) = grok_applied_model {
             if let Some(requested) = super::model_alignment::client_requested_model(body) {
                 super::model_alignment::observe_alignment(
@@ -2748,7 +3002,14 @@ impl RequestForwarder {
                 .as_ref()
                 .and_then(|meta| meta.local_proxy_request_overrides.as_ref())
             {
-                if apply_local_proxy_body_overrides(&mut filtered_body, overrides) {
+                let fixed_model = extensions
+                    .get::<GroupMemberModel>()
+                    .and_then(|_| filtered_body.get("model").cloned());
+                if apply_local_proxy_body_overrides_preserving_model(
+                    &mut filtered_body,
+                    overrides,
+                    fixed_model.as_ref(),
+                ) {
                     filtered_body = prepare_upstream_request_body(filtered_body);
                 }
             }
@@ -3445,8 +3706,17 @@ impl RequestForwarder {
 
         // Test-only sealed owner transport is checked after the original vendor
         // credential resolver and before either transport can send any bytes.
-        #[cfg(all(test, feature = "gui"))]
+        #[cfg(all(any(test, feature = "test-hooks"), feature = "gui"))]
         let vendor_fixture = super::opencode_vendor_fixture::prepare_output(
+            extensions,
+            &self.router.managed_secret_session(),
+            provider,
+            &url,
+            app_type,
+        )?;
+
+        #[cfg(all(feature = "test-hooks", feature = "gui"))]
+        let openrouter_fixture = super::openrouter_shared_fixture::prepare_output(
             extensions,
             &self.router.managed_secret_session(),
             provider,
@@ -3458,12 +3728,28 @@ impl RequestForwarder {
         if let Some(fence) = &vendor_fence {
             fence.check()?;
         }
-        let mut response_lease = vendor_fence.map(|fence| {
-            ResponseLease::new(move || {
+        if let Some(fence) = &local_fence {
+            fence
+                .check()
+                .map_err(|_| ProxyError::Internal("openrouter.authorization_changed".into()))?;
+        }
+        let mut response_lease = if let Some(fence) = local_fence {
+            Some(ResponseLease::new(move || {
                 let fence = fence.clone();
-                async move { fence.check() }
+                async move {
+                    fence.check().map_err(|_| {
+                        ProxyError::Internal("openrouter.authorization_changed".into())
+                    })
+                }
+            }))
+        } else {
+            vendor_fence.map(|fence| {
+                ResponseLease::new(move || {
+                    let fence = fence.clone();
+                    async move { fence.check() }
+                })
             })
-        });
+        };
         let response_result = async {
         let response = if let Some(prepared) = prepared_account {
             if method != http::Method::POST
@@ -3491,13 +3777,18 @@ impl RequestForwarder {
                 super::http_client::get_authenticated()
             }
             .map_err(ProxyError::ForwardFailed)?;
-            #[cfg(all(test, feature = "gui"))]
+            #[cfg(all(any(test, feature = "test-hooks"), feature = "gui"))]
             let (client, request_url) = match vendor_fixture.as_ref() {
                 Some(fixture) => (fixture.client(), fixture.url()),
                 None => (client, url.as_str()),
             };
-            #[cfg(not(all(test, feature = "gui")))]
+            #[cfg(not(all(any(test, feature = "test-hooks"), feature = "gui")))]
             let request_url = url.as_str();
+            #[cfg(all(feature = "test-hooks", feature = "gui"))]
+            let (client, request_url) = match openrouter_fixture.as_ref() {
+                Some(fixture) => (fixture.client(), fixture.url()),
+                None => (client, request_url),
+            };
             let mut request = client.request(method.clone(), request_url);
             if request_is_streaming {
                 // reqwest 的 timeout 是整请求超时；流式请求交给 response_processor
@@ -3537,14 +3828,18 @@ impl RequestForwarder {
             // account, vault and epoch. Keep the original native transport and
             // header-case behavior, changing only its test destination. Never
             // send synthetic credentials through a configured external proxy.
-            #[cfg(all(test, feature = "gui"))]
+            #[cfg(all(any(test, feature = "test-hooks"), feature = "gui"))]
             let url = vendor_fixture.as_ref().map_or(url.as_str(), |fixture| fixture.url());
-            #[cfg(all(test, feature = "gui"))]
+            #[cfg(all(any(test, feature = "test-hooks"), feature = "gui"))]
             let upstream_proxy_url = if vendor_fixture.is_some() {
                 None
             } else {
                 upstream_proxy_url
             };
+            #[cfg(all(feature = "test-hooks", feature = "gui"))]
+            let url = openrouter_fixture.as_ref().map_or(url, |fixture| fixture.url());
+            #[cfg(all(feature = "test-hooks", feature = "gui"))]
+            let upstream_proxy_url = if openrouter_fixture.is_some() { None } else { upstream_proxy_url };
             let uri: http::Uri = url.parse().map_err(|e| {
                 ProxyError::ForwardFailed(format!("Invalid upstream URL ({target_for_log}): {e}"))
             })?;
@@ -4885,6 +5180,38 @@ fn summarize_text_for_log(text: &str, max_chars: usize) -> String {
     format!("{truncated}...")
 }
 
+fn apply_local_proxy_body_overrides_preserving_model(
+    body: &mut Value,
+    overrides: &LocalProxyRequestOverrides,
+    fixed_model: Option<&Value>,
+) -> bool {
+    let changed = apply_local_proxy_body_overrides(body, overrides);
+    if let Some(model) = fixed_model {
+        body["model"] = model.clone();
+    }
+    changed
+}
+
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+pub(crate) fn verify_shared_final_model_override() {
+    let overrides = LocalProxyRequestOverrides {
+        body: Some(
+            serde_json::json!({"model":"local-override", "temperature":0.25, "stream":false}),
+        ),
+        ..Default::default()
+    };
+    let original = serde_json::json!({"model":"already-adapter-normalized", "stream":true});
+    let mut shared = original.clone();
+    let fixed = shared["model"].clone();
+    apply_local_proxy_body_overrides_preserving_model(&mut shared, &overrides, Some(&fixed));
+    assert_eq!(shared["model"], original["model"]);
+    assert_eq!(shared["temperature"], 0.25);
+    assert_eq!(shared["stream"], true);
+    let mut legacy = original;
+    apply_local_proxy_body_overrides_preserving_model(&mut legacy, &overrides, None);
+    assert_eq!(legacy["model"], "local-override");
+}
+
 fn apply_local_proxy_body_overrides(
     body: &mut Value,
     overrides: &LocalProxyRequestOverrides,
@@ -5445,6 +5772,7 @@ mod tests {
         let db = Arc::new(Database::memory().expect("memory db"));
 
         RequestForwarder {
+            group_route: None,
             automatic_failover: false,
             diagnostic_id: ProxyDiagnosticId::new(),
             request_identity: None,

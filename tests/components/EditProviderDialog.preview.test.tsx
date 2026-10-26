@@ -88,100 +88,122 @@ function Editor({
 }
 
 describe("U02 real provider edit preview", () => {
-  it("previews the real form before any provider write or success close", async () => {
-    const writes: unknown[] = [];
-    const previews: unknown[] = [];
-    const close = vi.fn();
-    server.use(
-      http.post("http://tauri.local/get_settings", () =>
-        HttpResponse.json({ commonConfigConfirmed: true }),
-      ),
-      http.post("http://tauri.local/get_application_routing", () =>
-        HttpResponse.json({
-          modeState: {
-            status: "ready",
-            canWrite: true,
-            legacyCommonConfigWritable: false,
-          },
-        }),
-      ),
-      http.post("http://tauri.local/get_provider_edit_settings", () =>
-        HttpResponse.json({
-          settingsConfig: provider.settingsConfig,
-          modeState: { status: "ready", canWrite: true },
-        }),
-      ),
-      http.post(
-        "http://tauri.local/preview_provider_edit",
-        async ({ request }) => {
-          const input = (await request.json()) as {
-            app: string;
-            provider: Provider;
-            requestId: string;
-          };
-          previews.push(input);
-          return HttpResponse.json({
-            app: input.app,
-            request: {
-              id: input.requestId,
-              providerId: input.provider.id,
-              draftDigest: "a".repeat(64),
-              revision: "b".repeat(64),
+  it.each(["untouched", "label", "reissue"] as const)(
+    "previews the real %s form before any provider write or success close",
+    async (intent) => {
+      const writes: unknown[] = [];
+      const previews: unknown[] = [];
+      const close = vi.fn();
+      server.use(
+        http.post("http://tauri.local/get_settings", () =>
+          HttpResponse.json({ commonConfigConfirmed: true }),
+        ),
+        http.post("http://tauri.local/get_application_routing", () =>
+          HttpResponse.json({
+            modeState: {
+              status: "ready",
+              canWrite: true,
+              legacyCommonConfigWritable: false,
             },
-            status: "ready",
-            action: "saveOnly",
-            fields: ["metadata"],
-            files: [],
-            preserves: ["sharedSettings"],
-          });
-        },
-      ),
-      http.post("http://tauri.local/update_provider", async ({ request }) => {
-        writes.push(await request.json());
-        return HttpResponse.json(true);
-      }),
-    );
-    const client = createTestQueryClient();
-    const view = render(
-      <QueryClientProvider client={client}>
-        <Editor close={close} />
-      </QueryClientProvider>,
-    );
-    try {
-      await screen.findByDisplayValue(provider.name);
-      await waitFor(() =>
-        expect(
-          screen.getByRole("button", { name: "provider.preview.preview" }),
-        ).toBeEnabled(),
-      );
-      await userEvent.click(
-        screen.getByRole("button", { name: "provider.preview.preview" }),
-      );
-      await waitFor(() => {
-        expect(
-          screen.getByRole("tab", { name: "provider.preview.fields" }),
-        ).toBeVisible();
-        expect(
-          screen.getByRole("tab", { name: "provider.preview.files" }),
-        ).toBeVisible();
-      });
-      await screen.findByRole("button", { name: "provider.preview.saveOnly" });
-      expect(previews).toHaveLength(1);
-      expect(writes).toEqual([]);
-      expect(close).not.toHaveBeenCalled();
-    } finally {
-      console.info(
-        "U02 safe observation",
-        JSON.stringify({
-          updateCalls: writes.length,
-          closeCalls: close.mock.calls.length,
+          }),
+        ),
+        http.post("http://tauri.local/get_provider_edit_settings", () =>
+          HttpResponse.json({
+            settingsConfig: provider.settingsConfig,
+            modeState: { status: "ready", canWrite: true },
+          }),
+        ),
+        http.post(
+          "http://tauri.local/preview_provider_edit",
+          async ({ request }) => {
+            const input = (await request.json()) as {
+              app: string;
+              provider: Provider;
+              requestId: string;
+            };
+            previews.push(input);
+            return HttpResponse.json({
+              app: input.app,
+              request: {
+                id: input.requestId,
+                providerId: input.provider.id,
+                draftDigest: "a".repeat(64),
+                revision: "b".repeat(64),
+              },
+              status: "ready",
+              action: "saveOnly",
+              fields: ["metadata"],
+              files: [],
+              preserves: ["sharedSettings"],
+            });
+          },
+        ),
+        http.post("http://tauri.local/update_provider", async ({ request }) => {
+          writes.push(await request.json());
+          return HttpResponse.json(true);
         }),
       );
-      view.unmount();
-      await client.cancelQueries();
-      client.clear();
-    }
-  });
+      const client = createTestQueryClient();
+      const view = render(
+        <QueryClientProvider client={client}>
+          <Editor close={close} />
+        </QueryClientProvider>,
+      );
+      try {
+        await screen.findByDisplayValue(provider.name);
+        if (intent === "label") {
+          fireEvent.change(screen.getByDisplayValue(provider.name), {
+            target: { value: "Renamed account" },
+          });
+        } else if (intent === "reissue") {
+          const key = await screen.findByDisplayValue(
+            "synthetic-preview-secret",
+          );
+          fireEvent.change(key, { target: { value: "" } });
+          fireEvent.change(key, {
+            target: { value: "synthetic-preview-secret" },
+          });
+        }
+        await waitFor(() =>
+          expect(
+            screen.getByRole("button", { name: "provider.preview.preview" }),
+          ).toBeEnabled(),
+        );
+        await userEvent.click(
+          screen.getByRole("button", { name: "provider.preview.preview" }),
+        );
+        await waitFor(() => {
+          expect(
+            screen.getByRole("tab", { name: "provider.preview.fields" }),
+          ).toBeVisible();
+          expect(
+            screen.getByRole("tab", { name: "provider.preview.files" }),
+          ).toBeVisible();
+        });
+        await screen.findByRole("button", {
+          name: "provider.preview.saveOnly",
+        });
+        expect(previews).toHaveLength(1);
+        if (intent === "reissue")
+          expect(previews[0]).toHaveProperty("credentialWrite", true);
+        else expect(previews[0]).not.toHaveProperty("credentialWrite");
+        expect(previews[0]).not.toHaveProperty("credentialRevision");
+        expect(writes).toEqual([]);
+        expect(close).not.toHaveBeenCalled();
+      } finally {
+        console.info(
+          "U02 safe observation",
+          JSON.stringify({
+            updateCalls: writes.length,
+            closeCalls: close.mock.calls.length,
+          }),
+        );
+        view.unmount();
+        await client.cancelQueries();
+        client.clear();
+      }
+    },
+  );
 });
 
 describe("U02 editing source lifetime", () => {

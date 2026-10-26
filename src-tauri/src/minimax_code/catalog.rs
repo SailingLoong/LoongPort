@@ -311,7 +311,7 @@ pub(super) fn validate_credentials(credentials: &Credentials) -> Result<(), Fail
     }
     Ok(())
 }
-fn validate(document: &Document) -> Result<(), Failure> {
+pub(super) fn validate(document: &Document) -> Result<(), Failure> {
     if document.schema_version != 1 || document.accounts.len() > 200 {
         return Err(Failure::StorageUnavailable);
     }

@@ -393,6 +393,11 @@ function TierRow({
   const verifying = useTierVerification().isVerifying(item.providerId);
   const name = item.configurationName ?? item.name;
   const blocked = tier?.skipReason === "blocked";
+  // Shared native/local identities are not legacy numeric account routes.
+  const legacyAccount =
+    item.account?.kind === "relay" || item.account?.kind === "vendor"
+      ? item.account
+      : null;
   return (
     <tr
       ref={setNodeRef}
@@ -534,14 +539,14 @@ function TierRow({
               <SlidersHorizontal className="h-3.5 w-3.5" />
             </Button>
           )}
-          {item.account && (
+          {legacyAccount && (
             <Button
               size="icon"
               variant="ghost"
               className="h-8 w-8"
               aria-label={t("applications.manageAccount")}
               title={t("applications.manageAccount")}
-              onClick={() => item.account && onOpenAccount(item.account)}
+              onClick={() => onOpenAccount(legacyAccount)}
             >
               <Settings2 className="h-3.5 w-3.5" />
             </Button>

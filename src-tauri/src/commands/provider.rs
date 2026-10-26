@@ -285,24 +285,42 @@ pub async fn update_provider(
     app: String,
     provider: Provider,
     #[allow(non_snake_case)] originalId: Option<String>,
+    #[allow(non_snake_case)] credentialWrite: Option<bool>,
 ) -> Result<bool, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
         let state = app_handle
             .try_state::<AppState>()
             .ok_or_else(|| "应用状态不可用".to_string())?;
-        update_provider_internal(state.inner(), app_type, originalId.as_deref(), provider)
-            .map_err(|e| e.to_string())
+        update_provider_internal_with_intent(
+            state.inner(),
+            app_type,
+            originalId.as_deref(),
+            provider,
+            credentialWrite.unwrap_or(false),
+        )
+        .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| format!("供应商更新任务执行失败: {e}"))?
 }
 
+#[cfg(test)]
 fn update_provider_internal(
     state: &AppState,
     app_type: AppType,
     original_id: Option<&str>,
     provider: Provider,
+) -> Result<bool, AppError> {
+    update_provider_internal_with_intent(state, app_type, original_id, provider, false)
+}
+
+fn update_provider_internal_with_intent(
+    state: &AppState,
+    app_type: AppType,
+    original_id: Option<&str>,
+    provider: Provider,
+    credential_write: bool,
 ) -> Result<bool, AppError> {
     let provider =
         ProviderService::prepare_managed_update(state, app_type.clone(), original_id, provider)?;
@@ -310,7 +328,13 @@ fn update_provider_internal(
     let provider_id = provider.id.clone();
     // `app_type` 下一步会被 move 进 update，先扣出字符串给 set_user_edited 用。
     let app_type_name = app_type.as_str().to_string();
-    let result = ProviderService::update(state, app_type, original_id, provider)?;
+    let result = ProviderService::update_with_credential_intent(
+        state,
+        app_type,
+        original_id,
+        provider,
+        credential_write,
+    )?;
     // 用户手工编辑保存 ⇒ 置「已手工维护」标记（即使改得跟默认一样，见需求）。
     // 更新后的行 id 是 `provider.id`（改名时 original_id 指向旧行）。
     if app_type_name != "mcode" {
@@ -1829,6 +1853,8 @@ pub async fn confirm_application_model_settings(
     .map_err(|_| "provider.modelSettings.ownerUnavailable".to_owned())?
 }
 
+// Keep the original IPC arguments stable; only the optional credential intent is appended.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn preview_provider_edit(
     app_handle: tauri::AppHandle,
@@ -1837,6 +1863,7 @@ pub async fn preview_provider_edit(
     #[allow(non_snake_case)] originalId: String,
     #[allow(non_snake_case)] requestId: String,
     #[allow(non_snake_case)] deleteCredential: bool,
+    #[allow(non_snake_case)] credentialWrite: Option<bool>,
     #[allow(non_snake_case)] catalogDecision: Option<
         crate::services::provider::codex_direct::CatalogDecision,
     >,
@@ -1846,18 +1873,30 @@ pub async fn preview_provider_edit(
         let state = app_handle
             .try_state::<AppState>()
             .ok_or("provider.edit_unavailable")?;
-        if catalogDecision.is_none() {
-            return crate::services::provider::edit::preview(
-                state.inner(),
-                &app,
-                provider,
-                &originalId,
-                &requestId,
-                deleteCredential,
-            )
+        if !credentialWrite.unwrap_or(false) {
+            return if catalogDecision.is_none() {
+                crate::services::provider::edit::preview(
+                    state.inner(),
+                    &app,
+                    provider,
+                    &originalId,
+                    &requestId,
+                    deleteCredential,
+                )
+            } else {
+                crate::services::provider::edit::preview_with_catalog(
+                    state.inner(),
+                    &app,
+                    provider,
+                    &originalId,
+                    &requestId,
+                    deleteCredential,
+                    catalogDecision.as_ref(),
+                )
+            }
             .map_err(|_| "provider.edit_unavailable");
         }
-        crate::services::provider::edit::preview_with_catalog(
+        crate::services::provider::edit::preview_with_intent(
             state.inner(),
             &app,
             provider,
@@ -1865,6 +1904,7 @@ pub async fn preview_provider_edit(
             &requestId,
             deleteCredential,
             catalogDecision.as_ref(),
+            credentialWrite.unwrap_or(false),
         )
         .map_err(|_| "provider.edit_unavailable")
     })
@@ -1873,6 +1913,8 @@ pub async fn preview_provider_edit(
     .map_err(str::to_owned)
 }
 
+// Keep the original IPC arguments stable; only the optional credential intent is appended.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn confirm_provider_edit(
     app_handle: tauri::AppHandle,
@@ -1881,6 +1923,7 @@ pub async fn confirm_provider_edit(
     #[allow(non_snake_case)] originalId: Option<String>,
     request: crate::mode::state::SaveRequest,
     #[allow(non_snake_case)] deleteCredential: bool,
+    #[allow(non_snake_case)] credentialWrite: Option<bool>,
     #[allow(non_snake_case)] catalogDecision: Option<
         crate::services::provider::codex_direct::CatalogDecision,
     >,
@@ -1891,18 +1934,30 @@ pub async fn confirm_provider_edit(
             .try_state::<AppState>()
             .ok_or("provider.edit_unavailable")?;
         let original = originalId.as_deref().unwrap_or(&provider.id).to_owned();
-        if catalogDecision.is_none() {
-            return crate::services::provider::edit::confirm(
-                state.inner(),
-                &app,
-                provider,
-                &original,
-                request,
-                deleteCredential,
-            )
+        if !credentialWrite.unwrap_or(false) {
+            return if catalogDecision.is_none() {
+                crate::services::provider::edit::confirm(
+                    state.inner(),
+                    &app,
+                    provider,
+                    &original,
+                    request,
+                    deleteCredential,
+                )
+            } else {
+                crate::services::provider::edit::confirm_with_catalog(
+                    state.inner(),
+                    &app,
+                    provider,
+                    &original,
+                    request,
+                    deleteCredential,
+                    catalogDecision.as_ref(),
+                )
+            }
             .map_err(|_| "provider.edit_unavailable");
         }
-        crate::services::provider::edit::confirm_with_catalog(
+        crate::services::provider::edit::confirm_with_intent(
             state.inner(),
             &app,
             provider,
@@ -1910,6 +1965,7 @@ pub async fn confirm_provider_edit(
             request,
             deleteCredential,
             catalogDecision.as_ref(),
+            credentialWrite.unwrap_or(false),
         )
         .map_err(|_| "provider.edit_unavailable")
     })

@@ -7,6 +7,11 @@ on:
       - ".github/workflows/docs-ui.yml"
       - "docs/guide/**"
       - "tests/browser/**"
+      - "src/App.tsx"
+      - "src/components/applications/**"
+      - "src/components/AppSwitcher.tsx"
+      - "src/components/shell/navigation.ts"
+      - "src/i18n/locales/**"
       - "src/components/zcode/**"
       - "src/components/relay/accounts/**"
       - "src/components/relay/AddHubPage.tsx"
@@ -102,6 +107,11 @@ jobs:
           export UNIFIED_LAYOUT_SOURCE_SHA
           export UNIFIED_LAYOUT_OUTPUT="$RUNNER_TEMP/docs-ui-artifact/unified-accounts"
           node tests/browser/run-unified-accounts.mjs
+          pnpm exec vitest run --config tests/browser/applications-c2.vitest.config.mts
+          APPLICATIONS_C2_SOURCE_SHA="$(git rev-parse HEAD)"
+          export APPLICATIONS_C2_SOURCE_SHA
+          export APPLICATIONS_C2_OUTPUT="$RUNNER_TEMP/docs-ui-artifact/applications-c2"
+          node tests/browser/run-applications-c2.mjs
       - name: Save short-lived review artifacts
         if: always()
         uses: actions/upload-artifact@v7

@@ -80,3 +80,28 @@ describe("application model settings entry", () => {
     ).toBeDisabled();
   });
 });
+
+// The shared DTO contains identities that the legacy numeric account route cannot open.
+it.each<ApplicationConfiguration["account"]>([
+  { kind: "nativeAccount", platform: "workbuddy", id: "synthetic-native" },
+  {
+    kind: "localProvider",
+    platform: "openrouter",
+    id: "synthetic-local",
+    originApp: "codex",
+    originProviderId: "origin",
+  },
+])(
+  "does not send a shared source identity to the legacy account route: %j",
+  (account) => {
+    render(
+      <ApplicationTierTable
+        {...props}
+        configurations={[{ ...current, account }]}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: "applications.manageAccount" }),
+    ).not.toBeInTheDocument();
+  },
+);

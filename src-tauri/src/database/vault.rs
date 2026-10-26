@@ -47,6 +47,9 @@ pub(crate) fn preflight_structure(conn: &Connection) -> Result<(), AppError> {
     {
         return Err(AppError::Config("secret.database_version_too_new".into()));
     }
+    if super::loongport_schema::read_stored_version(conn)? >= 31 {
+        super::credential_revision::validate_schema(conn)?;
+    }
     if super::loongport_schema::read_stored_version(conn)? >= 25 {
         crate::paperclip::bindings::validate_schema(conn)?;
         crate::paperclip::bindings::read_rows(conn)?;

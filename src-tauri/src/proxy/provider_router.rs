@@ -21,6 +21,46 @@ pub(crate) fn provider_supports_failover(app_type: &str, provider: &Provider) ->
             || !crate::proxy::providers::is_codex_official_provider(provider))
 }
 
+/// Explicit per-member models cannot be silently ignored by alternate transports.
+pub(crate) fn provider_supports_explicit_model(provider: &Provider) -> bool {
+    !super::providers::workbuddy_acp::enabled(provider)
+        && super::managed_accounts::selected(provider).is_none()
+}
+
+/// Narrow original-owner proof for a captured MiniMax account/model projection.
+/// Other managed transports retain the existing explicit-model rejection.
+pub(crate) fn provider_supports_captured_model(
+    app: &AppType,
+    provider: &Provider,
+    model: &str,
+    native: Option<&crate::services::service_source_identity::NativeStamp>,
+) -> bool {
+    if provider_supports_explicit_model(provider) {
+        return true;
+    }
+    let Some(stamp) = native else { return false };
+    let identity_matches = match (super::managed_accounts::selected(provider), stamp) {
+        (
+            Some((super::managed_accounts::AccountKind::MiniMax, id)),
+            crate::services::service_source_identity::NativeStamp::MiniMax(s),
+        ) => id == s.account_id,
+        (
+            Some((super::managed_accounts::AccountKind::WorkBuddy, id)),
+            crate::services::service_source_identity::NativeStamp::WorkBuddy(s),
+        ) => id == s.account_id,
+        (
+            Some((super::managed_accounts::AccountKind::ZCode, id)),
+            crate::services::service_source_identity::NativeStamp::ZCode(s),
+        ) => id == s.account_id,
+        _ => false,
+    };
+    identity_matches
+        && !super::providers::workbuddy_acp::enabled(provider)
+        && crate::services::provider::managed_inference::validate(app, provider).is_ok()
+        && crate::relay::provider_config::selected_model(app, &provider.settings_config).as_deref()
+            == Some(model)
+}
+
 pub(crate) fn provider_supports_proxy_routing(app_type: &str, provider: &Provider) -> bool {
     let Ok(app) = AppType::from_str(app_type) else {
         return false;
@@ -39,6 +79,31 @@ fn account_circuit_key(app_type: &str, provider: &Provider) -> Option<String> {
     provider
         .failover_account_key()
         .map(|key| format!("{app_type}:account:{key}"))
+}
+
+/// Immutable per-request ordered model intent from the single native group owner.
+#[derive(Clone)]
+pub(crate) struct GroupRouteSnapshot {
+    pub target_key: String,
+    pub automatic: bool,
+    pub revision: i64,
+    pub members: Vec<GroupMemberSnapshot>,
+}
+#[derive(Clone)]
+pub(crate) struct GroupMemberSnapshot {
+    pub provider_id: String,
+    pub model: String,
+    pub proof: Option<MemberDispatchProof>,
+}
+#[derive(Clone)]
+pub(crate) enum MemberDispatchProof {
+    LocalProvider(crate::services::openrouter_source::Expected),
+    Native(crate::services::service_source_identity::NativeStamp),
+    Vendor(crate::services::vendor_response_fence::Expected),
+}
+pub(crate) struct RouteSelection {
+    pub providers: Vec<Provider>,
+    pub group: Option<GroupRouteSnapshot>,
 }
 
 /// 供应商路由器
@@ -131,13 +196,22 @@ impl ProviderRouter {
         &self,
         app: &AppType,
         provider: &Provider,
+        expected: Option<&crate::services::vendor_response_fence::Expected>,
     ) -> Result<Option<crate::services::vendor_response_fence::Fence>, crate::proxy::ProxyError>
     {
-        crate::services::vendor_response_fence::Fence::acquire(
-            self.db.clone(),
-            app.clone(),
-            provider,
-        )
+        match expected {
+            Some(expected) => crate::services::vendor_response_fence::Fence::acquire_with_expected(
+                self.db.clone(),
+                app.clone(),
+                provider,
+                expected,
+            ),
+            None => crate::services::vendor_response_fence::Fence::acquire(
+                self.db.clone(),
+                app.clone(),
+                provider,
+            ),
+        }
     }
 
     #[cfg(any(feature = "gui", feature = "test-hooks", test))]
@@ -148,6 +222,7 @@ impl ProviderRouter {
         host: super::qoder_host::HostConfig,
         timeouts: [u64; 3],
         transport: &dyn crate::services::provider::qoder_http_auth::AuthTransport,
+        expected_route: Option<&crate::services::service_source_identity::QoderStamp>,
     ) -> Result<
         (
             super::qoder_http::Dispatch,
@@ -161,20 +236,29 @@ impl ProviderRouter {
                 "unsupported_qoder_application".into(),
             ));
         }
-        let snapshot = Arc::new(
+        let acquired = if let Some(expected) = expected_route {
+            qoder_http_auth::acquire_for_route(
+                &self.db,
+                provider,
+                transport,
+                || chrono::Utc::now().timestamp_millis(),
+                Some(expected),
+            )
+            .await
+        } else {
             qoder_http_auth::acquire(&self.db, provider, transport, || {
                 chrono::Utc::now().timestamp_millis()
             })
             .await
-            .map_err(|error| match error {
-                qoder_http_auth::AcquireError::PreflightMissingSource => {
-                    super::ProxyError::AuthError("qoder_auth_required".into())
-                }
-                qoder_http_auth::AcquireError::NonRetryable => {
-                    super::ProxyError::Internal("qoder.http_auth.unavailable".into())
-                }
-            })?,
-        );
+        };
+        let snapshot = Arc::new(acquired.map_err(|error| match error {
+            qoder_http_auth::AcquireError::PreflightMissingSource => {
+                super::ProxyError::AuthError("qoder_auth_required".into())
+            }
+            qoder_http_auth::AcquireError::NonRetryable => {
+                super::ProxyError::Internal("qoder.http_auth.unavailable".into())
+            }
+        })?);
         qoder_http_auth::check_selected_provider(provider, &snapshot).map_err(|_| {
             super::ProxyError::Internal("qoder.http_auth.selected_source_changed".into())
         })?;
@@ -205,6 +289,15 @@ impl ProviderRouter {
             },
             lease,
         ))
+    }
+
+    pub(crate) fn acquire_openrouter_source(
+        &self,
+        app: &AppType,
+        expected: &crate::services::openrouter_source::Expected,
+    ) -> Result<(Provider, crate::services::openrouter_source::Fence), super::ProxyError> {
+        crate::services::openrouter_source::acquire_expected(self.db.clone(), app, expected)
+            .map_err(|_| super::ProxyError::Internal("openrouter.authorization_changed".into()))
     }
 
     pub(crate) fn resolve_vendor_auth(
@@ -322,8 +415,262 @@ impl ProviderRouter {
         self.select_providers_with_mode(app_type, enabled).await
     }
 
+    /// Capture group, binding, provider and identity facts under one read transaction.
+    fn group_snapshot(&self, app: &str) -> Result<Option<RouteSelection>, AppError> {
+        use crate::services::{routing_groups as groups, service_source_identity};
+        let app_type = AppType::from_str(app)?;
+        let invalid = || AppError::Config("routing_groups.unavailable".into());
+        let vault = self.db.secrets.read()?;
+        let captured_epoch = self.db.secret_session().lifecycle_epoch();
+        let mut conn = self.db.conn.lock()?;
+        let tx = conn.transaction()?;
+        let version = crate::database::loongport_schema::read_stored_version(&tx)?;
+        if version < 30
+            && crate::database::loongport_schema::supports_authenticated_snapshot_version(version)
+        {
+            crate::database::storage::check_identity(&tx, &vault)?;
+            crate::secrets::inventory::validate_storage_database(&tx, &vault)?;
+            return Ok(None);
+        }
+        let Some(binding) = groups::binding(&tx, app).map_err(|_| invalid())? else {
+            return Ok(None);
+        };
+        if !app_type.supports_local_proxy() {
+            return Err(invalid());
+        }
+        let automatic = matches!(binding.target, groups::RouteTarget::OrderedGroup { .. });
+        let mut group = match &binding.target {
+            groups::RouteTarget::OrderedGroup { group_id } => groups::read(&tx, group_id)
+                .map_err(|_| invalid())?
+                .ok_or_else(invalid)?,
+            groups::RouteTarget::Manual { source_id, model } => groups::Group {
+                id: format!("manual:{source_id}"),
+                name: String::new(),
+                revision: binding.revision,
+                members: vec![groups::Member {
+                    source_id: source_id.clone(),
+                    model: model.clone(),
+                }],
+            },
+        };
+        let providers = Database::get_all_providers_on_connection(&tx, &vault, app)?;
+        let group_id = group.id.clone();
+        let native = service_source_identity::read_native_for_sources(
+            self.db.secret_session(),
+            &vault,
+            group.members.iter().map(|m| m.source_id.as_str()),
+        )?;
+        if automatic {
+            let mut available = Vec::with_capacity(group.members.len());
+            for member in std::mem::take(&mut group.members) {
+                if matches!(
+                    service_source_identity::member_app_capability(
+                        &tx, &vault, &app_type, &member
+                    )?,
+                    service_source_identity::MemberAppCapability::UnsupportedApp(_)
+                ) {
+                    continue;
+                }
+                if service_source_identity::runtime_local_unavailability(
+                    &tx,
+                    &vault,
+                    &app_type,
+                    &providers,
+                    &member,
+                    native.as_ref(),
+                )?
+                .is_none()
+                {
+                    available.push(member);
+                }
+            }
+            group.members = available;
+        }
+        let mut members = Vec::new();
+        let mut selected = Vec::new();
+        let resolved = groups::resolve_references(group, |member| {
+            let (provider, mut reference) = service_source_identity::resolve_on(
+                &tx,
+                &vault,
+                &app_type,
+                &providers,
+                &member.source_id,
+                native.as_ref(),
+            )
+            .map_err(|_| groups::Error::Storage)?
+            .ok_or(groups::Error::Unresolved)?;
+            if reference.source_id != member.source_id
+                || reference.provider_id != provider.id
+                || reference.app_id != app
+                || !service_source_identity::member_model_supported_on(
+                    &tx,
+                    &app_type,
+                    &provider,
+                    &reference,
+                    &member.model,
+                )
+                .map_err(|_| groups::Error::Storage)?
+            {
+                return Err(groups::Error::Unresolved);
+            }
+            if let Some(service_source_identity::NativeStamp::Qoder(stamp)) =
+                reference.native_stamp.as_mut()
+            {
+                stamp.session_epoch = captured_epoch;
+            }
+            let vendor = crate::services::vendor_response_fence::Expected::capture_on(
+                &tx,
+                &vault,
+                captured_epoch,
+                &app_type,
+                &provider,
+            )
+            .map_err(|_| groups::Error::Storage)?;
+            let local = reference
+                .local_provider
+                .as_ref()
+                .map(|fact| {
+                    crate::services::openrouter_source::capture_on(
+                        &tx,
+                        &vault,
+                        captured_epoch,
+                        &fact.origin,
+                    )
+                })
+                .transpose()
+                .map_err(|_| groups::Error::Storage)?;
+            let proof = if let Some(local) = local {
+                if local.availability() != crate::services::openrouter_source::Availability::Ready
+                    || reference.native_stamp.is_some()
+                    || vendor.is_some()
+                {
+                    return Err(groups::Error::Unresolved);
+                }
+                Some(MemberDispatchProof::LocalProvider(local))
+            } else {
+                match (reference.native_stamp, vendor) {
+                    (Some(native), None) => Some(MemberDispatchProof::Native(native)),
+                    (None, Some(vendor)) => Some(MemberDispatchProof::Vendor(vendor)),
+                    (None, None) => None,
+                    (Some(_), Some(_)) => return Err(groups::Error::Unresolved),
+                }
+            };
+            selected.push(provider.clone());
+            members.push(GroupMemberSnapshot {
+                provider_id: provider.id.clone(),
+                model: member.model.clone(),
+                proof,
+            });
+            Ok(groups::ResolvedReference {
+                source_id: reference.source_id,
+                provider_id: provider.id,
+            })
+        })
+        .map_err(|_| invalid())?;
+        if resolved.candidates.len() != selected.len()
+            || resolved
+                .candidates
+                .iter()
+                .zip(&selected)
+                .any(|(candidate, provider)| candidate.provider_id != provider.id)
+        {
+            return Err(invalid());
+        }
+        if let Some(guard) = native.as_ref() {
+            guard.check()?;
+        }
+        self.db.secret_session().ensure_available()?;
+        if self.db.secret_session().lifecycle_epoch() != captured_epoch {
+            return Err(invalid());
+        }
+        tx.commit()?;
+        Ok(Some(RouteSelection {
+            providers: selected,
+            group: Some(GroupRouteSnapshot {
+                target_key: group_id,
+                automatic,
+                revision: resolved.revision,
+                members,
+            }),
+        }))
+    }
+
+    pub(crate) async fn select_route_with_mode(
+        &self,
+        app: &str,
+        enabled: bool,
+    ) -> Result<RouteSelection, AppError> {
+        // Preserve the original mode/pending-journal guard without pinning group priority.
+        super::application_routing::current_provider_id_checked(&self.db, app)?;
+
+        if let Some(mut selection) = self.group_snapshot(app)? {
+            let blocked = super::application_routing::blocked_tier_ids_checked(&self.db, app)?;
+            let snapshot = selection.group.as_mut().expect("group snapshot");
+            if snapshot.members.len() != selection.providers.len()
+                || snapshot
+                    .members
+                    .iter()
+                    .zip(&selection.providers)
+                    .any(|(member, provider)| member.provider_id != provider.id)
+            {
+                return Err(AppError::Config("routing_groups.invalid_snapshot".into()));
+            }
+            let mut providers = Vec::new();
+            let mut members = Vec::new();
+            for (provider, member) in selection
+                .providers
+                .into_iter()
+                .zip(std::mem::take(&mut snapshot.members))
+            {
+                let (health_app, health_provider) = match &member.proof {
+                    Some(MemberDispatchProof::LocalProvider(expected)) => {
+                        let mut original = provider.clone();
+                        original.id = expected.origin().provider_id.clone();
+                        (expected.origin().origin_app.as_str(), original)
+                    }
+                    _ => (app, provider.clone()),
+                };
+                if !(blocked.contains(&provider.id)
+                    || health_app == app && blocked.contains(&health_provider.id))
+                    && (if snapshot.automatic {
+                        provider_supports_failover(app, &provider)
+                            && self
+                                .tier_and_account_available(health_app, &health_provider)
+                                .await
+                    } else {
+                        provider_supports_proxy_routing(app, &provider)
+                    })
+                {
+                    providers.push(provider);
+                    members.push(member);
+                }
+            }
+            if providers.is_empty() {
+                return Err(AppError::NoProvidersConfigured);
+            }
+            snapshot.members = members;
+            selection.providers = providers;
+            return Ok(selection);
+        }
+        Ok(RouteSelection {
+            providers: self.select_legacy_providers_with_mode(app, enabled).await?,
+            group: None,
+        })
+    }
+
     /// Select and admit a request using the same captured automatic-chain mode.
     pub(crate) async fn select_providers_with_mode(
+        &self,
+        app_type: &str,
+        enabled: bool,
+    ) -> Result<Vec<Provider>, AppError> {
+        Ok(self
+            .select_route_with_mode(app_type, enabled)
+            .await?
+            .providers)
+    }
+
+    async fn select_legacy_providers_with_mode(
         &self,
         app_type: &str,
         enabled: bool,

@@ -26,3 +26,6 @@ pub(crate) mod integration_fixture;
 pub(crate) fn verify_plaintext_storage() {
     store::plaintext_tests::run();
 }
+
+#[cfg(feature = "test-hooks")]
+pub(crate) mod shared_routing_fixture;

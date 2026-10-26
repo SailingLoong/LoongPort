@@ -1573,6 +1573,8 @@ impl ProxyService {
             return Err(format!("{} 不支持本地路由", app.as_str()));
         }
         let _guard = self.switch_locks.lock_for_app(app.as_str()).await;
+        crate::services::shared_routing::ensure_legacy_policy_edit_allowed(&self.db, &app)
+            .map_err(|error| error.to_string())?;
         crate::mode::operation::admit_metadata_write(self, &app)
             .map_err(|error| error.to_string())?;
         let modern =

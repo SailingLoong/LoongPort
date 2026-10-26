@@ -17,6 +17,7 @@ fn target(scope: state::SaveScope) -> PendingTarget {
             revision: "b".repeat(64),
         }),
         saved_row: Some(state::SavedRow {
+            credential_write: None,
             before: Database::provider_update_digest(&provider).unwrap(),
             provider: Database::provider_update_value(&provider).unwrap(),
             clear_model_preference: false,

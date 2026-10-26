@@ -1,30 +1,16 @@
-import { StartupUpgrade } from "@/components/StartupUpgrade";
-import { startupUpgradeApi } from "@/lib/api/startupUpgrade";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-} from "@/components/ui/dialog";
-import { toast } from "sonner";
-import { BindVendorSource } from "./BindVendorSource";
+import { ApplicationStartupCheckpoint } from "./ApplicationStartupCheckpoint";
 import {
   useEffect,
   useImperativeHandle,
   useMemo,
-  useRef,
   useState,
   type ReactNode,
   type Ref,
 } from "react";
 import { useTranslation } from "react-i18next";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  AlertTriangle,
   Check,
   ChevronDown,
-  CircleHelp,
   ListFilter,
   Plus,
   Search,
@@ -32,16 +18,8 @@ import {
 } from "lucide-react";
 import type { Provider } from "@/types";
 import type { AppId } from "@/lib/api";
-import type {
-  ApplicationConfiguration,
-  ApplicationOverview,
-} from "@/lib/api/applicationOverview";
-import type {
-  ApplicationRouting,
-  ApplicationRoutingTier,
-} from "@/lib/api/applicationRouting";
+import type { ApplicationRoutingTier } from "@/lib/api/applicationRouting";
 import type { AccountRoute } from "@/components/shell/navigation";
-import { isProxyAppId } from "@/config/appConfig";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -57,35 +35,22 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
-import { Switch } from "@/components/ui/switch";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { SwitchTierConfirmDialog } from "@/components/relay/SwitchTierConfirmDialog";
-import { orderProfilesApi } from "@/lib/api/orderProfiles";
 import { useApplicationOverview } from "./useApplicationOverview";
 import { useApplicationRouting } from "./useApplicationRouting";
-import { useApplicationRoutingDraft } from "./useApplicationRoutingDraft";
-import { ApplicationTierTable, visibleTierIds } from "./ApplicationTierTable";
+import { ApplicationTierTable } from "./ApplicationTierTable";
 import { TierVerificationProvider } from "@/components/relay/model-verification/TierVerificationProvider";
 import {
-  ApplicationChangeConfirmDialog,
-  type ApplicationChangeReview,
-} from "./ApplicationChangeConfirmDialog";
-import { OrderProfilesMenu } from "./OrderProfilesMenu";
-import { ApplicationInlineSelection } from "./ApplicationInlineSelection";
-import { defaultDescending, sortTierIds, type TierMetric } from "./tierMetrics";
-import { ApplicationModelSettingsDialog } from "./ApplicationModelSettingsDialog";
-import { ExpiryStrategySelect } from "./ExpiryStrategySelect";
-import { useTierEditGuard } from "@/components/relay/useTierEditGuard";
+  defaultDescending,
+  sortTierIds,
+  type TierMetric,
+  type TierSort,
+} from "./tierMetrics";
 
 /** 模型可用性分数：分子着色（全可用绿 / 部分可用橙 / 全不可用灰，同 utilizationColor 语义），分母恒灰。 */
 function ModelAvailability({
@@ -235,31 +200,6 @@ function supportedModels(tier: ApplicationRoutingTier): string[] {
     ? tier.models
     : [tier.effectiveModel].filter((model): model is string => Boolean(model));
 }
-/** Only facts that can change the reviewed request; routine metric refreshes do not. */
-function applicationReviewFacts(
-  routing: ApplicationRouting | undefined,
-  overview: ApplicationOverview | undefined,
-  profile: string | undefined,
-  failed: boolean,
-) {
-  return JSON.stringify([
-    routing?.chainIds,
-    routing?.model,
-    routing?.autoFailoverEnabled,
-    routing?.routingActive,
-    routing?.modeState,
-    routing?.tiers.map((tier) => [
-      tier.providerId,
-      tier.skipReason,
-      tier.effectiveModel,
-      tier.models,
-    ]),
-    overview?.configurations,
-    profile,
-    failed,
-  ]);
-}
-
 export function ApplicationWorkspace({
   ref,
   appId,
@@ -270,69 +210,13 @@ export function ApplicationWorkspace({
   children,
 }: Props) {
   const { t } = useTranslation();
-  const client = useQueryClient();
-  const [review, setReview] = useState<ApplicationChangeReview | null>(null);
-  const pendingReview = useRef<ApplicationChangeReview | null>(null);
   const model = useApplicationOverview(appId, providers, onSwitchProvider);
   const routing = useApplicationRouting(appId);
   const [managing, setManaging] = useState(false);
-  const [reviewUpgrade, setReviewUpgrade] = useState(false);
-  const checkpointBlocked =
-    routing.modeState?.blockedReason === "upgrade.checkpoint_pending";
-  const upgrade = useQuery({
-    queryKey: ["startupUpgrade", "applicationRouting", appId],
-    queryFn: startupUpgradeApi.query,
-    enabled: checkpointBlocked,
-  });
-  const canReviewUpgrade =
-    checkpointBlocked &&
-    !upgrade.error &&
-    upgrade.data?.status === "database_verified" &&
-    Boolean(upgrade.data.reviewToken);
-
-  const [modelSettingsBusy, setModelSettingsBusy] = useState(false);
-  const [modelSettingsTarget, setModelSettingsTarget] =
-    useState<ApplicationConfiguration | null>(null);
-  const refreshSettings = async () => {
-    await Promise.all([
-      client.invalidateQueries({ queryKey: ["providers", appId] }),
-      model.refetch(),
-      routing.refetch(),
-    ]);
-  };
-  const { requestEdit, editDialogs } = useTierEditGuard(appId, refreshSettings);
-  useEffect(() => {
-    setModelSettingsTarget(null);
-  }, [appId]);
-  const draft = useApplicationRoutingDraft(routing.apply);
-  const consumedRequest = useRef<string | null>(null);
-  useEffect(() => {
-    const result = routing.originalResult;
-    if (
-      result?.status === "completed" &&
-      !routing.busy &&
-      consumedRequest.current !== result.request.id
-    ) {
-      consumedRequest.current = result.request.id;
-      draft.discardSubmitted();
-    }
-  }, [
-    routing.originalResult?.request.id,
-    routing.originalResult?.status,
-    routing.busy,
-  ]);
-  const {
-    search,
-    setSearch,
-    sort,
-    setSort,
-    accountFilter,
-    setAccountFilter,
-    modelFilter,
-    setModelFilter,
-    stagedIds,
-    setStagedIds,
-  } = draft;
+  const [search, setSearch] = useState("");
+  const [sort, setSort] = useState<TierSort | null>(null);
+  const [accountFilter, setAccountFilter] = useState<string | null>(null);
+  const [modelFilter, setModelFilter] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [order, setOrder] = useState<{
     source: typeof routing.data;
@@ -360,35 +244,14 @@ export function ApplicationWorkspace({
       .map((item) => item.providerId),
   ];
   const failoverEnabled = Boolean(routing.data?.autoFailoverEnabled);
-  // 路由类应用的顺序调整（拖拽/排序）只进草稿，点「应用」才写库；非路由类应用
-  // （无故障切换概念）维持拖拽即时保存。
-  const draftOrdering = isProxyAppId(appId);
-  // 链编辑只在故障切换开启时存在（2026-09-17 用户定调）：关着时顺序与配置档
-  // 没有任何运行时作用，整套编辑面（应用/取消/配置档/优先级列/拖拽/屏蔽）不出现。
-  // 筛选/搜索/指标排序保留——纯查看，与链无关。
-  const chainEditing = draftOrdering && failoverEnabled;
-  // 故障切换一关就丢弃未应用的草稿：不留幽灵待应用，重开时从存储链干净起步。
-  useEffect(() => {
-    if (draftOrdering && !failoverEnabled) {
-      draft.discard();
-    }
-  }, [draftOrdering, failoverEnabled]);
-  const appliedIds = routing.data?.chainIds ?? storedIds;
+  // Managed proxy Apps use ApplicationRouteWorkspace. Remaining Apps persist
+  // their native display order immediately; filters and metric sort stay local.
   const baseIds =
-    stagedIds ??
-    (chainEditing && !draft.showAll
-      ? appliedIds.filter((id) => ids.has(id))
-      : order && order.source === routing.data
-        ? order.ids
-        : storedIds);
+    order && order.source === routing.data ? order.ids : storedIds;
   // 视图排序只重排展示，不落库；默认序 = 数据库档位序（拖拽维护）。
   const orderedIds = sort ? sortTierIds(baseIds, tiers, sort) : baseIds;
   const changeOrder = async (next: string[]) => {
-    if (saving || routing.busy || (!draftOrdering && mutationBusy)) return;
-    if (draftOrdering) {
-      setStagedIds(next);
-      return;
-    }
+    if (mutationBusy) return;
     const previousOrder = order;
     setSaving(true);
     setOrder({ source: routing.data, ids: next });
@@ -400,213 +263,17 @@ export function ApplicationWorkspace({
       setSaving(false);
     }
   };
-  // 应用目标 = 当前可见 ∧ 未屏蔽的档位，按显示序（2026-09-16 用户定调：
-  // 筛选一变目标就变，不需要先拖一下；可见性判定与表格共用 visibleTierIds）。
-  // 应用写入的就是它——链外档位不是后备，上游删掉的幽灵由应用清理。
-  const blockedIds = new Set(
-    tiers
-      .filter((tier) => tier.skipReason === "blocked")
-      .map((tier) => tier.providerId),
-  );
-  const targetIds = visibleTierIds({
-    orderedIds,
-    configurations: new Map(
-      configurations.map((item) => [item.providerId, item]),
-    ),
-    metrics: new Map(tiers.map((tier) => [tier.providerId, tier])),
-    search,
-    accountFilter,
-    modelFilter,
-  }).filter((id) => !blockedIds.has(id));
-  // 参照 = 存储链去掉被屏蔽的 id（幽灵保留——上游有删减时按钮亮起，应用即清理；
-  // 屏蔽是即时生效的显式动作，单独屏蔽不制造待应用）。
-  const referenceIds = (routing.data?.chainIds ?? storedIds).filter(
-    (id) => !blockedIds.has(id),
-  );
-  const matchesAppliedChain =
-    targetIds.length === referenceIds.length &&
-    targetIds.every((id, index) => id === referenceIds[index]);
-  const currentConfig = configurations.find(
-    (item) => item.presentation.isCurrent,
-  );
-  const currentModel =
-    routing.data?.model ??
-    tiers.find((tier) => tier.providerId === currentConfig?.providerId)
-      ?.effectiveModel ??
-    currentConfig?.model;
-  const modelChanged = Boolean(modelFilter && currentModel !== modelFilter);
-  const profilesQuery = useQuery({
-    queryKey: ["orderProfiles", appId],
-    queryFn: () => orderProfilesApi.list(appId),
-    enabled: chainEditing,
-  });
-  const profilesState = profilesQuery.data;
-  const profileName = draft.profileName ?? profilesState?.current ?? "default";
-  const profileChanged =
-    draft.profileName != null && draft.profileName !== profilesState?.current;
-  const hasPendingChanges =
-    chainEditing &&
-    (!matchesAppliedChain ||
-      modelChanged ||
-      profileChanged ||
-      stagedIds?.length === 0 ||
-      (targetIds.length === 0 &&
-        (Boolean(search) || Boolean(accountFilter) || Boolean(modelFilter))));
   useImperativeHandle(ref, () => ({
-    hasPendingChanges,
-    // Existing write lifecycles only; candidate loading/read-only refetches do not block leaving.
-    submitting:
-      saving ||
-      draft.submitting ||
-      routing.busy ||
-      model.busy ||
-      modelSettingsBusy,
-    discard: draft.discard,
+    hasPendingChanges: false,
+    // Native writes still block leaving until their existing lifecycle settles.
+    submitting: saving || routing.busy || model.busy,
+    discard: () => {
+      setSearch("");
+      setSort(null);
+      setAccountFilter(null);
+      setModelFilter(null);
+    },
   }));
-  const modelCandidate =
-    currentConfig && targetIds.includes(currentConfig.providerId)
-      ? currentConfig
-      : targetIds
-          .map((id) => configurations.find((item) => item.providerId === id))
-          .find(
-            (item) =>
-              item?.canSelect &&
-              tiers.find((tier) => tier.providerId === item.providerId)
-                ?.skipReason !== "circuit_open",
-          );
-  const missingModelCandidate = Boolean(modelFilter && !modelCandidate);
-  // Reuse the source caches at click time too: React may not have rendered their latest update yet.
-  const readReviewFacts = () =>
-    applicationReviewFacts(
-      client.getQueryData<ApplicationRouting>(["applicationRouting", appId]) ??
-        routing.data,
-      client.getQueryData<ApplicationOverview>([
-        "applicationOverview",
-        appId,
-      ]) ?? model.data,
-      client.getQueryData<{ current: string }>(["orderProfiles", appId])
-        ?.current ?? profilesState?.current,
-      Boolean(
-        routing.error ||
-        model.error ||
-        profilesQuery.error ||
-        client.getQueryState(["applicationRouting", appId])?.error ||
-        client.getQueryState(["applicationOverview", appId])?.error ||
-        client.getQueryState(["orderProfiles", appId])?.error,
-      ),
-    );
-  const renderedReviewFacts = applicationReviewFacts(
-    routing.data,
-    model.data,
-    profilesState?.current,
-    Boolean(routing.error || model.error || profilesQuery.error),
-  );
-  const reviewContext = JSON.stringify([
-    appId,
-    search,
-    sort,
-    accountFilter,
-    modelFilter,
-    stagedIds,
-    draft.profileName,
-    draft.showAll,
-    profileName,
-    targetIds,
-    renderedReviewFacts,
-  ]);
-  const latestReviewContext = useRef(reviewContext);
-  latestReviewContext.current = reviewContext;
-  const cancelReview = () => {
-    pendingReview.current = null;
-    setReview(null);
-  };
-  const applyOrder = async () => {
-    if (
-      !hasPendingChanges ||
-      targetIds.length === 0 ||
-      missingModelCandidate ||
-      mutationBusy
-    )
-      return;
-    let selection: { providerId: string; model: string } | undefined;
-    if (modelFilter) {
-      const candidate = modelCandidate;
-      if (!candidate) return;
-      if (candidate.providerId !== currentConfig?.providerId || modelChanged) {
-        selection = { providerId: candidate.providerId, model: modelFilter };
-      }
-    }
-    if (pendingReview.current) return;
-    const facts = renderedReviewFacts;
-    let current = true;
-    const next: ApplicationChangeReview = {
-      change: {
-        order: { profileName, providerIds: targetIds },
-        ...(selection ? { selection } : {}),
-      },
-      appliedIds,
-      configurations,
-      currentProviderId: currentConfig?.providerId,
-      currentModel,
-      isCurrent: () => {
-        current =
-          current &&
-          latestReviewContext.current === reviewContext &&
-          readReviewFacts() === facts;
-        return current;
-      },
-    };
-    pendingReview.current = next;
-    try {
-      await routing.prepareRequest?.(next.change);
-      if (pendingReview.current !== next) return;
-      if (!next.isCurrent()) {
-        cancelReview();
-        toast.warning(t("applications.reviewChanged"));
-        return;
-      }
-      setReview(next);
-    } catch {
-      cancelReview();
-      toast.error(t("applications.updateFailed"));
-    }
-  };
-  const discardOrder = draft.discard;
-  const reviewSelection = async (
-    selection: NonNullable<ApplicationChangeReview["change"]["selection"]>,
-  ) => {
-    if (pendingReview.current || mutationBusy) return;
-    const facts = renderedReviewFacts;
-    let current = true;
-    const next: ApplicationChangeReview = {
-      change: { selection },
-      appliedIds,
-      configurations,
-      currentProviderId: currentConfig?.providerId,
-      currentModel,
-      isCurrent: () => {
-        current =
-          current &&
-          latestReviewContext.current === reviewContext &&
-          readReviewFacts() === facts;
-        return current;
-      },
-    };
-    pendingReview.current = next;
-    try {
-      await routing.prepareRequest(next.change);
-      if (pendingReview.current !== next) return;
-      if (!next.isCurrent()) {
-        cancelReview();
-        toast.warning(t("applications.reviewChanged"));
-        return;
-      }
-      setReview(next);
-    } catch {
-      cancelReview();
-      toast.error(t("applications.updateFailed"));
-    }
-  };
   // 同一指标：默认向 → 反向 → 取消（回到数据库档位序）；换指标：旧排序就地取消。
   const sortBy = (key: TierMetric) => {
     if (sort?.key !== key) {
@@ -713,32 +380,20 @@ export function ApplicationWorkspace({
       setAccountFilter(null);
   }, [accounts, accountFilter, model.isPending, model.error, setAccountFilter]);
   const routingModel = routing.data?.model ?? null;
-  const orderBusy =
-    saving ||
-    draft.submitting ||
-    Boolean(draft.confirmation) ||
-    routing.busy ||
-    model.busy;
+  const orderBusy = saving || routing.busy || model.busy;
   const ownerBlocked =
     routing.modeState?.canWrite === false ||
-    Boolean(
-      routing.data &&
-      routing.writeBlocked &&
-      !routing.originalResult &&
-      !routing.error,
-    );
+    Boolean(routing.data && routing.writeBlocked && !routing.error);
   const writesBlocked =
     Boolean(routing.writeBlocked) ||
     ownerBlocked ||
     model.isPending ||
     Boolean(model.error) ||
     routing.isPending ||
-    Boolean(routing.error) ||
-    (chainEditing && (profilesQuery.isPending || Boolean(profilesQuery.error)));
-  const mutationBusy = orderBusy || writesBlocked || modelSettingsBusy;
+    Boolean(routing.error);
+  const mutationBusy = orderBusy || writesBlocked;
   const failedReadTimes = [
     ...(model.error ? [model.dataUpdatedAt] : []),
-    ...(profilesQuery.error ? [profilesQuery.dataUpdatedAt] : []),
     ...(routing.error || ownerBlocked ? [routing.dataUpdatedAt] : []),
   ];
   const lastReadTime =
@@ -750,19 +405,6 @@ export function ApplicationWorkspace({
     : undefined;
   return (
     <div className="space-y-5">
-      {isProxyAppId(appId) && !model.data?.isAdditive && (
-        <ApplicationInlineSelection
-          key={appId}
-          configurations={configurations}
-          tiers={tiers}
-          currentProviderId={currentConfig?.providerId}
-          currentModel={currentModel}
-          disabled={mutationBusy || Boolean(review)}
-          onReview={(selection) => {
-            void reviewSelection(selection);
-          }}
-        />
-      )}
       <section className="space-y-4" aria-labelledby={`tiers-${appId}`}>
         <header className="flex flex-wrap items-start justify-between gap-3">
           <div>
@@ -787,109 +429,17 @@ export function ApplicationWorkspace({
                     )}
                   </span>
                 )}
-              {isProxyAppId(appId) && (
-                <div className="inline-flex items-center gap-1">
-                  <label className="inline-flex cursor-pointer items-center gap-2 text-sm">
-                    {routing.data ? (
-                      <Switch
-                        checked={routing.data.autoFailoverEnabled}
-                        disabled={mutationBusy}
-                        aria-label={t("applications.autoFailover")}
-                        onCheckedChange={(checked) => {
-                          void routing
-                            .setFailover(checked)
-                            .catch(() => undefined);
-                        }}
-                      />
-                    ) : (
-                      <span aria-label={t("applications.routingModeUnknown")}>
-                        —
-                      </span>
-                    )}
-                    {t("applications.autoFailover")}
-                  </label>
-                  {/* 问号在 label 外：悬停说明语义，点击不触发开关。 */}
-                  <TooltipProvider delayDuration={250}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <span
-                          tabIndex={0}
-                          aria-label={t("applications.autoFailoverHint")}
-                          className="inline-flex cursor-help items-center rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
-                        >
-                          <CircleHelp className="h-3.5 w-3.5 text-muted-foreground/60 hover:text-muted-foreground" />
-                        </span>
-                      </TooltipTrigger>
-                      <TooltipContent
-                        side="bottom"
-                        className="max-w-xs leading-relaxed"
-                      >
-                        {t("applications.autoFailoverHint")}
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </div>
-              )}
-              {isProxyAppId(appId) && (
-                <ExpiryStrategySelect appId={appId} disabled={mutationBusy} />
-              )}
-              {chainEditing && (
-                <OrderProfilesMenu
-                  appType={appId}
-                  state={profilesState}
-                  selectedName={profileName}
-                  disabled={orderBusy}
-                  writeBlocked={writesBlocked}
-                  onBusyChange={setSaving}
-                  onProfileRenamed={(from, to) => {
-                    if (draft.profileName === from) draft.setProfileName(to);
-                  }}
-                  onProfileRemoved={(name) => {
-                    if (draft.profileName === name) draft.discard();
-                  }}
-                  targetIds={targetIds}
-                  storedIds={storedIds}
-                  onLoadDraft={draft.load}
-                  onSaved={draft.saveAs}
-                />
-              )}
             </div>
-            {(!isProxyAppId(appId) || failoverEnabled) && (
-              <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                {t(
-                  isProxyAppId(appId)
-                    ? "applications.priorityHint"
-                    : "applications.orderHint",
-                )}
-              </p>
-            )}
+            <p className="mt-2 text-xs leading-5 text-muted-foreground">
+              {t("applications.orderHint")}
+            </p>
           </div>
           <Button variant="outline" onClick={onAdd}>
             <Plus className="h-4 w-4" />
             {t("applications.addService")}
           </Button>
         </header>
-        <BindVendorSource
-          appId={appId}
-          disabled={orderBusy || Boolean(routing.writeBlocked)}
-        />
         <div className="flex flex-wrap items-center gap-3">
-          {chainEditing && (
-            <Button
-              variant="outline"
-              disabled={orderBusy}
-              onClick={() => {
-                draft.discard();
-                draft.setShowAll(!draft.showAll);
-              }}
-            >
-              {t(
-                draft.showAll
-                  ? "applications.showAppliedTiers"
-                  : "applications.showAllTiers",
-              )}
-            </Button>
-          )}
           {accounts.length > 1 && (
             <FilterCombobox
               disabled={orderBusy}
@@ -950,28 +500,7 @@ export function ApplicationWorkspace({
             />
           </div>
         </div>
-        {routing.data?.autoFailoverEnabled &&
-          routing.data.routingActive === false && (
-            <div
-              role="status"
-              className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-sm"
-            >
-              <span>{t("applications.routingPaused")}</span>
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={mutationBusy}
-                onClick={() => {
-                  void routing.setFailover(true).catch(() => undefined);
-                }}
-              >
-                {t("applications.resumeRouting")}
-              </Button>
-            </div>
-          )}
-        {(model.isPending ||
-          routing.isPending ||
-          (chainEditing && profilesQuery.isPending)) && (
+        {(model.isPending || routing.isPending) && (
           <p role="status" className="text-sm text-muted-foreground">
             {t("common.loading")}
           </p>
@@ -982,20 +511,13 @@ export function ApplicationWorkspace({
             className="space-y-2 rounded-lg border border-destructive/30 p-3 text-sm"
           >
             <p>{t("applications.operationNeedsVerification")}</p>
-            {routing.modeState?.blockedReason?.startsWith("upgrade.") && (
-              <p data-blocked-reason={routing.modeState.blockedReason}>
-                {t(
-                  routing.modeState.blockedReason === "upgrade.source_changed"
-                    ? "codexSharedSettings.error.sourceChanged"
-                    : "startupUpgrade.verificationRequired",
-                )}
-              </p>
-            )}
-            {canReviewUpgrade && (
-              <Button variant="outline" onClick={() => setReviewUpgrade(true)}>
-                {t("startupUpgrade.reviewApps")}
-              </Button>
-            )}
+            <ApplicationStartupCheckpoint
+              appId={appId}
+              modeState={routing.modeState}
+              onRefresh={() =>
+                Promise.all([model.refetch(), routing.refetch()])
+              }
+            />
             {routing.modeState?.publicationStarted === true && (
               <p>{t("applications.operationPublicationStarted")}</p>
             )}
@@ -1004,95 +526,41 @@ export function ApplicationWorkspace({
                 {t("applications.lastSuccessfulRead", { time: lastRead })}
               </p>
             )}
-            <Button
-              variant="outline"
-              onClick={() => {
-                void model.refetch();
-                void routing.refetch();
-                void profilesQuery.refetch();
-                if (checkpointBlocked) void upgrade.refetch();
-              }}
-            >
-              {t("applications.recheckOperation")}
-            </Button>
-          </div>
-        )}
-        {!ownerBlocked &&
-          (model.error ||
-            routing.error ||
-            (chainEditing && profilesQuery.error)) && (
-            <div
-              role="alert"
-              className="flex items-center justify-between gap-3 rounded-lg border border-destructive/30 p-3 text-sm"
-            >
-              <div>
-                <span>{t("applications.loadFailed")}</span>
-                {lastRead && (
-                  <p className="text-xs text-muted-foreground">
-                    {t("applications.lastSuccessfulRead", { time: lastRead })}
-                  </p>
-                )}
-              </div>
+            {!routing.modeState?.blockedReason?.startsWith("upgrade.") && (
               <Button
                 variant="outline"
                 onClick={() => {
                   void model.refetch();
                   void routing.refetch();
-                  void profilesQuery.refetch();
                 }}
               >
-                {t("common.retry")}
+                {t("applications.recheckOperation")}
               </Button>
-            </div>
-          )}
-        {/* 未生效状态条：拖拽/排序/筛选只是草稿，「当前视图 ≠ 已应用链」这个
-            状态常驻在用户视线所在的表格上方（信息常驻、动作跟着状态走——
-            2026-09-19 用户定调：页头按钮离拖拽现场太远，好多用户不知道要应用）。
-            无未应用更改时整条消失（沉默=一致）。amber=「需留意」既有色彩语义。 */}
-        {hasPendingChanges && (
+            )}
+          </div>
+        )}
+        {!ownerBlocked && (model.error || routing.error) && (
           <div
-            role="status"
-            className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-sm text-amber-700 dark:text-amber-400"
+            role="alert"
+            className="flex items-center justify-between gap-3 rounded-lg border border-destructive/30 p-3 text-sm"
           >
-            <span className="inline-flex min-w-0 items-center gap-2">
-              <AlertTriangle className="h-4 w-4 shrink-0" />
-              {t(
-                targetIds.length === 0
-                  ? "applications.emptyChain"
-                  : missingModelCandidate
-                    ? "applications.noSwitchableTier"
-                    : "applications.pendingChanges",
+            <div>
+              <span>{t("applications.loadFailed")}</span>
+              {lastRead && (
+                <p className="text-xs text-muted-foreground">
+                  {t("applications.lastSuccessfulRead", { time: lastRead })}
+                </p>
               )}
-            </span>
-            <span className="flex shrink-0 items-center gap-2">
-              {/* 取消比主操作轻一级（ghost）：丢弃未应用的拖拽/排序/筛选，
-                  回到已应用的链视图。 */}
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={discardOrder}
-                disabled={orderBusy}
-                className="h-7 text-xs"
-              >
-                {t("applications.discardOrder")}
-              </Button>
-              <Button
-                size="sm"
-                onClick={() => {
-                  void applyOrder();
-                }}
-                disabled={
-                  mutationBusy ||
-                  targetIds.length === 0 ||
-                  missingModelCandidate
-                }
-                className="h-7 gap-1.5 text-xs"
-              >
-                <Check className="h-3.5 w-3.5" />
-                {t("applications.applyOrder")}
-                <span className="tabular-nums">({targetIds.length})</span>
-              </Button>
-            </span>
+            </div>
+            <Button
+              variant="outline"
+              onClick={() => {
+                void model.refetch();
+                void routing.refetch();
+              }}
+            >
+              {t("common.retry")}
+            </Button>
           </div>
         )}
         {/* 模型验证的行级宿主：summaries 拉取、验真弹窗与结果变化订阅全在
@@ -1106,12 +574,10 @@ export function ApplicationWorkspace({
             tiers={tiers}
             orderedIds={orderedIds}
             failoverEnabled={failoverEnabled}
-            orderPending={hasPendingChanges}
-            reorderEnabled={!draftOrdering || chainEditing}
-            selectedModel={draftOrdering ? modelFilter : null}
+            orderPending={false}
+            reorderEnabled
             loading={model.isPending || routing.isPending}
             failed={Boolean(model.error || routing.error)}
-            appliedIds={chainEditing ? appliedIds : undefined}
             search={search}
             accountFilter={accountFilter}
             modelFilter={modelFilter}
@@ -1127,24 +593,8 @@ export function ApplicationWorkspace({
               if (mutationBusy) return;
               // 模型筛选下点「设为当前」：档位与筛选模型一次切过去（用户视角
               // 就是「用这个档位跑这个模型」）；未筛选时纯切档位。
-              if (isProxyAppId(appId)) {
-                void draft.submit({
-                  selection: {
-                    providerId: item.providerId,
-                    ...(modelFilter ? { model: modelFilter } : {}),
-                  },
-                });
-              } else {
-                void model.select(item, undefined, modelFilter ?? undefined);
-              }
+              void model.select(item, undefined, modelFilter ?? undefined);
             }}
-            onModelSettings={
-              appId === "codex"
-                ? (item) => {
-                    if (!mutationBusy) setModelSettingsTarget(item);
-                  }
-                : undefined
-            }
             onOpenAccount={onOpenAccount}
             onBlockTier={(providerId, blocked) => {
               void routing
@@ -1181,118 +631,17 @@ export function ApplicationWorkspace({
           {typeof children === "function" ? children(mutationBusy) : children}
         </CollapsibleContent>
       </Collapsible>
-      {routing.originalResult &&
-        routing.originalResult.status !== "completed" && (
-          <div
-            role="alert"
-            className="space-y-2 rounded-lg border border-amber-500/30 p-3 text-sm"
-          >
-            <p>{t("applications.originalRequestUnresolved")}</p>
-            <Button
-              variant="outline"
-              disabled={routing.busy}
-              onClick={() => void routing.recheckRequest()}
-            >
-              {t("applications.recheckOriginalRequest")}
-            </Button>
-            <Button
-              variant="outline"
-              disabled={routing.busy}
-              onClick={routing.startNewRequest}
-            >
-              {t("applications.startNewRequest")}
-            </Button>
-          </div>
-        )}
-      {modelSettingsTarget && (
-        <ApplicationModelSettingsDialog
-          key={`${appId}:${modelSettingsTarget.providerId}`}
-          appId={appId}
-          providerId={modelSettingsTarget.providerId}
-          name={
-            modelSettingsTarget.configurationName ?? modelSettingsTarget.name
-          }
-          open
-          onOpenChange={(open) => {
-            if (!open) setModelSettingsTarget(null);
-          }}
-          onSaved={refreshSettings}
-          onBusyChange={setModelSettingsBusy}
-          onAdvanced={() =>
-            requestEdit({
-              providerId: modelSettingsTarget.providerId,
-              displayName:
-                modelSettingsTarget.configurationName ??
-                modelSettingsTarget.name,
-              isCurrent: modelSettingsTarget.presentation.isCurrent,
-              kind: modelSettingsTarget.source === "relay" ? "tier" : "vendor",
-            })
-          }
-        />
-      )}
-      <Dialog
-        open={reviewUpgrade && canReviewUpgrade}
-        onOpenChange={(open) => {
-          setReviewUpgrade(open);
-          if (!open) {
-            void routing.refetch();
-            void upgrade.refetch();
-          }
-        }}
-      >
-        <DialogContent className="max-h-[90vh] max-w-4xl overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>{t("startupUpgrade.title")}</DialogTitle>
-            <DialogDescription>
-              {t("startupUpgrade.notComplete")}
-            </DialogDescription>
-          </DialogHeader>
-          {reviewUpgrade && canReviewUpgrade && <StartupUpgrade embedded />}
-        </DialogContent>
-      </Dialog>
-      {editDialogs}
-      <ApplicationChangeConfirmDialog
-        review={review}
-        stale={Boolean(review && !review.isCurrent())}
-        disabled={mutationBusy}
-        onCancel={cancelReview}
-        onConfirm={() => {
-          const confirmed = pendingReview.current;
-          if (!confirmed || mutationBusy) return;
-          if (!confirmed.isCurrent()) {
-            setReview({ ...confirmed });
-            return;
-          }
-          cancelReview();
-          void draft.submit(confirmed.change, undefined, confirmed.isCurrent);
-        }}
-      />
       <SwitchTierConfirmDialog
-        targetName={draft.confirmation?.name ?? model.confirmation}
-        onCancel={draft.confirmation ? draft.cancel : model.cancel}
-        catalog={
-          draft.confirmation ? draft.confirmation.catalog : model.catalog
-        }
-        quitRequired={
-          draft.confirmation
-            ? draft.confirmation.quitRequired
-            : model.quitRequired
-        }
+        targetName={model.confirmation}
+        onCancel={model.cancel}
+        catalog={model.catalog}
+        quitRequired={model.quitRequired}
         onPreviewCatalog={(decision) => {
-          if (!writesBlocked)
-            return (
-              draft.confirmation ? draft.previewCatalog : model.previewCatalog
-            )(decision);
+          if (!writesBlocked) return model.previewCatalog(decision);
         }}
-        disabled={
-          writesBlocked || draft.submitting || routing.busy || model.busy
-        }
+        disabled={writesBlocked || routing.busy || model.busy}
         onSwitch={(quit, decision) => {
-          if (!writesBlocked)
-            return (draft.confirmation ? draft.confirm : model.confirm)(
-              quit,
-              decision,
-            );
+          if (!writesBlocked) return model.confirm(quit, decision);
         }}
       />
     </div>

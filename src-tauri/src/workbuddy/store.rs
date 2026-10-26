@@ -24,6 +24,14 @@ pub(crate) fn load(
     if &vault.identity() != expected {
         return Err(Failure::StorageUnavailable);
     }
+    load_with_vault(session, &vault)
+}
+
+/// Original read/decode path with an already-held vault; no nested session.read.
+pub(crate) fn load_with_vault(
+    session: &SecretSession,
+    vault: &crate::secrets::storage::StorageContext,
+) -> Result<Vec<SavedAccount>, Failure> {
     let owned = OwnedFile::registered(FILE).map_err(|_| Failure::StorageUnavailable)?;
     let path = owned.path(session);
     let mut options = std::fs::OpenOptions::new();
@@ -58,7 +66,7 @@ pub(crate) fn load(
         return Err(Failure::StorageUnavailable);
     }
     let plaintext = owned
-        .decode_storage(&vault, &bytes)
+        .decode_storage(vault, &bytes)
         .map_err(|_| Failure::StorageUnavailable)?;
     let doc: Document =
         serde_json::from_slice(&plaintext).map_err(|_| Failure::StorageUnavailable)?;

@@ -7,6 +7,7 @@ import {
   Compass,
   Image,
   Layers3,
+  ListOrdered,
   Plug,
   Settings,
   History,
@@ -41,6 +42,7 @@ const items = [
     icon: Layers3,
     key: "services",
   },
+  { view: "sharedGroups", icon: ListOrdered, key: "sharedGroups" },
   { view: "image", icon: Image, key: "image" },
   {
     view: "records",

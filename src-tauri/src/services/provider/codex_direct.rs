@@ -2174,6 +2174,13 @@ pub(crate) fn recover_locked_with_checks(
         |generation| {
             let write = AppWrite::open_codex_with_recovery(service, checks, generation)?;
             let verify = |pending: &state::Pending, live: Option<&state::LiveState>| {
+                operation::verify_saved_row(
+                    db,
+                    db.secret_session(),
+                    &write.vault,
+                    &AppType::Codex,
+                    &pending.target,
+                )?;
                 checks.map_or(Ok(()), |checks| {
                     (checks.verify)(&write.vault, pending, live)
                 })
@@ -2181,11 +2188,25 @@ pub(crate) fn recover_locked_with_checks(
             let finished = |pending: &state::Pending, live: Option<&state::LiveState>| {
                 write.verify_recovered_target(pending, live)
             };
-            let admission = checks.map(|checks| operation::RecoveryAdmission {
-                expected_pending: checks.pending,
-                verify: &verify,
-                finished: &finished,
-            });
+            let admission = checks
+                .map(|checks| operation::RecoveryAdmission {
+                    expected_pending: checks.pending,
+                    verify: &verify,
+                    finished: &finished,
+                })
+                .or_else(|| {
+                    (pending.target.route_target.is_some()
+                        || pending
+                            .target
+                            .saved_row
+                            .as_ref()
+                            .is_some_and(|row| row.credential_write.is_some()))
+                    .then_some(operation::RecoveryAdmission {
+                        expected_pending: &pending,
+                        verify: &verify,
+                        finished: &finished,
+                    })
+                });
             if state::pending(&write.store, &write.vault, app())?.as_ref() != Some(&pending) {
                 return Err(invalid());
             }
@@ -2237,6 +2258,45 @@ pub(crate) fn recover_locked_with_checks(
                     &write.vault,
                     &write.guard,
                     &[],
+                    &|target| write.commit(target),
+                    &|_| Ok(None),
+                    admission.as_ref(),
+                );
+            }
+            // Route policy edits carry the original full native file set as
+            // identical before/after witnesses; recovery never rewrites them.
+            let route_target_only = pending.op == state::op::APPLY
+                && before.is_proxy()
+                && before.attached
+                && pending.target.route_target.is_some()
+                && pending
+                    .target
+                    .save_request
+                    .as_ref()
+                    .is_some_and(|r| r.scope == state::SaveScope::ApplicationRouting)
+                && pending.target.state.is_none()
+                && pending.target.saved_row.is_none()
+                && pending.target.model_preference.is_none()
+                && pending.target.routing_order.is_none()
+                && pending.target.stack.is_none()
+                && pending.target.extra.is_empty();
+            if route_target_only {
+                let admitted = files();
+                if pending.files.len() != admitted.len()
+                    || pending.files.iter().zip(&admitted).any(|(file, admitted)| {
+                        file.path != admitted.path
+                            || file.private != Some(admitted.private)
+                            || file.pre != file.planned
+                            || file.staged.is_some()
+                    })
+                {
+                    return Err(invalid());
+                }
+                return operation::recover_checked_guarded(
+                    &write.store,
+                    &write.vault,
+                    &write.guard,
+                    &admitted,
                     &|target| write.commit(target),
                     &|_| Ok(None),
                     admission.as_ref(),

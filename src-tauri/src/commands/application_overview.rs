@@ -148,6 +148,154 @@ pub(crate) fn application_overview(
             );
         }
     }
+    let mut unavailable_native = std::collections::HashSet::new();
+    // Inventory is a partial read: one unavailable native owner must not hide
+    // healthy unrelated owners. Never emit a verified account for a failed read.
+    for (platform, service_name) in [
+        ("minimax_code", "MiniMax Code"),
+        ("workbuddy", "WorkBuddy"),
+        ("zcode_start_plan", "ZCode"),
+    ] {
+        let selected = providers
+            .iter()
+            .filter(|(_, p)| {
+                crate::services::service_source_identity::native_platform(p) == Some(platform)
+            })
+            .map(|(id, p)| (id.clone(), p.clone()))
+            .collect::<indexmap::IndexMap<_, _>>();
+        if selected.is_empty() {
+            continue;
+        }
+        let vault = state
+            .db
+            .secret_session()
+            .read()
+            .map_err(|e| e.to_string())?;
+        let native = match crate::services::service_source_identity::read_native_for_providers(
+            state.db.secret_session(),
+            &vault,
+            &selected,
+        ) {
+            Ok(Some(native)) => native,
+            _ => {
+                unavailable_native.extend(selected.keys().cloned());
+                continue;
+            }
+        };
+        let conn = state.db.conn.lock().map_err(|e| e.to_string())?;
+        for provider in selected.values() {
+            let Some(binding) = crate::services::service_source_identity::binding_with_native_on(
+                &conn,
+                &vault,
+                app_type,
+                provider,
+                Some(&native),
+            )
+            .map_err(|e| e.to_string())?
+            else {
+                continue;
+            };
+            let AccountReference::NativeAccount { id, .. } = &binding.account else {
+                continue;
+            };
+            let Some(fact) = native.account(platform, id) else {
+                continue;
+            };
+            owners.insert(
+                provider.id.clone(),
+                AccountConfiguration {
+                    account: binding.account,
+                    service_name: service_name.into(),
+                    account_label: fact.label,
+                    configuration_name: binding.model.unwrap_or_default(),
+                    selection: ConfigurationSelection::Provider,
+                    can_select: true,
+                },
+            );
+        }
+    }
+    {
+        let vault = state
+            .db
+            .secret_session()
+            .read()
+            .map_err(|e| e.to_string())?;
+        let conn = state.db.conn.lock().map_err(|e| e.to_string())?;
+        for provider in providers
+            .values()
+            .filter(|p| crate::proxy::qoder_http::enabled(p))
+        {
+            let binding = match crate::services::service_source_identity::binding_with_native_on(
+                &conn, &vault, app_type, provider, None,
+            ) {
+                Ok(binding) => binding,
+                Err(error)
+                    if crate::services::service_source_identity::inventory_owner_unavailable(
+                        &error,
+                    ) =>
+                {
+                    unavailable_native.insert(provider.id.clone());
+                    continue;
+                }
+                Err(error) => return Err(error.to_string()),
+            };
+            if let Some(binding) = binding {
+                owners.insert(
+                    provider.id.clone(),
+                    AccountConfiguration {
+                        account: binding.account,
+                        service_name: "Qoder".into(),
+                        account_label: provider.name.clone(),
+                        configuration_name: binding.model.unwrap_or_default(),
+                        selection: ConfigurationSelection::Provider,
+                        can_select: true,
+                    },
+                );
+            }
+        }
+    }
+    {
+        let vault = state
+            .db
+            .secret_session()
+            .read()
+            .map_err(|e| e.to_string())?;
+        let conn = state.db.conn.lock().map_err(|e| e.to_string())?;
+        for provider in providers.values() {
+            let origin = crate::services::openrouter_source::RowRef {
+                origin_app: app_type.as_str().into(),
+                provider_id: provider.id.clone(),
+            };
+            let Some(inspected) =
+                crate::services::openrouter_source::inspect_on(&conn, &vault, &origin)
+                    .map_err(|e| e.to_string())?
+            else {
+                continue;
+            };
+            if inspected.availability != crate::services::openrouter_source::Availability::Ready {
+                unavailable_native.insert(provider.id.clone());
+                continue;
+            }
+            let fact = inspected.fact;
+            owners.insert(
+                provider.id.clone(),
+                AccountConfiguration {
+                    account:
+                        crate::services::service_sources::SourceAccountReference::LocalProvider {
+                            platform: "openrouter".into(),
+                            id: fact.source_id,
+                            origin_app: fact.origin.origin_app,
+                            origin_provider_id: fact.origin.provider_id,
+                        },
+                    service_name: "OpenRouter".into(),
+                    account_label: provider.name.clone(),
+                    configuration_name: fact.configured_model,
+                    selection: ConfigurationSelection::Provider,
+                    can_select: true,
+                },
+            );
+        }
+    }
     let blocked = crate::proxy::application_routing::blocked_tier_ids(&state.db, app_type.as_str());
     let configurations = providers
         .into_values()
@@ -168,6 +316,15 @@ pub(crate) fn application_overview(
                 owner,
             );
             configuration.can_select &= !blocked;
+            if unavailable_native.contains(&configuration.provider_id) {
+                configuration.can_select = false;
+                configuration
+                    .presentation
+                    .switch_blocked_reason
+                    .get_or_insert(
+                    crate::services::provider::ProviderSwitchBlockReason::NativeSourceUnavailable,
+                );
+            }
             configuration
         })
         .collect();
@@ -189,8 +346,13 @@ fn configuration_for_provider(
 ) -> ApplicationConfiguration {
     let provider = view.provider;
     let source = match owner.as_ref().map(|o| &o.account) {
+        Some(crate::services::service_sources::SourceAccountReference::LocalProvider {
+            ..
+        }) => ConfigurationSource::Custom,
         Some(AccountReference::Relay { .. }) => ConfigurationSource::Relay,
-        Some(AccountReference::Vendor { .. }) => ConfigurationSource::Official,
+        Some(AccountReference::Vendor { .. } | AccountReference::NativeAccount { .. }) => {
+            ConfigurationSource::Official
+        }
         None if view.presentation.is_official
             || crate::relay::managed::is_managed_vendor(&provider.id) =>
         {

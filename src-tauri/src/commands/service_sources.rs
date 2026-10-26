@@ -1,12 +1,9 @@
 //! Read existing managed sources without provisioning, probing or writing state.
 use crate::{
     app_config::AppType,
-    provider::Provider,
-    relay::managed,
     services::service_sources::{
-        project_service_sources, relay_account_identities, source_usage_state,
-        verified_relay_account, ServiceSource, ServiceSourceBinding, ServiceSourceCandidate,
-        SourceAccountReference,
+        project_service_sources, source_usage_state, ServiceSource, ServiceSourceBinding,
+        ServiceSourceCandidate,
     },
     store::AppState,
 };
@@ -29,11 +26,7 @@ pub async fn bind_vendor_service_source(
         .map_err(|error| error.to_string())
 }
 
-fn get_service_sources_impl(state: &AppState) -> Result<Vec<ServiceSource>, String> {
-    let relay_accounts = {
-        let conn = state.db.conn.lock().map_err(|error| error.to_string())?;
-        relay_account_identities(&conn).map_err(|error| error.to_string())?
-    };
+pub(crate) fn get_service_sources_impl(state: &AppState) -> Result<Vec<ServiceSource>, String> {
     let mut candidates = Vec::new();
     for app in AppType::all() {
         let overview = super::application_overview::application_overview(state, &app)?;
@@ -41,42 +34,77 @@ fn get_service_sources_impl(state: &AppState) -> Result<Vec<ServiceSource>, Stri
             .db
             .get_all_providers(app.as_str())
             .map_err(|error| error.to_string())?;
+        let vault = state
+            .db
+            .secret_session()
+            .read()
+            .map_err(|error| error.to_string())?;
         for configuration in overview.configurations {
             let Some(account) = configuration.account else {
                 // Custom or ambiguous legacy records have no verified shared owner.
                 continue;
             };
-            let owned = match &account {
-                SourceAccountReference::Relay { id } => {
-                    managed::is_managed(&configuration.provider_id)
-                        && !managed::is_managed_vendor(&configuration.provider_id)
-                        && providers
-                            .get(&configuration.provider_id)
-                            .is_some_and(|provider| {
-                                verified_relay_provider(
-                                    provider,
-                                    relay_accounts.get(id).copied().flatten(),
-                                )
-                            })
-                }
-                SourceAccountReference::Vendor { .. } => {
-                    managed::is_managed_vendor(&configuration.provider_id)
-                }
+            let Some(provider) = providers.get(&configuration.provider_id) else {
+                continue;
             };
-            if !owned {
+            let selected = std::iter::once((provider.id.clone(), provider.clone()))
+                .collect::<indexmap::IndexMap<_, _>>();
+            let native_guard =
+                match crate::services::service_source_identity::read_native_for_providers(
+                    state.db.secret_session(),
+                    &vault,
+                    &selected,
+                ) {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        // The original overview exposes the unavailable-owner reason.
+                        log::warn!(
+                            "Native source inventory changed or became unavailable during read"
+                        );
+                        continue;
+                    }
+                };
+            let native = {
+                let conn = state.db.conn.lock().map_err(|error| error.to_string())?;
+                crate::services::service_source_identity::binding_with_native_on(
+                    &conn,
+                    &vault,
+                    &app,
+                    provider,
+                    native_guard.as_ref(),
+                )
+                .or_else(|error| {
+                    if crate::services::service_source_identity::inventory_owner_unavailable(&error)
+                    {
+                        log::warn!(
+                            "Native source inventory changed or became unavailable during read"
+                        );
+                        Ok(None)
+                    } else {
+                        Err(error)
+                    }
+                })
+                .map_err(|error| error.to_string())?
+            };
+            let Some(native) = native else {
+                continue;
+            };
+            // Presentation may have been read before an account/configuration change.
+            // Never publish disagreement as a new source ownership or model fact.
+            if native.account != account || native.model != configuration.model {
                 continue;
             }
             candidates.push(ServiceSourceCandidate {
-                source_id: configuration.provider_id.clone(),
-                account,
+                source_id: native.source_id,
+                account: native.account,
                 name: configuration.name,
                 service_name: configuration.service_name,
                 account_label: configuration.account_label,
                 configuration_name: configuration.configuration_name,
                 binding: ServiceSourceBinding {
-                    app_id: app.as_str().into(),
-                    provider_id: configuration.provider_id,
-                    model: configuration.model,
+                    app_id: native.app_id,
+                    provider_id: native.provider_id,
+                    model: native.model,
                     usage_state: source_usage_state(
                         app.is_additive_mode(),
                         configuration.presentation.is_current,
@@ -87,23 +115,68 @@ fn get_service_sources_impl(state: &AppState) -> Result<Vec<ServiceSource>, Stri
             });
         }
     }
-    Ok(project_service_sources(candidates))
-}
-
-fn verified_relay_provider(provider: &Provider, account_id: Option<i64>) -> bool {
-    verified_relay_account(
-        account_id,
-        provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.loongport_account_id),
-    )
+    let mut sources = project_service_sources(candidates);
+    let vault = state
+        .db
+        .secret_session()
+        .read()
+        .map_err(|e| e.to_string())?;
+    let conn = state.db.conn.lock().map_err(|e| e.to_string())?;
+    for source in &mut sources {
+        if let crate::services::service_sources::SourceAccountReference::LocalProvider {
+            origin_app,
+            origin_provider_id,
+            ..
+        } = &source.account
+        {
+            let origin = crate::services::openrouter_source::RowRef {
+                origin_app: origin_app.clone(),
+                provider_id: origin_provider_id.clone(),
+            };
+            let Some(fact) = crate::services::openrouter_source::read_on(&conn, &vault, &origin)
+                .map_err(|e| e.to_string())?
+            else {
+                continue;
+            };
+            if fact.source_id != source.source_id {
+                continue;
+            }
+            source.supported_targets = [AppType::Claude, AppType::Codex]
+                .into_iter()
+                .filter(|app| {
+                    crate::services::openrouter_source::projection_for(&fact, app).is_ok()
+                })
+                .map(
+                    |app| crate::services::service_sources::ServiceSourceTarget {
+                        app_id: app.as_str().into(),
+                        model: fact.configured_model.clone(),
+                        can_select: true,
+                    },
+                )
+                .collect();
+        }
+    }
+    Ok(sources)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::ProviderMeta;
+    use crate::{
+        provider::{Provider, ProviderMeta},
+        relay::managed,
+        services::service_sources::{verified_relay_account, SourceAccountReference},
+    };
+
+    fn verified_relay_provider(provider: &Provider, account_id: Option<i64>) -> bool {
+        verified_relay_account(
+            account_id,
+            provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.loongport_account_id),
+        )
+    }
 
     fn relay_provider(site: &str, account: Option<i64>) -> Provider {
         let mut provider = Provider::with_id(

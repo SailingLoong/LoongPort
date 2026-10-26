@@ -472,6 +472,10 @@ pub struct SaveReceipt {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SavedRow {
+    /// Private original-row CAS proof, protected by the existing authenticated journal.
+    /// Missing old fields mean no explicit reissue authority, never an invented proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) credential_write: Option<crate::database::credential_revision::WriteProof>,
     pub before: String,
     pub provider: Value,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -497,6 +501,8 @@ pub struct RoutingOrderTarget {
 /// 文件都写完之后要落定的状态。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PendingTarget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_target: Option<crate::services::shared_routing::TargetPublication>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub save_request: Option<SaveRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -540,7 +546,8 @@ impl PendingTarget {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.pointer.is_none()
+        self.route_target.is_none()
+            && self.pointer.is_none()
             && self.save_request.is_none()
             && self.model_preference.is_none()
             && self.routing_order.is_none()

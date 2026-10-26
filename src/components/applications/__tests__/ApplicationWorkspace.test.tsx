@@ -1,9 +1,8 @@
-import { act, render, screen, within, waitFor } from "@testing-library/react";
+import { render, screen, within, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import { ApplicationWorkspace } from "../ApplicationWorkspace";
 import { reorderWithinVisible } from "../ApplicationTierTable";
-import { OrderProfilesMenu } from "../OrderProfilesMenu";
 
 const state = vi.hoisted(() => ({
   data: {} as any,
@@ -14,7 +13,6 @@ const state = vi.hoisted(() => ({
   setFailover: vi.fn(),
   blockTier: vi.fn(),
   resetTierErrors: vi.fn(),
-  removeProfile: vi.fn(),
   overviewError: null as Error | null,
   overviewUpdatedAt: 1000,
   writeBlocked: false,
@@ -22,19 +20,6 @@ const state = vi.hoisted(() => ({
   refetchOverview: vi.fn(),
   refetchRouting: vi.fn(),
   refetchProfiles: vi.fn(),
-}));
-vi.mock("../ApplicationModelSettingsDialog", () => ({
-  ApplicationModelSettingsDialog: ({
-    appId,
-    providerId,
-  }: {
-    appId: string;
-    providerId: string;
-  }) => (
-    <div role="dialog" aria-label="Model settings">
-      {appId}:{providerId}
-    </div>
-  ),
 }));
 vi.mock("../useApplicationOverview", () => ({
   useApplicationOverview: () => ({
@@ -73,8 +58,8 @@ vi.mock("react-i18next", () => ({
       options?.time ? `${key} ${options.time}` : key,
   }),
 }));
-// 工作台本体直接用 react-query 取配置档状态（列表+当前档）；主文件不包
-// Provider，把 useQuery/useQueryClient 打桩，配置档数据流在 order.test 专测。
+// Model verification and the fault-only checkpoint share react-query;
+// their own tests cover reads, while this suite checks non-proxy table behavior.
 vi.mock("@tanstack/react-query", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@tanstack/react-query")>();
   return {
@@ -91,9 +76,6 @@ vi.mock("@tanstack/react-query", async (importOriginal) => {
 vi.mock("@/lib/api/modelVerification", () => ({
   modelVerificationApi: { listSummaries: vi.fn().mockResolvedValue([]) },
 }));
-vi.mock("@/lib/api/orderProfiles", () => ({
-  orderProfilesApi: { remove: state.removeProfile },
-}));
 const config = (id: string, name: string, current = false) => ({
   providerId: id,
   name,
@@ -108,7 +90,7 @@ const config = (id: string, name: string, current = false) => ({
   selection: { kind: "relay" },
 });
 const props = {
-  appId: "codex" as const,
+  appId: "claude-desktop" as const,
   providers: {},
   onSwitchProvider: vi.fn(),
   onOpenAccount: vi.fn(),
@@ -195,51 +177,6 @@ beforeEach(() => {
   };
 });
 describe("application workspace", () => {
-  it("opens Codex model settings for the current relay tier without entering account management", async () => {
-    render(<ApplicationWorkspace {...props} />);
-    const row = screen.getByText("Standard").closest("tr")!;
-    await userEvent.click(
-      within(row).getByRole("button", {
-        name: "applications.modelSettings.open",
-      }),
-    );
-    expect(
-      screen.getByRole("dialog", { name: "Model settings" }),
-    ).toHaveTextContent("codex:a");
-    expect(props.onOpenAccount).not.toHaveBeenCalled();
-  });
-
-  it.each([false, true])(
-    "keeps every tier directly selectable when failover is %s",
-    async (enabled) => {
-      state.routing.autoFailoverEnabled = enabled;
-      render(<ApplicationWorkspace {...props} />);
-      // 优先级列与屏蔽按钮只在故障切换开启时出现（2026-09-16 三隐定调）。
-      expect(
-        Boolean(
-          screen.queryByRole("columnheader", {
-            name: "applications.priority",
-          }),
-        ),
-      ).toBe(enabled);
-      // 链编辑面同门（2026-09-17 定调）：配置档只在故障切换开启时存在。
-      expect(Boolean(screen.queryByTitle("applications.orderProfiles"))).toBe(
-        enabled,
-      );
-      expect(screen.getByText("Standard")).toBeVisible();
-      expect(screen.getByText("Premium")).toBeVisible();
-      expect(
-        screen.queryByText("applications.switchService"),
-      ).not.toBeInTheDocument();
-      await userEvent.click(
-        screen.getByRole("button", { name: "applications.use Premium" }),
-      );
-      expect(state.apply).toHaveBeenCalledWith(
-        { selection: { providerId: "b" } },
-        undefined,
-      );
-    },
-  );
   it("offers clearing error history on errored tiers and re-admits them without moving positions", async () => {
     state.routing.autoFailoverEnabled = true;
     // c 有限流中的真实错误 → 行内出「清除错误记录」；健康行 a/b 不出。
@@ -402,7 +339,6 @@ describe("application workspace", () => {
     await userEvent.click(screen.getByRole("button", { name: "common.retry" }));
     expect(state.refetchOverview).toHaveBeenCalledOnce();
     expect(state.refetchRouting).toHaveBeenCalledOnce();
-    expect(state.refetchProfiles).toHaveBeenCalledOnce();
     expect(state.apply).not.toHaveBeenCalled();
     expect(state.setFailover).not.toHaveBeenCalled();
   });
@@ -635,25 +571,6 @@ describe("application workspace", () => {
       screen.getByRole("button", { name: "applications.use Standard" }),
     ).toBeDisabled();
   });
-  it("shows a paused notice when failover is configured but routing is inactive", async () => {
-    state.routing.autoFailoverEnabled = true;
-    state.routing.routingActive = false;
-    render(<ApplicationWorkspace {...props} />);
-    expect(screen.getByText("applications.routingPaused")).toBeVisible();
-    await userEvent.click(
-      screen.getByRole("button", { name: "applications.resumeRouting" }),
-    );
-    expect(state.setFailover).toHaveBeenCalledWith(true);
-    expect(state.select).not.toHaveBeenCalled();
-  });
-  it("puts failover beside the tier heading and changes only fallback permission", async () => {
-    render(<ApplicationWorkspace {...props} />);
-    await userEvent.click(
-      screen.getByRole("switch", { name: "applications.autoFailover" }),
-    );
-    expect(state.setFailover).toHaveBeenCalledWith(true);
-    expect(state.select).not.toHaveBeenCalled();
-  });
   it("keeps account maintenance and additive configuration actions accessible", async () => {
     state.data.isAdditive = true;
     render(<ApplicationWorkspace {...props} />);
@@ -668,23 +585,6 @@ describe("application workspace", () => {
       screen.getByRole("button", { name: "applications.manageConfigurations" }),
     );
     expect(screen.getByText("Advanced configuration actions")).toBeVisible();
-  });
-  it("permits changing the current tier's model while failover is disabled", async () => {
-    state.routing.tiers[0].models = ["gpt-5.6-sol", "gpt-5.5"];
-    render(<ApplicationWorkspace {...props} />);
-    await userEvent.click(
-      screen.getByRole("combobox", { name: "applications.modelFilter" }),
-    );
-    await userEvent.click(screen.getByRole("option", { name: /gpt-5.5/ }));
-    const button = screen.getByRole("button", {
-      name: "applications.use Standard",
-    });
-    expect(button).toBeEnabled();
-    await userEvent.click(button);
-    expect(state.apply).toHaveBeenCalledWith(
-      { selection: { providerId: "a", model: "gpt-5.5" } },
-      undefined,
-    );
   });
   it("keeps drag handles and native selection on non-proxy applications", async () => {
     state.data.isAdditive = true;
@@ -755,60 +655,7 @@ describe("reorderWithinVisible (splice semantics)", () => {
   });
 });
 
-describe("order profile menu pending state", () => {
-  it("disables an already open menu while deleting and cannot load the pending profile", async () => {
-    let finish!: () => void;
-    state.removeProfile.mockImplementation(
-      () =>
-        new Promise<void>((resolve) => {
-          finish = resolve;
-        }),
-    );
-    const onLoadDraft = vi.fn();
-    const onProfileRemoved = vi.fn();
-    render(
-      <OrderProfilesMenu
-        appType="codex"
-        state={{
-          current: "",
-          profiles: [{ name: "Saved", providerIds: ["a", "b"] }],
-        }}
-        targetIds={["a", "b"]}
-        storedIds={["a", "b"]}
-        onLoadDraft={onLoadDraft}
-        onSaved={vi.fn()}
-        onBusyChange={vi.fn()}
-        onProfileRenamed={vi.fn()}
-        onProfileRemoved={onProfileRemoved}
-      />,
-    );
-    await userEvent.click(screen.getByTitle("applications.orderProfiles"));
-    await userEvent.click(
-      screen.getByRole("button", { name: "applications.orderProfileDelete" }),
-    );
-    expect(state.removeProfile).toHaveBeenCalledWith("codex", "Saved");
-    const row = screen.getByText("Saved").closest('[role="menuitem"]')!;
-    expect(row).toHaveAttribute("data-disabled");
-    expect(
-      screen.getByRole("button", { name: "applications.orderProfileRename" }),
-    ).toBeDisabled();
-    expect(
-      screen.getByRole("button", { name: "applications.orderProfileDelete" }),
-    ).toBeDisabled();
-    for (const action of [
-      "orderProfileSaveCurrent",
-      "orderProfileImport",
-      "orderProfileExport",
-    ]) {
-      expect(
-        screen.getByRole("menuitem", { name: `applications.${action}` }),
-      ).toHaveAttribute("data-disabled");
-    }
-    await userEvent.click(row);
-    expect(onLoadDraft).not.toHaveBeenCalled();
-    await act(async () => finish());
-    expect(onProfileRemoved).toHaveBeenCalledWith("Saved");
-  });
+describe("non-proxy write protection", () => {
   it("shows pending-owner notice and locks writes without locking view controls or re-running actions", async () => {
     state.routing.autoFailoverEnabled = true;
     state.routing.routingActive = false;
@@ -823,12 +670,6 @@ describe("order profile menu pending state", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(
       "applications.operationNeedsVerification",
     );
-    expect(
-      screen.getByRole("switch", { name: "applications.autoFailover" }),
-    ).toBeDisabled();
-    expect(
-      screen.getByRole("button", { name: "applications.resumeRouting" }),
-    ).toBeDisabled();
     expect(
       screen.getByRole("button", { name: "applications.use Premium" }),
     ).toBeDisabled();
@@ -875,95 +716,6 @@ it("dates a failed overview from its retained read rather than the fresh routing
   );
 });
 
-it("wires the real catalog confirmation through preview-only and final routing apply", async () => {
-  const catalog = {
-    ownership: "unclaimedExternal",
-    choice: "keep",
-    canManage: true,
-    revision: "catalog-v1",
-    beforePointer: "/external/models.json",
-    afterPointer: "/external/models.json",
-  };
-  state.routing.autoFailoverEnabled = true;
-  state.apply
-    .mockResolvedValueOnce({
-      status: "confirmationRequired",
-      targetName: "Premium",
-      catalog,
-      quitRequired: false,
-    })
-    .mockResolvedValueOnce({
-      status: "confirmationRequired",
-      targetName: "Premium",
-      catalog: {
-        ...catalog,
-        choice: "manage",
-        afterPointer: "/managed/models.json",
-      },
-      quitRequired: false,
-    });
-  render(<ApplicationWorkspace {...props} />);
-  await userEvent.click(
-    screen.getByRole("button", { name: "applications.use Premium" }),
-  );
-  const dialog = await screen.findByRole("dialog");
-  await userEvent.click(
-    within(dialog).getByRole("radio", {
-      name: "provider.preview.catalog.manage",
-    }),
-  );
-  expect(
-    within(dialog).getByRole("button", { name: "applications.apply" }),
-  ).toBeDisabled();
-  await userEvent.click(
-    within(dialog).getByRole("button", {
-      name: "provider.preview.catalog.confirmChoice",
-    }),
-  );
-  const decision = { choice: "manage", revision: "catalog-v1" };
-  expect(state.apply).toHaveBeenNthCalledWith(
-    2,
-    {
-      selection: { providerId: "b" },
-      catalogDecision: decision,
-      catalogPreviewOnly: true,
-    },
-    undefined,
-  );
-  const updated = screen.getByRole("dialog");
-  expect(within(updated).getByText("/managed/models.json")).toBeVisible();
-  await userEvent.click(
-    within(updated).getByRole("button", { name: "applications.apply" }),
-  );
-  expect(state.apply).toHaveBeenNthCalledWith(
-    3,
-    {
-      selection: { providerId: "b" },
-      catalogDecision: decision,
-      catalogPreviewOnly: false,
-    },
-    false,
-  );
-  await waitFor(() =>
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
-  );
-});
-
-it("offers an inactive binding for an unconfigured App while keeping unknown writes blocked", () => {
-  state.data.configurations = [];
-  state.routing.tiers = [];
-  state.modeState = { status: "unconfigured", canWrite: false };
-  const view = render(<ApplicationWorkspace {...props} />);
-  expect(
-    screen.getByRole("button", { name: "applications.bindSource.open" }),
-  ).toBeEnabled();
-  state.writeBlocked = true;
-  view.rerender(<ApplicationWorkspace {...props} />);
-  expect(
-    screen.getByRole("button", { name: "applications.bindSource.open" }),
-  ).toBeDisabled();
-});
-
 it("does not label an explicit legacy mode with null mode/attachment as proxy or detached", async () => {
   state.modeState = {
     status: "ready",
@@ -980,9 +732,63 @@ it("does not label an explicit legacy mode with null mode/attachment as proxy or
   expect(
     screen.queryByText("applications.routingModeDetached"),
   ).not.toBeInTheDocument();
-  await waitFor(() =>
+  expect(
+    screen.getByRole("button", { name: "applications.use Premium" }),
+  ).toBeEnabled();
+});
+
+it.each(["claude-desktop", "opencode", "openclaw", "hermes", "pi"] as const)(
+  "keeps %s on native selection without an old proxy draft/profile surface",
+  async (appId) => {
+    render(<ApplicationWorkspace {...props} appId={appId} />);
     expect(
-      screen.getByRole("switch", { name: "applications.autoFailover" }),
-    ).toBeEnabled(),
+      screen.queryByTitle("applications.orderProfiles"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("switch", { name: "applications.autoFailover" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("applications.applyOrder"),
+    ).not.toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: "applications.use Premium" }),
+    );
+    expect(state.select).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ providerId: "b" }),
+      undefined,
+      undefined,
+    );
+    expect(state.apply).not.toHaveBeenCalled();
+  },
+);
+
+it("passes the chosen supported model to the original non-proxy selection owner", async () => {
+  render(<ApplicationWorkspace {...props} />);
+  await userEvent.click(
+    screen.getByRole("combobox", { name: "applications.modelFilter" }),
   );
+  await userEvent.click(screen.getByRole("option", { name: /gpt-5\.5/ }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "applications.use Premium" }),
+  );
+  expect(state.select).toHaveBeenCalledWith(
+    expect.objectContaining({ providerId: "b" }),
+    undefined,
+    "gpt-5.5",
+  );
+  expect(state.setOrder).not.toHaveBeenCalled();
+});
+
+it("disables mutations in the preserved advanced child while retaining read-only filters on a failed read", async () => {
+  state.overviewError = new Error("read failed");
+  const advanced = vi.fn(() => <div>Advanced native controls</div>);
+  render(<ApplicationWorkspace {...props}>{advanced}</ApplicationWorkspace>);
+  await userEvent.click(
+    screen.getByRole("button", { name: "applications.manageConfigurations" }),
+  );
+  expect(advanced).toHaveBeenLastCalledWith(true);
+  expect(screen.getByRole("searchbox")).toBeEnabled();
+  expect(
+    screen.getByRole("button", { name: "applications.use Premium" }),
+  ).toBeDisabled();
 });

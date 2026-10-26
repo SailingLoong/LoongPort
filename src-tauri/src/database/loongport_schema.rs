@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 29;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 31;
 
 /// The authenticated snapshot contract starts at the original vault schema.
 /// Snapshots retain their recorded identity; this bound does not migrate them.
@@ -404,6 +404,32 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                 }
                 conn.execute_batch("RELEASE qoder_cn_operation_migration")?;
             }
+            29 => {
+                conn.execute_batch("SAVEPOINT shared_routing_group_migration")?;
+                let result = (|| {
+                    crate::services::routing_groups::create_schema(conn)?;
+                    crate::services::routing_groups::validate_schema(conn)
+                        .map_err(|_| AppError::Config("routing_groups.invalid_schema".into()))?;
+                    set_version(conn, 30)
+                })();
+                if let Err(error) = result {
+                    conn.execute_batch("ROLLBACK TO shared_routing_group_migration; RELEASE shared_routing_group_migration")?;
+                    return Err(error);
+                }
+                conn.execute_batch("RELEASE shared_routing_group_migration")?;
+            }
+            30 => {
+                conn.execute_batch("SAVEPOINT credential_revision_migration")?;
+                let result = (|| {
+                    super::credential_revision::migrate(conn)?;
+                    set_version(conn, 31)
+                })();
+                if let Err(error) = result {
+                    conn.execute_batch("ROLLBACK TO credential_revision_migration; RELEASE credential_revision_migration")?;
+                    return Err(error);
+                }
+                conn.execute_batch("RELEASE credential_revision_migration")?;
+            }
             other => {
                 return Err(AppError::Database(format!(
                     "未知的 LoongPort 数据版本 {other}，无法迁移到 {LOONGPORT_SCHEMA_VERSION}"
@@ -413,6 +439,9 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
         version = current_version(conn)?;
     }
 
+    super::credential_revision::validate_schema(conn)?;
+    crate::services::routing_groups::validate_schema(conn)
+        .map_err(|_| AppError::Config("routing_groups.invalid_schema".into()))?;
     crate::proxy::client_access::validate_schema(conn)?;
     crate::database::dao::qoder_http_auth::validate_column(conn)?;
     crate::database::dao::qoder_campaign_operations::read_rows(conn)?;
@@ -986,10 +1015,11 @@ fn inherit_the_old_current_image_tier(conn: &Connection) -> Result<(), AppError>
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 mod tests {
     use super::*;
     use crate::Database;
+    #[cfg(test)]
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 
     #[test]
@@ -1005,14 +1035,46 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "test-hooks")]
+    pub(super) fn verify_prior_fixture(case: &str) {
+        match case {
+            "v4" => v4_to_latest_creates_model_verification_tables_without_touching_user_version(),
+            "v7" => v7_to_v8_removes_runtime_state_but_preserves_unresolved_proxy_leases(),
+            "v16" => v17_relaxes_history_source_check_for_both_legacy_shapes(),
+            "v6" => v6_to_v7_keeps_current_results_but_starts_history_empty(),
+            "v18" => v18_to_v19_creates_the_site_balance_cache_table(),
+            "v22" => v22_adds_empty_attempt_history_without_rewriting_request_totals(),
+            _ => panic!("unknown original schema fixture"),
+        }
+    }
+
     fn mem() -> Connection {
         Connection::open_in_memory().expect("内存库")
+    }
+
+    // Original base29 vendor owner, not a current table relabelled historical.
+    pub(super) fn historical_vendor_owner(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS loongport_vendor (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            vendor_id TEXT NOT NULL,
+            account_id TEXT,
+            account_label TEXT NOT NULL DEFAULT '',
+            login_identifier TEXT NOT NULL DEFAULT '',
+            auth_token TEXT NOT NULL DEFAULT '',
+            api_key TEXT NOT NULL DEFAULT '',
+            sort_index INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0
+        )",
+        )
+        .unwrap();
     }
 
     // Partial historical migration fixtures still need the original Provider
     // owner before the v27 subordinate column can be added. This is test-only;
     // production never manufactures a missing installed Provider table.
     fn provider_owner_for_http_migration(conn: &Connection) {
+        historical_vendor_owner(conn);
         conn.execute_batch(
             "CREATE TABLE providers (
             id TEXT NOT NULL, app_type TEXT NOT NULL, name TEXT NOT NULL DEFAULT '',
@@ -1026,7 +1088,7 @@ mod tests {
         .unwrap();
     }
 
-    #[test]
+    #[cfg_attr(test, test)]
     fn v22_adds_empty_attempt_history_without_rewriting_request_totals() {
         let conn = mem();
         provider_owner_for_http_migration(&conn);
@@ -1086,6 +1148,7 @@ mod tests {
     }
 
     fn legacy_providers_table(conn: &Connection) {
+        historical_vendor_owner(conn);
         conn.execute(
             "CREATE TABLE providers (
                 id TEXT NOT NULL,
@@ -1153,7 +1216,7 @@ mod tests {
     }
 
     /// ⭐ v18→v19 建站点余额缓存表（看板 SWR）：停在 v18 的老库升级后必须有表且可写。
-    #[test]
+    #[cfg_attr(test, test)]
     fn v18_to_v19_creates_the_site_balance_cache_table() {
         let conn = mem();
         provider_owner_for_http_migration(&conn);
@@ -1404,7 +1467,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[cfg_attr(test, test)]
     fn v4_to_latest_creates_model_verification_tables_without_touching_user_version() {
         let conn = mem();
         legacy_providers_table(&conn);
@@ -1489,7 +1552,7 @@ mod tests {
         assert_eq!(current_version(&conn).unwrap(), LOONGPORT_SCHEMA_VERSION);
     }
 
-    #[test]
+    #[cfg_attr(test, test)]
     fn v7_to_v8_removes_runtime_state_but_preserves_unresolved_proxy_leases() {
         let conn = mem();
         legacy_providers_table(&conn);
@@ -1606,7 +1669,7 @@ mod tests {
         .expect("造 v16 验证历史表");
     }
 
-    #[test]
+    #[cfg_attr(test, test)]
     fn v17_relaxes_history_source_check_for_both_legacy_shapes() {
         let shapes = [
             "CHECK (source = 'active')",
@@ -1652,7 +1715,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[cfg_attr(test, test)]
     fn v6_to_v7_keeps_current_results_but_starts_history_empty() {
         let conn = mem();
         legacy_providers_table(&conn);
@@ -2609,6 +2672,15 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 #[path = "loongport_schema_qoder_cn_tests.rs"]
 mod qoder_cn_migration_tests;
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_prior_fixture(case: &str) {
+    if let Some(case) = case.strip_prefix("cn_") {
+        qoder_cn_migration_tests::verify_prior_fixture(case);
+    } else {
+        tests::verify_prior_fixture(case);
+    }
+}

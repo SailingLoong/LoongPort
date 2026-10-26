@@ -7,6 +7,7 @@ pub(crate) mod http;
 pub(crate) mod inference;
 mod native_format;
 pub(crate) mod native_import;
+pub(crate) mod routing_source;
 
 #[cfg(test)]
 mod tests;
@@ -96,3 +97,9 @@ pub(crate) mod refresh_owner_fixture;
 
 #[cfg(any(test, feature = "test-hooks"))]
 mod test_fixtures;
+
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+pub(crate) mod routing_source_fixture;
+
+#[cfg(feature = "test-hooks")]
+pub(crate) mod shared_flow_fixture;

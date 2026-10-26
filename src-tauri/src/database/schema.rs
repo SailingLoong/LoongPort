@@ -35,6 +35,16 @@ impl Database {
     /// 在指定连接上创建表（供迁移和测试使用）
     pub(crate) fn create_tables_on_conn(conn: &Connection) -> Result<(), AppError> {
         let loongport_version = super::loongport_schema::read_stored_version(conn)?;
+        if loongport_version >= 31 {
+            super::credential_revision::validate_schema(conn)?;
+        }
+        if loongport_version >= 30 {
+            crate::services::routing_groups::validate_schema(conn)
+                .map_err(|_| AppError::Config("routing_groups.invalid_schema".into()))?;
+        } else if loongport_version == 0 {
+            crate::services::routing_groups::create_schema(conn)?;
+        }
+
         if loongport_version >= 28 {
             crate::proxy::client_access::validate_schema(conn)?;
         }
@@ -517,6 +527,9 @@ impl Database {
 
         // LoongPort：官网直连账号（vendor 层）
         crate::vendor::creds::create_table(conn)?;
+        if loongport_version == 0 {
+            super::credential_revision::create_columns(conn)?;
+        }
 
         // LoongPort：中转站余额快照（扣费对账）
         crate::relay::reconcile::create_table(conn)?;

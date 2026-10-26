@@ -674,8 +674,41 @@ async fn safe_error_response(
 #[path = "inference_tests.rs"]
 mod tests;
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-hooks"), unix))]
 #[path = "inference_fixture.rs"]
 mod fixture;
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-hooks"), unix))]
 pub(crate) use fixture::FixtureTransport;
+
+#[path = "routing_source.rs"]
+mod routing_source;
+pub(crate) use routing_source::routing_facts;
+
+impl Lease {
+    /// Compare the shared snapshot with this freshly acquired original lease.
+    /// Dispatch and response checks still retain the original owner's fences.
+    pub(crate) fn verify_routing_stamp(
+        &self,
+        expected: &crate::services::service_source_identity::ZCodeStamp,
+    ) -> Result<(), ProxyError> {
+        if expected.account_id != self.binding.account_id
+            || expected.context_id != self.context.context_id()
+            || expected.vault_id != self.binding.storage.store_id()
+            || expected.storage != self.binding.storage
+            || expected.session_binding != hex::encode(self.binding.session_binding)
+            || expected.catalog_revision != self.binding.catalog_revision
+            || expected.session_epoch != self.binding.epoch
+        {
+            return Err(ProxyError::Internal(
+                "zcode.routing_identity_changed".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(feature = "test-hooks", unix))]
+#[path = "routing_source_tests.rs"]
+mod routing_source_tests;
+#[cfg(all(feature = "test-hooks", unix))]
+pub(crate) use routing_source_tests::verify as verify_routing_owner;

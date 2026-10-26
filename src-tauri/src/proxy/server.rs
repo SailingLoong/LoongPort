@@ -368,7 +368,7 @@ impl ProxyServer {
         }
     }
 
-    fn build_router(&self) -> Router {
+    pub(crate) fn build_router(&self) -> Router {
         Router::new()
             // 健康检查
             .route("/health", get(handlers::health_check))
@@ -918,10 +918,15 @@ mod openrouter_pool_tests;
 #[path = "trae_pool_tests.rs"]
 mod trae_pool_tests;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 #[path = "qoder_http_pool_tests.rs"]
 mod qoder_http_pool_tests;
 
 #[cfg(all(test, feature = "gui"))]
 #[path = "opencode_personal_session_tests.rs"]
 mod opencode_personal_session_tests;
+
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+pub(crate) async fn verify_qoder_shared_flow(case: &str) {
+    qoder_http_pool_tests::verify_shared(case).await;
+}

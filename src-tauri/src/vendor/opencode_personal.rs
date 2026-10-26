@@ -82,6 +82,21 @@ pub fn config_for(segment: &str, app: &AppType) -> Option<(String, String)> {
     };
     Some((format!("{base}/{family}"), model.into()))
 }
+/// Bounded shared-model capability, not the union catalog's protocol promise.
+/// The official Go endpoint table and Claude Code guide both support DeepSeek V4:
+/// https://opencode.ai/v2/docs/console/go
+/// https://opencode.ai/v2/docs/console/harnesses/claude-code
+/// Reuse the original Go Claude model fact; do not change either app's default.
+pub(crate) fn shared_model_protocol_supported(
+    segment: &str,
+    model: &str,
+    api_format: &str,
+) -> bool {
+    segment == GO
+        && matches!(api_format, "anthropic" | "openai_chat")
+        && config_for(GO, &AppType::Claude).is_some_and(|(_, existing)| existing == model)
+}
+
 pub fn style(segment: &str) -> ProvisionStyle {
     ProvisionStyle {
         codex_wire_chat: segment == GO,
@@ -199,16 +214,11 @@ pub fn save(
             tx.last_insert_rowid()
         }
     };
-    let encrypted = crate::secrets::inventory::seal_db(
-        vault,
-        "loongport_vendor",
-        "api_key",
-        &[&id.to_string()],
-        key,
-    )?;
+    // The original key writer publishes key + private issuance identity atomically.
+    super::creds::set_api_key(&tx, vault, id, key)?;
     tx.execute(
-        "UPDATE loongport_vendor SET api_key=?1, account_label=?2 WHERE id=?3",
-        params![encrypted, label, id],
+        "UPDATE loongport_vendor SET account_label=?1 WHERE id=?2",
+        params![label, id],
     )?;
     tx.commit()?;
     Ok(id)
