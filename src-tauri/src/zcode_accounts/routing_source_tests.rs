@@ -2,7 +2,8 @@
 use super::*;
 use crate::services::service_source_identity::NativeStamp;
 
-pub(crate) async fn verify(session: Arc<SecretSession>, case: &str) {
+pub(crate) async fn verify(db: Arc<Database>, case: &str) {
+    let session = db.secrets.clone();
     assert!(matches!(
         case,
         "facts_read_only"
@@ -105,14 +106,10 @@ pub(crate) async fn verify(session: Arc<SecretSession>, case: &str) {
             _ => None,
         })
         .expect("original selected account has a routing fact");
-    let lease = Lease::acquire_in_context(
-        session.clone(),
-        context,
-        owner.account_id(0),
-        "routing-owner-fixture",
-    )
-    .await
-    .unwrap();
+    let lease =
+        Lease::acquire_in_context(db, context, owner.account_id(0), "routing-owner-fixture")
+            .await
+            .unwrap();
     lease.verify_routing_stamp(&stamp).unwrap();
     if case == "facts_read_only" {
         let serialized = serde_json::to_string(&stamp).unwrap();

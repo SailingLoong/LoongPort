@@ -16,6 +16,13 @@ const MODEL: &str = "synthetic-zcode-shared-model";
 pub(crate) async fn verify(case: &str) {
     let plaintext = case.starts_with("plaintext_");
     let case = case.strip_prefix("plaintext_").unwrap_or(case);
+    let source_case = case.strip_prefix("source_context_");
+    let case = match source_case {
+        Some("native" | "selected" | "none") => "two_apps",
+        Some("stream") => "stream_retire",
+        Some(_) => panic!("unknown source-context fixture"),
+        None => case,
+    };
     assert!(matches!(
         case,
         "source"
@@ -36,6 +43,21 @@ pub(crate) async fn verify(case: &str) {
     });
     crate::settings::unlock_settings_for_test(db.secrets.clone()).unwrap();
     let owner = FixtureTransport::seed_accounts(&db.secrets).await.unwrap();
+    const NATIVE: &str = "11111111-2222-4333-8444-555555555555";
+    const SELECTED: &str = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const NEXT: &str = "99999999-8888-4777-8666-555555555555";
+    let effective = match source_case {
+        Some("native") => Some(NATIVE),
+        Some("selected" | "stream") => Some(SELECTED),
+        _ => None,
+    };
+    if source_case.is_some() {
+        owner.seed_source_fixture(
+            &db,
+            (source_case != Some("none")).then_some(NATIVE),
+            matches!(source_case, Some("selected" | "stream")).then_some(SELECTED),
+        );
+    }
     let _routing_capability = owner.install_routing_capability(&db.secrets).unwrap();
     let account = owner.account_id(0).to_owned();
     for index in 0..2 {
@@ -129,6 +151,14 @@ pub(crate) async fn verify(case: &str) {
     let encoded = serde_json::to_string(&wire).unwrap();
     for index in 0..2 {
         assert!(!encoded.contains(owner.synthetic_token(index)));
+    }
+    if source_case.is_some() {
+        for id in [NATIVE, SELECTED, NEXT] {
+            assert!(
+                !encoded.contains(id),
+                "source DTO must not expose device identity"
+            );
+        }
     }
     if case == "source" {
         for app in [AppType::Claude, AppType::Codex] {
@@ -391,6 +421,10 @@ pub(crate) async fn verify(case: &str) {
         })
         .await
         .unwrap();
+        if source_case.is_some() {
+            owner.assert_source_fixture_headers(&calls.lock().unwrap()[0].1, effective);
+            owner.seed_source_fixture(&db, Some(NEXT), Some(NEXT));
+        }
         transport
             .retire_first_fixture_account(&db.secrets)
             .await
@@ -441,6 +475,11 @@ pub(crate) async fn verify(case: &str) {
             assert_eq!(calls.len(), old_calls + 1);
             assert_eq!(calls.last().unwrap().1["x-api-key"], tokens[1]);
             assert_eq!(calls.last().unwrap().2["model"], MODEL);
+            if source_case.is_some() {
+                for (_, headers, _) in calls.iter() {
+                    owner.assert_source_fixture_headers(headers, effective);
+                }
+            }
         }
         assert_eq!(old_calls, 1, "committed A stream cannot replay on B");
         let text = String::from_utf8_lossy(&output);
@@ -478,6 +517,13 @@ pub(crate) async fn verify(case: &str) {
         } else {
             assert_eq!(status, StatusCode::OK, "{text}");
             assert!(text.contains("original ZCode shared answer"));
+        }
+        if source_case.is_some() {
+            owner
+                .assert_source_fixture_headers(&calls.lock().unwrap().last().unwrap().1, effective);
+            // Mutate only generated next-session settings/observed native state.
+            // A second real HTTP request must retain the first effective choice.
+            owner.seed_source_fixture(&db, Some(NEXT), Some(NEXT));
         }
     }
     let expected_count = match case {

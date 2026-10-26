@@ -417,7 +417,7 @@ pub async fn verify_zcode_shared_flow(case: &str) {
 pub async fn verify_zcode_routing_owner(case: &str) {
     let _home = crate::secrets::testing::TestHome::new().unwrap();
     let db = crate::database::Database::memory().unwrap();
-    crate::zcode_accounts::inference::verify_routing_owner(db.secrets.clone(), case).await;
+    crate::zcode_accounts::inference::verify_routing_owner(std::sync::Arc::new(db), case).await;
 }
 
 /// Synthetic fresh plaintext owners, not a real-account or conversion acceptance test.

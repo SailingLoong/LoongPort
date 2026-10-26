@@ -14,6 +14,7 @@ use super::{
     transaction::VaultAccountStore,
 };
 use crate::{
+    database::Database,
     proxy::{hyper_client::ProxyResponse, ProxyError},
     secrets::{session::SecretSession, stream_guard::KnownSecretGuard},
 };
@@ -42,6 +43,8 @@ pub(crate) enum Failure {
 pub(crate) struct Lease {
     session: Arc<SecretSession>,
     context: LibraryContext,
+    // Original-owner source context, frozen once per acquisition. Never serialized.
+    source_headers: http::HeaderMap,
     binding: Binding,
 }
 /// Retain this owner-issued fence through final buffering, priming and conversion.
@@ -166,11 +169,11 @@ impl Lease {
     /// OS identity or silently pick another catalog to make acquisition succeed.
     #[cfg(not(test))]
     pub(crate) async fn acquire(
-        session: Arc<SecretSession>,
+        db: Arc<Database>,
         account_id: &str,
         request_session_id: &str,
     ) -> Result<Self, Failure> {
-        Self::acquire_selected(session, account_id, request_session_id, None).await
+        Self::acquire_selected(db, account_id, request_session_id, None).await
     }
 
     /// selected_data_root may come only from the trusted backend account/library
@@ -178,18 +181,18 @@ impl Lease {
     /// It is a ZCode namespace, distinct from session.root() (LoongPort's vault).
     #[cfg(not(test))]
     pub(crate) async fn acquire_selected(
-        session: Arc<SecretSession>,
+        db: Arc<Database>,
         account_id: &str,
         request_session_id: &str,
         selected_data_root: Option<&Path>,
     ) -> Result<Self, Failure> {
         let context = super::native_context::library_context(selected_data_root)
             .map_err(|_| Failure::UnsupportedContext)?;
-        Self::acquire_in_context(session, context, account_id, request_session_id).await
+        Self::acquire_in_context(db, context, account_id, request_session_id).await
     }
 
     async fn acquire_in_context(
-        session: Arc<SecretSession>,
+        db: Arc<Database>,
         context: LibraryContext,
         account_id: &str,
         request_session_id: &str,
@@ -203,6 +206,17 @@ impl Lease {
             return Err(Failure::UnsupportedContext);
         }
         let _owner = crate::services::sync_protocol::sync_mutex().lock().await;
+        // current() reads protected SQLite settings and may acquire the session
+        // and connection itself. Snapshot it before holding either read guard.
+        // Its effective value (including None) owns next-session selection rules.
+        let device_mid = super::device_settings::current(&db, &context)
+            .map_err(|_| Failure::StorageUnavailable)?;
+        let version = super::native_context::library_app_version(context.data_root());
+        let source_headers =
+            super::source_context::SourceContext::observe(Some(context.data_root()))
+                .with_device_mid(device_mid.as_deref())
+                .headers(version.as_deref());
+        let session = db.secrets.clone();
         let vault = session.read().map_err(|_| Failure::StorageUnavailable)?;
         let native = context.cipher().map_err(|_| Failure::UnsupportedContext)?;
         let store = VaultAccountStore::new(session.root(), &vault)
@@ -253,6 +267,7 @@ impl Lease {
         Ok(Self {
             session,
             context,
+            source_headers,
             binding,
         })
     }
@@ -350,7 +365,7 @@ impl Lease {
                 KnownSecretGuard::new(&[token.expose().as_bytes()])
                     .map_err(|_| Failure::UnsupportedContext)?,
             );
-            let mut headers = http::HeaderMap::new();
+            let mut headers = self.source_headers.clone();
             let mut key =
                 http::HeaderValue::from_str(token.expose()).map_err(|_| Failure::NeedsLogin)?;
             key.set_sensitive(true);

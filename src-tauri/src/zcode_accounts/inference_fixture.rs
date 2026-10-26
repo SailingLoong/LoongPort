@@ -29,6 +29,51 @@ impl FixtureOwner<'_> {
     pub(crate) fn account_id(&self, index: usize) -> &str {
         &self.seal.accounts[index].0
     }
+    /// Generated fixture state only. The production selection reader remains the
+    /// sole authority for effective identity; this does not call it or pre-freeze it.
+    pub(crate) fn seed_source_fixture(
+        &self,
+        db: &crate::database::Database,
+        native: Option<&str>,
+        selected: Option<&str>,
+    ) {
+        assert!(std::ptr::eq(self._session, db.secret_session()));
+        let root = self.seal.context.data_root();
+        crate::config_file_io::ensure_private_directory(root).unwrap();
+        let path = root.join("telemetry-state.json");
+        if let Some(id) = native {
+            std::fs::write(&path, serde_json::json!({"deviceMid":id}).to_string()).unwrap();
+        } else {
+            assert!(!path.exists());
+        }
+        let ids = selected.into_iter().collect::<Vec<_>>();
+        db.set_setting("zcode_device_ids_v1", &serde_json::json!({"scopes":{
+            self.seal.context.context_id(): {"devices":ids,"selectedDeviceMid":selected,"revision":1}
+        }}).to_string()).unwrap();
+    }
+    pub(crate) fn assert_source_fixture_headers(
+        &self,
+        actual: &http::HeaderMap,
+        effective: Option<&str>,
+    ) {
+        let version =
+            super::super::native_context::library_app_version(self.seal.context.data_root());
+        let expected = super::super::source_context::SourceContext::observe(Some(
+            self.seal.context.data_root(),
+        ))
+        .with_device_mid(effective)
+        .headers(version.as_deref());
+        for (name, value) in &expected {
+            assert!(
+                actual.get(name) == Some(value),
+                "original source header missing or changed: {name}"
+            );
+        }
+        assert!(
+            actual.get("x-device-mid").and_then(|v| v.to_str().ok()) == effective,
+            "effective device selection must be original-owner frozen, including absence"
+        );
+    }
     /// These values are generated synthetic tokens, never read from an account.
     pub(crate) fn synthetic_token(&self, index: usize) -> &str {
         &self.seal.accounts[index].2
@@ -306,12 +351,13 @@ impl StreamTransport for FixtureTransport {
 }
 impl Lease {
     pub(crate) async fn acquire_fixture(
-        session: Arc<SecretSession>,
+        db: Arc<crate::database::Database>,
         account_id: &str,
         request_session_id: &str,
         fixture: &FixtureTransport,
     ) -> Result<Self, Failure> {
-        fixture.matches_session(&session)?;
+        let session = db.secret_session();
+        fixture.matches_session(session)?;
         if !fixture
             .seal
             .accounts
@@ -321,7 +367,7 @@ impl Lease {
             return Err(Failure::StaleIdentity);
         }
         let lease = Self::acquire_in_context(
-            session,
+            db,
             fixture.seal.context.clone(),
             account_id,
             request_session_id,

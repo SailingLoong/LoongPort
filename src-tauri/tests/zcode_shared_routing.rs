@@ -72,3 +72,20 @@ flow_case!(
     one_ordered_group_uses_zcode_then_original_minimax_owner,
     "mixed"
 );
+
+flow_case!(
+    zcode_source_context_native_identity_is_frozen,
+    "source_context_native"
+);
+flow_case!(
+    zcode_source_context_selected_identity_overrides_native_and_is_frozen,
+    "source_context_selected"
+);
+flow_case!(
+    zcode_source_context_absence_does_not_revive_after_native_state_appears,
+    "source_context_none"
+);
+flow_case!(
+    zcode_source_context_stream_retains_owner_headers_and_account_fence,
+    "source_context_stream"
+);

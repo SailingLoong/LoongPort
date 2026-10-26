@@ -1,6 +1,6 @@
 //! Selected pool entries dispatch through their existing private account owner.
 use super::{hyper_client::ProxyResponse, response_lease::ResponseLease, ProxyError};
-use crate::{provider::Provider, secrets::session::SecretSession};
+use crate::{database::Database, provider::Provider};
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
 
@@ -86,12 +86,13 @@ pub(crate) struct PreparedAccount {
 impl PreparedAccount {
     #[cfg(any(feature = "gui", test))]
     pub(crate) async fn acquire(
-        session: Arc<SecretSession>,
+        db: Arc<Database>,
         kind: AccountKind,
         account_id: &str,
         request_session: &str,
         _extensions: &http::Extensions,
     ) -> Result<Self, ProxyError> {
+        let session = db.secrets.clone();
         let lease = match kind {
             AccountKind::MiniMax => {
                 let lease = crate::minimax_code::inference::Lease::acquire(
@@ -120,7 +121,7 @@ impl PreparedAccount {
                             )
                         })?;
                     crate::zcode_accounts::inference::Lease::acquire_fixture(
-                        session,
+                        db.clone(),
                         account_id,
                         request_session,
                         fixture,
@@ -133,7 +134,7 @@ impl PreparedAccount {
                 ));
                 #[cfg(not(any(test, feature = "test-hooks")))]
                 let lease = crate::zcode_accounts::inference::Lease::acquire(
-                    session,
+                    db.clone(),
                     account_id,
                     request_session,
                 )
@@ -198,7 +199,7 @@ impl PreparedAccount {
 
     #[cfg(not(any(feature = "gui", test)))]
     pub(crate) async fn acquire(
-        _session: Arc<SecretSession>,
+        _db: Arc<Database>,
         _kind: AccountKind,
         _account_id: &str,
         _request_session: &str,
@@ -427,7 +428,7 @@ mod tests {
     #[tokio::test]
     async fn zcode_non_unix_fixture_acquisition_remains_closed() {
         let result = PreparedAccount::acquire(
-            SecretSession::ephemeral().unwrap(),
+            Arc::new(Database::memory().unwrap()),
             AccountKind::ZCode,
             "synthetic-account",
             "synthetic-session",

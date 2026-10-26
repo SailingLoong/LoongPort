@@ -211,6 +211,40 @@ async function mountActualApp(
 }
 
 describe("actual App with official Tauri mocks, not a recreated design", () => {
+  it("keeps the approved cream notice, slight policy ratio and functional right-hand recovery help", async () => {
+    const { fixture, user } = await mountActualApp();
+    const warning = screen
+      .getByRole("heading", { name: "资格未知时，不猜测实际命中" })
+      .closest("section");
+    expect.soft(warning).toHaveClass("bg-[#fff7e9]");
+    expect.soft(warning).not.toHaveClass("border", "border-amber-500/25");
+    const policies = screen
+      .getByRole("radio", { name: "省心 · 按顺序" })
+      .closest("fieldset");
+    expect.soft(policies).toHaveClass("gap-4", "sm:grid-cols-[1fr_1.05fr]");
+    const help = screen.getByRole("button", { name: "恢复说明" });
+    expect(help).toHaveClass("border", "h-9", "shrink-0");
+    expect(help.parentElement).toHaveClass("sm:flex-row", "sm:justify-between");
+    expect(help).toHaveAttribute("aria-expanded", "false");
+    await user.click(help);
+    const boundary = screen.getByText(
+      "配置发布恢复不等于重发模型请求。只有后端返回原待处理操作时才提供恢复入口；接入状态可用页头原代理开关检查。",
+    );
+    expect(boundary).toBeVisible();
+    expect(help).toHaveAttribute("aria-expanded", "true");
+    help.focus();
+    await user.keyboard(" ");
+    expect(help).toHaveAttribute("aria-expanded", "false");
+    expect(boundary).not.toBeInTheDocument();
+    await user.keyboard("{Enter}");
+    expect(help).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText(boundary.textContent!)).toBeVisible();
+    expect(
+      fixture.calls.filter((call) =>
+        /^(prepare_|apply_|recover_)/.test(call.command),
+      ),
+    ).toHaveLength(0);
+  });
   it("retains the approved C2 surface, type hierarchy, action colors and visible hide controls", async () => {
     const { user } = await mountActualApp();
     const workspace = screen.getByRole("region", { name: "应用路由工作台" });

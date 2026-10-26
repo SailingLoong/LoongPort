@@ -8,6 +8,11 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import type { AppId } from "@/lib/api";
 import type {
@@ -209,7 +214,7 @@ export function ApplicationRouteWorkspace({
           </p>
           <fieldset
             disabled={disabled}
-            className="mt-5 grid gap-3 sm:grid-cols-2"
+            className="mt-5 grid gap-4 sm:grid-cols-[1fr_1.05fr]"
           >
             <legend className="sr-only">{t("routingWorkspace.policy")}</legend>
             {(["manual", "orderedGroup"] as const).map((kind) => (
@@ -530,11 +535,11 @@ export function ApplicationRouteWorkspace({
               {t("routingWorkspace.requestStillUnknown")}
             </p>
           </section>
-          <section className="rounded-xl border border-amber-500/25 bg-amber-500/5 p-4">
+          <section className="rounded-xl bg-[#fff7e9] p-4 dark:bg-amber-500/10">
             <div className="flex items-start gap-2">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
               <div>
-                <h2 className="text-sm font-semibold">
+                <h2 className="text-sm font-semibold text-[#a46216] dark:text-amber-400">
                   {t("routingWorkspace.unknownTitle")}
                 </h2>
                 <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
@@ -543,50 +548,64 @@ export function ApplicationRouteWorkspace({
               </div>
             </div>
           </section>
-          <section className="rounded-xl border border-border-default bg-card p-4">
-            <h2 className="text-sm font-semibold">
-              {t("routingWorkspace.recoveryTitle")}
-            </h2>
-            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-              {t("routingWorkspace.recoveryHelp")}
-            </p>
-            <ApplicationStartupCheckpoint
-              appId={appId}
-              modeState={mode}
-              onRefresh={workspace.refresh}
-            />
-            {workspace.pendingRequest ? (
-              <div className="mt-3 flex flex-wrap gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={busy}
-                  onClick={() => void workspace.inspectRequest()}
-                >
-                  {t("routingWorkspace.inspectOperation")}
-                </Button>
-                {workspace.canRecover && (
+          <Collapsible asChild>
+            <section className="rounded-xl border border-border-default bg-card p-4">
+              <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0">
+                  <h2 className="text-sm font-semibold">
+                    {t("routingWorkspace.recoveryTitle")}
+                  </h2>
+                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                    {t("routingWorkspace.recoveryHelp")}
+                  </p>
+                </div>
+                {!workspace.pendingRequest && (
+                  <CollapsibleTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="lg"
+                      className="min-w-[125px] shrink-0"
+                    >
+                      {t("routingWorkspace.recoveryDetails")}
+                    </Button>
+                  </CollapsibleTrigger>
+                )}
+              </div>
+              <ApplicationStartupCheckpoint
+                appId={appId}
+                modeState={mode}
+                onRefresh={workspace.refresh}
+              />
+              {workspace.pendingRequest ? (
+                <div className="mt-3 flex flex-wrap gap-2">
                   <Button
                     variant="outline"
                     size="sm"
                     disabled={busy}
-                    onClick={() => void workspace.recoverRequest()}
+                    onClick={() => void workspace.inspectRequest()}
                   >
-                    {t("routingWorkspace.recoverOperation")}
+                    {t("routingWorkspace.inspectOperation")}
                   </Button>
-                )}
-              </div>
-            ) : (
-              <details className="mt-3 text-xs text-muted-foreground">
-                <summary className="cursor-pointer rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                  {t("routingWorkspace.recoveryDetails")}
-                </summary>
-                <p className="mt-2 leading-relaxed">
-                  {t("routingWorkspace.recoveryBoundary")}
-                </p>
-              </details>
-            )}
-          </section>
+                  {workspace.canRecover && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={busy}
+                      onClick={() => void workspace.recoverRequest()}
+                    >
+                      {t("routingWorkspace.recoverOperation")}
+                    </Button>
+                  )}
+                </div>
+              ) : (
+                <CollapsibleContent className="mt-3 text-xs text-muted-foreground">
+                  <p className="leading-relaxed">
+                    {t("routingWorkspace.recoveryBoundary")}
+                  </p>
+                </CollapsibleContent>
+              )}
+            </section>
+          </Collapsible>
         </aside>
       </div>
       {workspace.notice && (

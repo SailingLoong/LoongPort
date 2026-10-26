@@ -2438,7 +2438,7 @@ impl RequestForwarder {
         let prepared_account = match managed_account.as_ref() {
             Some((kind, account_id)) => Some(
                 super::managed_accounts::PreparedAccount::acquire(
-                    self.router.managed_secret_session(),
+                    self.router.managed_database(),
                     *kind,
                     account_id,
                     &self.session_id,

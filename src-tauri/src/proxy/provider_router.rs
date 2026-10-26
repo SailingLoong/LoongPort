@@ -188,6 +188,12 @@ impl ProviderRouter {
             .map_err(|_| super::ProxyError::ClientAccessDenied)
     }
 
+    /// Reuse the router's original database for owner-owned request context.
+    pub(crate) fn managed_database(&self) -> Arc<Database> {
+        self.db.clone()
+    }
+
+    #[cfg(all(any(test, feature = "test-hooks"), feature = "gui"))]
     pub(crate) fn managed_secret_session(&self) -> Arc<crate::secrets::session::SecretSession> {
         self.db.secrets.clone()
     }
