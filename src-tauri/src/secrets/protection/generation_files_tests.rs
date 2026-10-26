@@ -46,7 +46,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new(separate: bool) -> Self {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::secrets::testing::tempdir().unwrap();
         let data = temp.path().join("data");
         let device = if separate {
             temp.path().join("device")

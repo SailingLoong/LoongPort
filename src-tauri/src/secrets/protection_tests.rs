@@ -156,7 +156,7 @@ fn manual_same_key_and_explicit_plaintext_need_no_cache_access() {
 
 #[test]
 fn proven_fresh_scope_publishes_real_plaintext_without_a_vault() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = crate::secrets::testing::tempdir().unwrap();
     let root = tmp.path().join("data");
     let device = tmp.path().join("device");
     let proof = FreshScope::capture(&root, &device, &[]).unwrap();
@@ -174,7 +174,7 @@ fn proven_fresh_scope_publishes_real_plaintext_without_a_vault() {
 }
 #[test]
 fn existing_or_changed_data_cannot_be_reclassified_as_fresh_plaintext() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = crate::secrets::testing::tempdir().unwrap();
     let root = tmp.path().join("data");
     let device = tmp.path().join("device");
     std::fs::create_dir(&root).unwrap();
@@ -205,7 +205,7 @@ fn existing_or_changed_data_cannot_be_reclassified_as_fresh_plaintext() {
 #[test]
 fn fresh_scope_rejects_ancestor_and_diagnostic_aliases_without_touching_targets() {
     use std::os::unix::fs::{symlink, PermissionsExt};
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = crate::secrets::testing::tempdir().unwrap();
     let real = tmp.path().join("real");
     std::fs::create_dir(&real).unwrap();
     std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();

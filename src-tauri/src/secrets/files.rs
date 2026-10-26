@@ -493,7 +493,7 @@ mod owned_tests {
             super::super::owned_file::KEY_INTENT_FILE,
             super::super::owned_file::BUNDLE_EXPORT_FILE,
         ] {
-            let root = tempfile::tempdir().unwrap();
+            let root = crate::secrets::testing::tempdir().unwrap();
             let vault = VaultContext::generate().unwrap();
             std::fs::write(root.path().join(name), b"{}").unwrap();
             assert!(stage_owned_files_with_vault(root.path(), &vault, true).is_err());
@@ -511,7 +511,7 @@ mod owned_tests {
 
     #[test]
     fn migration_stages_registered_credentials_and_rejects_plaintext_after_upgrade() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::secrets::testing::tempdir().unwrap();
         let vault = VaultContext::generate().unwrap();
         std::fs::create_dir_all(root.path().join("backups/hermes")).unwrap();
         std::fs::write(
@@ -662,7 +662,7 @@ pub(crate) mod explicit_storage_inventory_tests {
 
     #[cfg_attr(test, test)]
     fn explicit_storage_inventory_keeps_exact_plaintext_source_and_registered_membership() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::secrets::testing::tempdir().unwrap();
         let recovery = root.path().join("backups/vault-recovery");
         std::fs::create_dir_all(&recovery).unwrap();
         let original = br#"{"synthetic":"credential-canary","foreign":18446744073709551615}"#;
@@ -685,7 +685,7 @@ pub(crate) mod explicit_storage_inventory_tests {
 
     #[cfg_attr(test, test)]
     fn explicit_storage_inventory_keeps_authenticated_encrypted_source_and_refuses_mixed_modes() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::secrets::testing::tempdir().unwrap();
         let encrypted = StorageContext::Encrypted(VaultContext::generate().unwrap());
         let file = OwnedFile::registered("workbuddy_accounts.json").unwrap();
         let original = file

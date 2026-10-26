@@ -520,7 +520,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn plaintext_export_covers_protected_locations_and_skips_plain_settings() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::secrets::testing::tempdir().unwrap();
         let store = crate::secrets::testing::MemoryKeyStore::default();
         let session = SecretSession::open(root.path(), &store, None).unwrap();
 
