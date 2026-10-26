@@ -16,11 +16,12 @@ use crate::settings::{update_webdav_sync_status, WebDavSyncSettings, WebDavSyncS
 pub(crate) use super::sync_protocol::run_with_sync_lock;
 use super::sync_protocol::{
     apply_downloaded_snapshot, build_local_snapshot, effective_db_compat_version, localized,
-    persist_sync_success_best_effort, publication_condition, publication_conflict, sha256_hex,
-    snapshot_artifact_path, validate_artifact_size_limit, validate_manifest_compat,
-    validate_upload_metadata, verify_artifact, verify_write_conditions, DownloadedSnapshot,
-    RemoteLayout, SyncManifest, DB_COMPAT_VERSION, LEGACY_PROTOCOL_VERSION, MAX_MANIFEST_BYTES,
-    MAX_SYNC_ARTIFACT_BYTES, PROTOCOL_VERSION, REMOTE_DB_SQL, REMOTE_MANIFEST, REMOTE_SKILLS_ZIP,
+    parse_manifest, persist_sync_success_best_effort, publication_condition, publication_conflict,
+    sha256_hex, snapshot_artifact_path, source_protection_view, validate_artifact_size_limit,
+    validate_manifest_compat, validate_upload_storage, verify_artifact, verify_write_conditions,
+    DownloadedSnapshot, RemoteLayout, SyncManifest, DB_COMPAT_VERSION, LEGACY_PROTOCOL_VERSION,
+    MAX_MANIFEST_BYTES, MAX_SYNC_ARTIFACT_BYTES, PROTOCOL_VERSION, REMOTE_DB_SQL, REMOTE_MANIFEST,
+    REMOTE_SKILLS_ZIP,
 };
 
 #[cfg(test)]
@@ -57,11 +58,7 @@ pub async fn upload(
     super::sync_protocol::ensure_upgrade_sync_admitted()?;
     settings.validate()?;
     let snapshot = build_local_snapshot(db)?;
-    let manifest: SyncManifest =
-        serde_json::from_slice(&snapshot.manifest_bytes).map_err(|source| AppError::Json {
-            path: REMOTE_MANIFEST.into(),
-            source,
-        })?;
+    let manifest: SyncManifest = parse_manifest(&snapshot.manifest_bytes)?;
 
     let auth = auth_for(settings);
     let dir_segs = remote_dir_segments(settings, RemoteLayout::Current);
@@ -76,16 +73,9 @@ pub async fn upload(
         settings.status.last_remote_manifest_hash.as_deref(),
     )?;
     if let Some((bytes, _)) = &remote {
-        let remote_manifest: SyncManifest =
-            serde_json::from_slice(bytes).map_err(|source| AppError::Json {
-                path: REMOTE_MANIFEST.into(),
-                source,
-            })?;
+        let remote_manifest: SyncManifest = parse_manifest(bytes)?;
         validate_manifest_compat(&remote_manifest, RemoteLayout::Current)?;
-        validate_upload_metadata(
-            manifest.vault_metadata()?,
-            remote_manifest.vault_metadata()?,
-        )?;
+        validate_upload_storage(&manifest, &remote_manifest)?;
     }
     let db_path = snapshot_artifact_path(&manifest, REMOTE_DB_SQL)?;
     let mut snapshot_dir = dir_segs;
@@ -221,7 +211,8 @@ pub async fn fetch_remote_info(settings: &WebDavSyncSettings) -> Result<Option<V
     let Some(snapshot) = find_remote_snapshot(settings, &auth).await? else {
         return Ok(None);
     };
-    let compatible = validate_manifest_compat(&snapshot.manifest, snapshot.layout).is_ok();
+    let (compatible, protection_mode, source_input_required) =
+        source_protection_view(&snapshot.manifest, snapshot.layout);
     let db_compat_version = effective_db_compat_version(&snapshot.manifest, snapshot.layout);
 
     let payload = serde_json::json!({
@@ -232,6 +223,8 @@ pub async fn fetch_remote_info(settings: &WebDavSyncSettings) -> Result<Option<V
         "protocolVersion": snapshot.manifest.version,
         "dbCompatVersion": db_compat_version,
         "compatible": compatible,
+        "protectionMode": protection_mode,
+        "sourceInputRequired": source_input_required,
         "artifacts": snapshot.manifest.artifacts.keys().collect::<Vec<_>>(),
         "layout": snapshot.layout.as_str(),
         "remotePath": remote_dir_display(settings, snapshot.layout),
@@ -281,11 +274,7 @@ async fn fetch_remote_snapshot(
         return Ok(None);
     };
 
-    let manifest: SyncManifest =
-        serde_json::from_slice(&manifest_bytes).map_err(|e| AppError::Json {
-            path: REMOTE_MANIFEST.to_string(),
-            source: e,
-        })?;
+    let manifest: SyncManifest = parse_manifest(&manifest_bytes)?;
 
     Ok(Some(RemoteSnapshot {
         layout,

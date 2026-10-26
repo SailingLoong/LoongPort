@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import {
@@ -26,10 +26,12 @@ export function isSyncRestoreRequired(error: unknown): boolean {
 
 export function SyncRestoreDialog({
   deviceName,
+  sourceInputRequired = true,
   onRestore,
   onClose,
 }: {
   deviceName: string;
+  sourceInputRequired?: boolean;
   onRestore: (password: string) => Promise<void>;
   onClose: () => void;
 }) {
@@ -39,6 +41,12 @@ export function SyncRestoreDialog({
   const inFlight = useRef(false);
   const [pending, setPending] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
+  // Only explicit native no-input authority permits the empty original wire value.
+  const requiresInput = sourceInputRequired !== false;
+  useEffect(() => {
+    if (password.current) password.current.value = "";
+    setHasPassword(false);
+  }, [sourceInputRequired]);
 
   const clearPassword = () => {
     if (password.current) password.current.value = "";
@@ -50,8 +58,8 @@ export function SyncRestoreDialog({
     onClose();
   };
   const restore = async () => {
-    const sourceInput = password.current?.value ?? "";
-    if (inFlight.current || sourceInput.length === 0) return;
+    const sourceInput = requiresInput ? (password.current?.value ?? "") : "";
+    if (inFlight.current || (requiresInput && sourceInput.length === 0)) return;
     inFlight.current = true;
     clearPassword();
     setPending(true);
@@ -89,7 +97,11 @@ export function SyncRestoreDialog({
           <DialogHeader>
             <DialogTitle>{t("syncRestore.title")}</DialogTitle>
             <DialogDescription>
-              {t("syncRestore.description")}
+              {t(
+                requiresInput
+                  ? "syncRestore.description"
+                  : "syncRestore.descriptionPlain",
+              )}
             </DialogDescription>
           </DialogHeader>
           <p className="text-sm text-muted-foreground">
@@ -98,19 +110,25 @@ export function SyncRestoreDialog({
           <p className="text-sm text-muted-foreground">
             {t("syncRestore.protection")}
           </p>
-          <div className="space-y-2">
-            <Label htmlFor="sync-restore-password">
-              {t("syncRestore.password")}
-            </Label>
-            <LiteralKeyInput
-              ref={password}
-              id="sync-restore-password"
-              disabled={pending}
-              onValueChange={() =>
-                setHasPassword((password.current?.value.length ?? 0) > 0)
-              }
-            />
-          </div>
+          {requiresInput ? (
+            <div className="space-y-2">
+              <Label htmlFor="sync-restore-password">
+                {t("syncRestore.password")}
+              </Label>
+              <LiteralKeyInput
+                ref={password}
+                id="sync-restore-password"
+                disabled={pending}
+                onValueChange={() =>
+                  setHasPassword((password.current?.value.length ?? 0) > 0)
+                }
+              />
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              {t("syncRestore.noSourceInput")}
+            </p>
+          )}
           {failure && (
             <p role="alert" className="text-sm text-destructive">
               {t(failure)}
@@ -128,7 +146,7 @@ export function SyncRestoreDialog({
             <Button
               type="submit"
               variant="destructive"
-              disabled={pending || !hasPassword}
+              disabled={pending || (requiresInput && !hasPassword)}
             >
               {t(pending ? "syncRestore.restoring" : "syncRestore.confirm")}
             </Button>

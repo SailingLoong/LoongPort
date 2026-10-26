@@ -36,8 +36,8 @@ fn text_archive_installer_fence() {
 }
 #[test]
 #[serial_test::serial]
-fn text_archive_plaintext_blocked() {
-    cc_switch_lib::integration_test_support::verify_text_archive_case("plaintext_blocked");
+fn text_archive_plaintext_explicit() {
+    cc_switch_lib::integration_test_support::verify_text_archive_case("plaintext_explicit");
 }
 
 #[test]

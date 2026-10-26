@@ -14,7 +14,10 @@ use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 
 use crate::error::AppError;
-use crate::secrets::VaultMetadata;
+use crate::secrets::{
+    storage::{PlaintextIdentity, StorageContext, StorageIdentity},
+    VaultMetadata,
+};
 use crate::services::skill::{skill_state_read_guard, skill_state_write_guard};
 
 // Re-export archive functions for use by transport layers.
@@ -26,6 +29,9 @@ pub(crate) use super::webdav_sync::archive::zip_skills_ssot;
 /// Retains historic "webdav" naming for backward compatibility with existing remotes.
 pub(crate) const PROTOCOL_FORMAT: &str = "cc-switch-webdav-sync";
 pub(crate) const PROTOCOL_VERSION: u32 = 3;
+/// New plaintext envelope in the existing v3 transport namespace. The namespace
+/// and CAS head remain stable; older clients reject this envelope version.
+pub(crate) const PLAINTEXT_PROTOCOL_VERSION: u32 = 4;
 pub(crate) const LEGACY_PROTOCOL_VERSION: u32 = 2;
 pub(crate) const DB_COMPAT_VERSION: u32 = 7;
 pub(crate) const LEGACY_DB_COMPAT_VERSION: u32 = 5;
@@ -117,8 +123,7 @@ pub(crate) fn snapshot_artifact_path(
     manifest: &SyncManifest,
     artifact: &str,
 ) -> Result<String, AppError> {
-    if manifest.snapshot_id != compute_snapshot_id(&manifest.artifacts, manifest.vault_metadata()?)
-    {
+    if manifest.snapshot_id != manifest.expected_snapshot_id()? {
         return Err(localized(
             "sync.snapshot_identity_invalid",
             "同步快照标识无效",
@@ -214,10 +219,59 @@ pub(crate) struct SyncManifest {
     pub snapshot_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault: Option<VaultMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<SnapshotStorage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) enum SnapshotStorage {
+    Plaintext { identity: PlaintextIdentity },
 }
 
 impl SyncManifest {
+    /// A descriptor is not authentication. Plaintext identity is only a format
+    /// and consistency binding; encrypted sources still need their original key.
+    pub(crate) fn storage_identity(&self) -> Result<StorageIdentity, AppError> {
+        match (self.version, &self.vault, &self.storage) {
+            (PROTOCOL_VERSION, Some(metadata), None) => {
+                metadata
+                    .validate()
+                    .map_err(crate::secrets::inventory::secret_error)?;
+                Ok(StorageIdentity::Encrypted(metadata.clone().into()))
+            }
+            (PLAINTEXT_PROTOCOL_VERSION, None, Some(SnapshotStorage::Plaintext { identity })) => {
+                identity
+                    .validate()
+                    .map_err(crate::secrets::inventory::secret_error)?;
+                Ok(StorageIdentity::Plaintext(identity.clone()))
+            }
+            _ => Err(AppError::Config(
+                "sync.protection_descriptor_invalid".into(),
+            )),
+        }
+    }
+
+    fn expected_snapshot_id(&self) -> Result<String, AppError> {
+        match self.storage_identity()? {
+            StorageIdentity::Encrypted(metadata) => {
+                Ok(compute_snapshot_id(&self.artifacts, &metadata))
+            }
+            StorageIdentity::Plaintext(identity) => {
+                let bytes =
+                    serde_json::to_vec(&("loongport-plaintext-sync/v4", &self.artifacts, identity))
+                        .map_err(|_| {
+                            AppError::Config("sync.protection_descriptor_invalid".into())
+                        })?;
+                Ok(sha256_hex(&bytes))
+            }
+        }
+    }
+
     pub(crate) fn vault_metadata(&self) -> Result<&VaultMetadata, AppError> {
+        if !matches!(self.storage_identity()?, StorageIdentity::Encrypted(_)) {
+            return Err(AppError::Config("sync.vault_metadata_required".into()));
+        }
         self.vault
             .as_ref()
             .ok_or_else(|| AppError::Config("sync.vault_metadata_required".into()))
@@ -275,7 +329,7 @@ pub(crate) fn build_local_snapshot(
     let _skill_state_guard = skill_state_read_guard();
 
     // Export database to SQL string
-    let (sql_string, vault) = db.export_sync_snapshot()?;
+    let (sql_string, identity) = db.export_sync_storage_snapshot()?;
     let db_sql = sql_string.into_bytes();
 
     // Pack skills into deterministic ZIP
@@ -308,17 +362,26 @@ pub(crate) fn build_local_snapshot(
         },
     );
 
-    let snapshot_id = compute_snapshot_id(&artifacts, &vault);
-    let manifest = SyncManifest {
+    let (version, vault, storage) = match identity {
+        StorageIdentity::Encrypted(metadata) => (PROTOCOL_VERSION, Some(*metadata), None),
+        StorageIdentity::Plaintext(identity) => (
+            PLAINTEXT_PROTOCOL_VERSION,
+            None,
+            Some(SnapshotStorage::Plaintext { identity }),
+        ),
+    };
+    let mut manifest = SyncManifest {
         format: PROTOCOL_FORMAT.to_string(),
-        version: PROTOCOL_VERSION,
+        version,
         db_compat_version: Some(DB_COMPAT_VERSION),
         device_name: detect_system_device_name().unwrap_or_else(|| "Unknown Device".to_string()),
         created_at: Utc::now().to_rfc3339(),
         artifacts,
-        snapshot_id,
-        vault: Some(vault),
+        snapshot_id: String::new(),
+        vault,
+        storage,
     };
+    manifest.snapshot_id = manifest.expected_snapshot_id()?;
     let manifest_bytes =
         serde_json::to_vec_pretty(&manifest).map_err(|e| AppError::JsonSerialize { source: e })?;
     let manifest_hash = sha256_hex(&manifest_bytes);
@@ -365,6 +428,39 @@ pub(crate) fn validate_upload_metadata(
     Ok(())
 }
 
+/// Source admission is shared by both transports; plaintext descriptors are
+/// consistency metadata, not evidence of cryptographic authentication.
+pub(crate) fn validate_upload_storage(
+    local: &SyncManifest,
+    remote: &SyncManifest,
+) -> Result<(), AppError> {
+    match (local.storage_identity()?, remote.storage_identity()?) {
+        (StorageIdentity::Encrypted(local), StorageIdentity::Encrypted(remote)) => {
+            validate_upload_metadata(&local, &remote)
+        }
+        _ => Ok(()), // Original receipt and strong-ETag CAS still authorize publication.
+    }
+}
+
+pub(crate) fn parse_manifest(bytes: &[u8]) -> Result<SyncManifest, AppError> {
+    // Serde's type diagnostics can quote untrusted plaintext field contents.
+    serde_json::from_slice(bytes).map_err(|_| AppError::Config("sync.manifest_invalid".into()))
+}
+
+pub(crate) fn source_protection_view(
+    manifest: &SyncManifest,
+    layout: RemoteLayout,
+) -> (bool, Option<&'static str>, bool) {
+    if validate_manifest_compat(manifest, layout).is_err() {
+        return (false, None, false);
+    }
+    match manifest.storage_identity() {
+        Ok(StorageIdentity::Encrypted(_)) => (true, Some("encrypted"), true),
+        Ok(StorageIdentity::Plaintext(_)) => (true, Some("plaintext"), false),
+        Err(_) => (false, None, false),
+    }
+}
+
 pub(crate) fn effective_db_compat_version(
     manifest: &SyncManifest,
     layout: RemoteLayout,
@@ -381,17 +477,17 @@ pub(crate) fn validate_manifest_compat(
     if manifest.format != PROTOCOL_FORMAT {
         return Err(localized(
             "sync.manifest_format_incompatible",
-            format!("远端 manifest 格式不兼容: {}", manifest.format),
-            format!(
-                "Remote manifest format is incompatible: {}",
-                manifest.format
-            ),
+            "远端 manifest 格式不兼容",
+            "Remote manifest format is incompatible.",
         ));
     }
     if layout == RemoteLayout::Legacy || manifest.version == LEGACY_PROTOCOL_VERSION {
         return Err(AppError::Config("sync.legacy_import_required".into()));
     }
-    if manifest.version != PROTOCOL_VERSION {
+    if !matches!(
+        manifest.version,
+        PROTOCOL_VERSION | PLAINTEXT_PROTOCOL_VERSION
+    ) {
         return Err(AppError::Config(
             "sync.manifest_version_incompatible".into(),
         ));
@@ -408,12 +504,13 @@ pub(crate) fn validate_manifest_compat(
             "sync.manifest_db_version_incompatible".into(),
         ));
     }
-    let vault = manifest.vault_metadata()?;
-    if !vault
-        .recovery_input_available()
-        .map_err(crate::secrets::inventory::secret_error)?
-    {
-        return Err(AppError::Config("sync.recovery_password_required".into()));
+    if let StorageIdentity::Encrypted(vault) = manifest.storage_identity()? {
+        if !vault
+            .recovery_input_available()
+            .map_err(crate::secrets::inventory::secret_error)?
+        {
+            return Err(AppError::Config("sync.recovery_password_required".into()));
+        }
     }
     snapshot_artifact_path(manifest, REMOTE_DB_SQL)?;
     Ok(())
@@ -463,18 +560,11 @@ pub(crate) fn verify_artifact(
     if actual_hash != meta.sha256 {
         return Err(localized(
             "sync.artifact_hash_mismatch",
-            format!(
-                "artifact {artifact_name} SHA256 校验失败 (expected: {}..., got: {}...)",
-                meta.sha256.get(..8).unwrap_or(&meta.sha256),
-                actual_hash.get(..8).unwrap_or(&actual_hash),
-            ),
-            format!(
-                "Artifact {artifact_name} SHA256 verification failed (expected: {}..., got: {}...)",
-                meta.sha256.get(..8).unwrap_or(&meta.sha256),
-                actual_hash.get(..8).unwrap_or(&actual_hash),
-            ),
+            "同步文件校验失败",
+            "Sync artifact integrity check failed.",
         ));
     }
+
     Ok(())
 }
 
@@ -514,7 +604,7 @@ pub(crate) fn apply_snapshot(
     )
 }
 
-fn apply_snapshot_with_store(
+pub(crate) fn apply_snapshot_with_store(
     db: &crate::database::Database,
     manifest: &SyncManifest,
     db_sql: &[u8],
@@ -522,11 +612,27 @@ fn apply_snapshot_with_store(
     store: &dyn crate::secrets::key_store::KeyStore,
 ) -> Result<(), AppError> {
     validate_manifest_compat(manifest, RemoteLayout::Current)?;
-    let next = db.secrets.read()?.encrypted()?.clone();
+    let source_identity = manifest.storage_identity()?;
     let sql =
         std::str::from_utf8(db_sql).map_err(|_| AppError::Config("sync.sql_not_utf8".into()))?;
+    if let StorageIdentity::Plaintext(identity) = &source_identity {
+        return install_storage_content(
+            db,
+            sql,
+            &source_identity,
+            &StorageContext::Plaintext(identity.clone()),
+            skills_zip,
+        );
+    }
+    let next = db.secrets.read()?.encrypted()?.clone();
     if crate::secrets::protection::read(db.secrets.root())?.is_some() {
-        return install_storage_content(db, sql, manifest.vault_metadata()?, &next, skills_zip);
+        return install_storage_content(
+            db,
+            sql,
+            &source_identity,
+            &StorageContext::from(next),
+            skills_zip,
+        );
     }
     let staged = db.validate_sync_snapshot_for_current(sql, manifest.vault_metadata()?, &next)?;
     install_sync_snapshot(
@@ -565,18 +671,15 @@ pub(crate) fn restore_from_sync(
             .ok_or_else(|| AppError::Config("sync.artifact_missing".into()))?;
         verify_artifact(bytes, name, meta)?;
     }
-    let next = authenticate_restore_source(snapshot.manifest.vault_metadata()?, password)?;
+    let source_identity = snapshot.manifest.storage_identity()?;
+    let source = authenticate_storage_restore_source(&source_identity, password)?;
     let sql = std::str::from_utf8(&snapshot.db_sql)
         .map_err(|_| AppError::Config("sync.sql_not_utf8".into()))?;
-    if crate::secrets::protection::read(db.secrets.root())?.is_some() {
-        return install_storage_content(
-            db,
-            sql,
-            snapshot.manifest.vault_metadata()?,
-            &next,
-            &snapshot.skills_zip,
-        );
+    if source.is_plaintext() || crate::secrets::protection::read(db.secrets.root())?.is_some() {
+        return install_storage_content(db, sql, &source_identity, &source, &snapshot.skills_zip);
     }
+    // The original unselected legacy encrypted adoption path remains unchanged.
+    let next = source.encrypted()?.clone();
     let staged =
         db.validate_sync_snapshot_for_current(sql, snapshot.manifest.vault_metadata()?, &next)?;
     install_sync_snapshot(
@@ -591,11 +694,28 @@ pub(crate) fn restore_from_sync(
 }
 
 /// Source authentication only; installation remains with the original generation owner.
+fn authenticate_storage_restore_source(
+    identity: &StorageIdentity,
+    input: &str,
+) -> Result<StorageContext, AppError> {
+    match identity {
+        StorageIdentity::Encrypted(metadata) => {
+            authenticate_restore_source(metadata, input).map(StorageContext::from)
+        }
+        StorageIdentity::Plaintext(identity) => {
+            if !input.is_empty() {
+                return Err(AppError::Config("sync.source_input_not_required".into()));
+            }
+            Ok(StorageContext::Plaintext(identity.clone()))
+        }
+    }
+}
+
 fn authenticate_restore_source(
     metadata: &VaultMetadata,
-    password: &str,
+    input: &str,
 ) -> Result<crate::secrets::VaultContext, AppError> {
-    crate::secrets::VaultContext::from_recovery_input(metadata.clone(), password)
+    crate::secrets::VaultContext::from_recovery_input(metadata.clone(), input)
         .map_err(crate::secrets::inventory::secret_error)
 }
 
@@ -603,14 +723,20 @@ fn authenticate_restore_source(
 fn install_storage_content(
     db: &crate::database::Database,
     sql: &str,
-    source: &VaultMetadata,
-    authenticated_source: &crate::secrets::VaultContext,
+    source: &StorageIdentity,
+    source_context: &StorageContext,
     skills_zip: &[u8],
 ) -> Result<(), AppError> {
     let incoming = {
         let current = db.secrets.read()?;
         crate::secrets::protection::validate_runtime_storage(db.secrets.root(), &current)?;
-        db.prepare_sync_snapshot_for_storage(sql, source, authenticated_source, &current, &current)?
+        db.prepare_sync_storage_snapshot_for_storage(
+            sql,
+            source,
+            source_context,
+            &current,
+            &current,
+        )?
     };
     let prepared = super::webdav_sync::archive::stage_skills_zip(skills_zip)?;
     let location = crate::settings::get_skill_storage_location();
@@ -618,7 +744,7 @@ fn install_storage_content(
     crate::secrets::transition::install_sync_content(
         db,
         incoming,
-        authenticated_source,
+        source_context,
         crate::secrets::transition::SkillsReplacement {
             source: prepared.source.clone(),
             location,
@@ -966,6 +1092,7 @@ mod tests {
             created_at: "2026-02-12T00:00:00Z".to_string(),
             snapshot_id: compute_snapshot_id(&artifacts, &test_vault_metadata()),
             vault: Some(test_vault_metadata()),
+            storage: None,
             artifacts,
         }
     }
@@ -1121,191 +1248,15 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) mod test_remote;
+
+#[cfg(any(test, feature = "test-hooks"))]
 mod publication_tests {
+    use super::test_remote::TestRemote;
     use super::*;
-    use axum::{
-        body::Bytes,
-        extract::State,
-        http::{HeaderMap, Method, StatusCode, Uri},
-        response::{IntoResponse, Response},
-        routing::any,
-        Router,
-    };
-    use std::{
-        future::IntoFuture,
-        sync::{Arc, Mutex},
-    };
 
-    #[derive(Default)]
-    struct StoredObject {
-        body: Vec<u8>,
-        revision: u64,
-    }
-    #[derive(Default)]
-    struct Store {
-        objects: BTreeMap<String, StoredObject>,
-        ignore_conditions: bool,
-        race_on_manifest_publish: bool,
-    }
-
-    async fn object(
-        State(state): State<Arc<Mutex<Store>>>,
-        method: Method,
-        uri: Uri,
-        headers: HeaderMap,
-        body: Bytes,
-    ) -> Response {
-        let mut store = state.lock().unwrap();
-        if store.race_on_manifest_publish
-            && method == Method::PUT
-            && uri.path().ends_with("/manifest.json")
-            && headers.contains_key("if-match")
-        {
-            store.objects.get_mut(uri.path()).unwrap().revision += 1;
-            return StatusCode::PRECONDITION_FAILED.into_response();
-        }
-        let current = store.objects.get(uri.path());
-        if method == Method::GET || method == Method::HEAD {
-            return match current {
-                Some(object) => (
-                    StatusCode::OK,
-                    [("etag", format!("\"{}\"", object.revision))],
-                    object.body.clone(),
-                )
-                    .into_response(),
-                None => StatusCode::NOT_FOUND.into_response(),
-            };
-        }
-        let etag = current.map(|o| format!("\"{}\"", o.revision));
-        if !store.ignore_conditions
-            && (headers.get("if-none-match").is_some_and(|v| v == "*") && current.is_some()
-                || headers
-                    .get("if-match")
-                    .is_some_and(|v| Some(v.as_bytes()) != etag.as_ref().map(|e| e.as_bytes())))
-        {
-            return StatusCode::PRECONDITION_FAILED.into_response();
-        }
-        if method == Method::DELETE {
-            store.objects.remove(uri.path());
-            return StatusCode::NO_CONTENT.into_response();
-        }
-        let revision = current.map_or(1, |o| o.revision + 1);
-        store.objects.insert(
-            uri.path().into(),
-            StoredObject {
-                body: body.to_vec(),
-                revision,
-            },
-        );
-        (StatusCode::CREATED, [("etag", format!("\"{revision}\""))]).into_response()
-    }
-
-    struct TestRemote {
-        use_s3: bool,
-        endpoint: String,
-        state: Arc<Mutex<Store>>,
-        server: tokio::task::JoinHandle<()>,
-    }
-    impl Drop for TestRemote {
-        fn drop(&mut self) {
-            self.server.abort();
-        }
-    }
-    impl TestRemote {
-        async fn new(use_s3: bool) -> Self {
-            let state = Arc::new(Mutex::new(Store::default()));
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let endpoint = format!("http://{}", listener.local_addr().unwrap());
-            let app = Router::new()
-                .fallback(any(object))
-                .with_state(state.clone());
-            let server = tokio::spawn(async move {
-                axum::serve(listener, app).into_future().await.unwrap();
-            });
-            Self {
-                use_s3,
-                endpoint,
-                state,
-                server,
-            }
-        }
-        fn creds(&self) -> super::super::s3::S3Credentials {
-            super::super::s3::S3Credentials {
-                endpoint: self.endpoint.clone(),
-                bucket: "bucket".into(),
-                region: "test".into(),
-                access_key_id: "test".into(),
-                secret_access_key: "test".into(),
-            }
-        }
-        async fn artifact(&self, path: &str, bytes: &[u8]) -> Result<(), AppError> {
-            if self.use_s3 {
-                super::super::s3::put_object(
-                    &self.creds(),
-                    path,
-                    bytes.to_vec(),
-                    "application/octet-stream",
-                )
-                .await
-            } else {
-                super::super::webdav::put_bytes(
-                    &format!("{}/{path}", self.endpoint),
-                    &super::super::webdav::auth_from_credentials("test", "test"),
-                    bytes.to_vec(),
-                    "application/octet-stream",
-                )
-                .await
-            }
-        }
-        async fn publish(
-            &self,
-            path: &str,
-            bytes: &[u8],
-            condition: &PutCondition,
-        ) -> Result<Option<String>, AppError> {
-            if self.use_s3 {
-                super::super::s3::put_object_conditional(
-                    &self.creds(),
-                    path,
-                    bytes.to_vec(),
-                    "application/json",
-                    condition,
-                )
-                .await
-            } else {
-                super::super::webdav::put_bytes_conditional(
-                    &format!("{}/{path}", self.endpoint),
-                    &super::super::webdav::auth_from_credentials("test", "test"),
-                    bytes.to_vec(),
-                    "application/json",
-                    condition,
-                )
-                .await
-            }
-        }
-        async fn read(&self, path: &str) -> Vec<u8> {
-            if self.use_s3 {
-                super::super::s3::get_object(&self.creds(), path, 4096)
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .0
-            } else {
-                super::super::webdav::get_bytes(
-                    &format!("{}/{path}", self.endpoint),
-                    &super::super::webdav::auth_from_credentials("test", "test"),
-                    4096,
-                )
-                .await
-                .unwrap()
-                .unwrap()
-                .0
-            }
-        }
-    }
-
-    #[tokio::test]
+    #[cfg_attr(test, tokio::test)]
     async fn conditional_delete_and_head_work_for_both_transports() {
         use super::super::sync_cleanup::DeleteResult;
         for use_s3 in [false, true] {
@@ -1346,7 +1297,7 @@ mod publication_tests {
         }
     }
 
-    #[tokio::test]
+    #[cfg_attr(test, tokio::test)]
     async fn publication_artifact_cannot_overwrite_an_existing_snapshot() {
         for use_s3 in [false, true] {
             let remote = TestRemote::new(use_s3).await;
@@ -1357,7 +1308,7 @@ mod publication_tests {
         }
     }
 
-    #[tokio::test]
+    #[cfg_attr(test, tokio::test)]
     async fn publication_losing_writer_preserves_winners_downloadable_snapshot() {
         for use_s3 in [false, true] {
             let remote = TestRemote::new(use_s3).await;
@@ -1395,8 +1346,8 @@ mod publication_tests {
         }
     }
 
-    #[tokio::test]
-    #[serial_test::serial]
+    #[cfg_attr(test, tokio::test)]
+    #[cfg_attr(test, serial_test::serial)]
     async fn encrypted_sync_losing_cas_keeps_local_database_skills_and_receipt() {
         let home = crate::secrets::testing::TestHome::new().unwrap();
         std::fs::create_dir_all(home.path().join(".cc-switch")).unwrap();
@@ -1489,7 +1440,7 @@ mod publication_tests {
         }
     }
 
-    #[tokio::test]
+    #[cfg_attr(test, tokio::test)]
     async fn publication_probes_reject_backends_that_ignore_conditions() {
         for use_s3 in [false, true] {
             let remote = TestRemote::new(use_s3).await;
@@ -1511,7 +1462,7 @@ mod publication_tests {
         }
     }
 
-    #[test]
+    #[cfg_attr(test, test)]
     fn publication_admission_rejects_stale_or_unversioned_heads() {
         let hash = sha256_hex(b"current");
         assert!(publication_condition(Some((b"newer", Some("\"2\""))), Some(&hash)).is_err());
@@ -1529,7 +1480,7 @@ mod publication_tests {
         ));
     }
 
-    #[test]
+    #[cfg_attr(test, test)]
     fn publication_artifact_paths_bind_downloads_to_manifest_content() {
         let artifacts = BTreeMap::from([(
             REMOTE_DB_SQL.into(),
@@ -1546,6 +1497,7 @@ mod publication_tests {
             created_at: "test".into(),
             snapshot_id: compute_snapshot_id(&artifacts, &test_vault_metadata()),
             vault: Some(test_vault_metadata()),
+            storage: None,
             artifacts,
         };
         let first = snapshot_artifact_path(&manifest, REMOTE_DB_SQL).unwrap();
@@ -1558,6 +1510,22 @@ mod publication_tests {
         );
         manifest.snapshot_id = "../../manifest.json".into();
         assert!(snapshot_artifact_path(&manifest, REMOTE_DB_SQL).is_err());
+    }
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn run_controls(case: &str) {
+        match case {
+            "immutable_artifact" => {
+                crate::rt::block_on(publication_artifact_cannot_overwrite_an_existing_snapshot())
+            }
+            "cas_loser" => crate::rt::block_on(
+                publication_losing_writer_preserves_winners_downloadable_snapshot(),
+            ),
+            "conditions" => {
+                crate::rt::block_on(publication_probes_reject_backends_that_ignore_conditions())
+            }
+            "stale_receipt" => publication_admission_rejects_stale_or_unversioned_heads(),
+            _ => panic!("unknown original publication control"),
+        }
     }
 }
 
@@ -1673,6 +1641,7 @@ mod adoption_tests {
             snapshot_id: compute_snapshot_id(&artifacts, &metadata),
             artifacts,
             vault: Some(metadata),
+            storage: None,
         };
         DownloadedSnapshot {
             manifest_hash: sha256_hex(&serde_json::to_vec(&manifest).unwrap()),
@@ -2150,4 +2119,9 @@ pub(crate) fn verify_sync_admission_case(case: &str) {
         "schema" => adoption_tests::upstream4_receiver_rejects_mixed_future_and_forged_images_before_mutation(),
         _ => panic!("unknown original sync admission case"),
     }
+}
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn verify_original_publication_control(case: &str) {
+    publication_tests::run_controls(case);
 }

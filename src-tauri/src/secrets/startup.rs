@@ -889,23 +889,41 @@ impl StartupCoordinator {
             .get()
             .cloned()
             .ok_or("secret.no_pending_operation")?;
-        let (status, can_recover, restart_required) = match (&*inspection, *phase) {
+        use super::transition::RecoveryInputKind;
+        let (status, can_recover, restart_required, input_kind) = match (&*inspection, *phase) {
             (
                 super::upgrade::UpgradeInspection::RecoveryRequired(evidence),
                 Phase::Locked | Phase::UpgradeReview,
-            ) if evidence.verify_unchanged(&self.root, &token).is_ok() => ("pending", true, false),
+            ) if evidence.verify_unchanged(&self.root, &token).is_ok() => {
+                match evidence.input_kind(&self.root) {
+                    Ok(kind) => ("pending", true, false, kind),
+                    Err(_) => (
+                        "verification_required",
+                        false,
+                        true,
+                        RecoveryInputKind::None,
+                    ),
+                }
+            }
             (super::upgrade::UpgradeInspection::Stable(_), Phase::Recovered)
                 if inspection.verify_unchanged(&self.root).is_ok() =>
             {
-                ("completed", false, true)
+                ("completed", false, true, RecoveryInputKind::None)
             }
-            _ => ("verification_required", false, true),
+            _ => (
+                "verification_required",
+                false,
+                true,
+                RecoveryInputKind::None,
+            ),
         };
         Ok(StartupRecoveryView {
             token,
             status,
             can_recover,
             restart_required,
+            input_required: input_kind.required(),
+            input_kind,
         })
     }
 
@@ -978,6 +996,8 @@ pub(crate) struct StartupRecoveryView {
     status: &'static str,
     can_recover: bool,
     restart_required: bool,
+    input_required: bool,
+    input_kind: super::transition::RecoveryInputKind,
 }
 
 #[cfg(feature = "gui")]
@@ -1920,44 +1940,138 @@ mod tests {
 
     #[cfg_attr(test, test)]
     pub(super) fn recovery_query_does_not_authenticate_or_mutate_and_stale_action_is_refused() {
+        use super::super::{
+            key_store::{KeyStore, KeyStoreError},
+            transition::RecoveryInputKind,
+            upgrade::review_tests::snapshot,
+            VaultContext,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct CountingKeyStore(AtomicUsize);
+        impl KeyStore for CountingKeyStore {
+            fn load(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, KeyStoreError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(KeyStoreError::Unavailable)
+            }
+            fn save(&self, _: &str, _: &str, _: &[u8]) -> Result<(), KeyStoreError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(KeyStoreError::Unavailable)
+            }
+            fn remove(&self, _: &str, _: &str) -> Result<(), KeyStoreError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(KeyStoreError::Unavailable)
+            }
+        }
+
         let dir = super::super::testing::tempdir().unwrap();
         let root = dir.path().join("source");
         crate::config_file_io::ensure_private_directory(&root).unwrap();
         let marker = root.join(super::super::transition::INTENT);
-        std::fs::write(&marker, b"unparsed generation fixture").unwrap();
+        let source = VaultContext::generate()
+            .unwrap()
+            .with_password("test recovery password")
+            .unwrap();
+        // Preview validates the public source descriptor, but must not open its
+        // manifest or authenticate a key before an explicit recovery action.
+        let descriptor = serde_json::json!({
+            "version": 3,
+            "kind": "sameStorageContent",
+            "id": uuid::Uuid::new_v4().to_string(),
+            "authentication": source.metadata(),
+            "manifest": "deliberately unopened recovery manifest",
+        });
+        let bytes = serde_json::to_vec(&descriptor).unwrap();
+        assert!(super::super::transition::is_content_record(&bytes).unwrap());
+        assert_eq!(
+            super::super::transition::content_recovery_input_kind(&root, &bytes).unwrap(),
+            RecoveryInputKind::Source
+        );
+        std::fs::write(&marker, bytes).unwrap();
         let device = crate::live::engine::DeviceStore::at(dir.path().join("device"));
         let inspected = super::super::upgrade::inspect(&root, &device).unwrap();
-        let coordinator = StartupCoordinator::new(root, inspected);
+        let coordinator = StartupCoordinator::new(root.clone(), inspected);
+        let store = CountingKeyStore::default();
         let before = std::fs::read(&marker).unwrap();
+        let before_tree = snapshot(dir.path());
         let view = coordinator.recovery_view().unwrap();
         assert_eq!(view.status, "pending");
         assert!(view.can_recover);
+        assert!(!view.restart_required);
+        assert!(view.input_required);
+        assert_eq!(view.input_kind, RecoveryInputKind::Source);
         assert_eq!(std::fs::read(&marker).unwrap(), before);
+        assert_eq!(snapshot(dir.path()), before_tree);
         assert!(coordinator.ensure_no_pending_recovery().is_err());
         assert_eq!(
             coordinator
-                .recover_operation(
-                    "stale token",
-                    "test recovery password",
-                    &super::super::testing::MemoryKeyStore::default()
-                )
+                .recover_operation("stale token", "test recovery password", &store)
                 .unwrap_err(),
             "upgrade.source_changed"
         );
         assert_eq!(std::fs::read(&marker).unwrap(), before);
+        assert_eq!(snapshot(dir.path()), before_tree);
         std::fs::write(&marker, b"another generation").unwrap();
+        let changed_tree = snapshot(dir.path());
         let changed = coordinator.recovery_view().unwrap();
         assert_eq!(changed.status, "verification_required");
         assert!(!changed.can_recover);
         assert!(changed.restart_required);
-        assert!(coordinator
-            .recover_operation(
-                &view.token,
-                "test recovery password",
-                &super::super::testing::MemoryKeyStore::default()
-            )
-            .is_err());
+        assert!(!changed.input_required);
+        assert_eq!(changed.input_kind, RecoveryInputKind::None);
+        assert_eq!(
+            coordinator
+                .recover_operation(&view.token, "test recovery password", &store)
+                .unwrap_err(),
+            "upgrade.source_changed"
+        );
         assert_eq!(std::fs::read(&marker).unwrap(), b"another generation");
+        assert_eq!(snapshot(dir.path()), changed_tree);
+        assert_eq!(store.0.load(Ordering::SeqCst), 0);
+
+        // The old non-JSON fixture is not a recoverable descriptor. Unknown or
+        // malformed content metadata must likewise fail closed, not guess an input.
+        for invalid in ["unparsed", "kind", "version", "authentication"] {
+            let bytes = if invalid == "unparsed" {
+                b"unparsed generation fixture".to_vec()
+            } else {
+                let mut invalid_descriptor = descriptor.clone();
+                invalid_descriptor[invalid] = match invalid {
+                    "kind" => "unknownContent".into(),
+                    "version" => 999.into(),
+                    "authentication" => serde_json::Value::Null,
+                    _ => unreachable!(),
+                };
+                serde_json::to_vec(&invalid_descriptor).unwrap()
+            };
+            std::fs::write(&marker, &bytes).unwrap();
+            let before = snapshot(dir.path());
+            let inspected = super::super::upgrade::inspect(&root, &device).unwrap();
+            let coordinator = StartupCoordinator::new(root.clone(), inspected);
+            let view = coordinator.recovery_view().unwrap();
+            assert_eq!(view.status, "verification_required", "{invalid}");
+            assert!(!view.can_recover && view.restart_required);
+            assert!(!view.input_required);
+            assert_eq!(view.input_kind, RecoveryInputKind::None);
+            assert!(coordinator.ensure_no_pending_recovery().is_err());
+            assert_eq!(
+                coordinator
+                    .recover_operation(&view.token, "test recovery password", &store)
+                    .unwrap_err(),
+                "secret.invalid_transition",
+                "{invalid}"
+            );
+            assert_eq!(std::fs::read(&marker).unwrap(), bytes);
+            assert_eq!(snapshot(dir.path()), before, "{invalid}");
+            assert_eq!(store.0.load(Ordering::SeqCst), 0);
+        }
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[cfg_attr(test, test)]

@@ -48,6 +48,58 @@ export type FrontendSettings = Settings & { visibleApps: VisibleApps };
  */
 export const PLAZA_VISIBLE_DEFAULT = false;
 
+function remoteSourceInputFields(value: Record<string, unknown>): {
+  protectionMode: "encrypted" | "plaintext" | null;
+  sourceInputRequired: boolean;
+} {
+  const hasMode = Object.hasOwn(value, "protectionMode");
+  const hasRequired = Object.hasOwn(value, "sourceInputRequired");
+  if (!hasMode && !hasRequired)
+    return { protectionMode: "encrypted", sourceInputRequired: true };
+  const mode = value.protectionMode,
+    required = value.sourceInputRequired;
+  if (
+    !hasMode ||
+    !hasRequired ||
+    typeof required !== "boolean" ||
+    !(
+      (value.compatible === true &&
+        ((mode === "encrypted" && required === true) ||
+          (mode === "plaintext" && required === false))) ||
+      (value.compatible === false && mode === null && required === false)
+    )
+  )
+    throw new Error("sync.invalid_remote_info");
+  return { protectionMode: mode, sourceInputRequired: required };
+}
+
+/** One decoder for both transport consumers; null never authorizes restoration. */
+export function remoteSnapshotSourceInputRequired(
+  snapshot: RemoteSnapshotInfo,
+): boolean | null {
+  if (snapshot.compatible !== true) return null;
+  try {
+    const fields = remoteSourceInputFields(
+      snapshot as unknown as Record<string, unknown>,
+    );
+    return fields.protectionMode === null ? null : fields.sourceInputRequired;
+  } catch {
+    return null;
+  }
+}
+
+function readRemoteSnapshotInfo(
+  value: unknown,
+): RemoteSnapshotInfo | { empty: true } {
+  if (typeof value !== "object" || value === null)
+    throw new Error("sync.invalid_remote_info");
+  if ("empty" in value && value.empty === true) return { empty: true };
+  if (!("compatible" in value) || typeof value.compatible !== "boolean")
+    throw new Error("sync.invalid_remote_info");
+  const fields = remoteSourceInputFields(value as Record<string, unknown>);
+  return { ...value, ...fields } as RemoteSnapshotInfo;
+}
+
 export const settingsApi = {
   setAppVisibility: (app: AppId, visible: boolean) =>
     invoke<VisibleApps>("set_app_visibility", { app, visible }),
@@ -232,7 +284,9 @@ export const settingsApi = {
   async webdavSyncFetchRemoteInfo(): Promise<
     RemoteSnapshotInfo | { empty: true }
   > {
-    return await invoke("webdav_sync_fetch_remote_info");
+    return readRemoteSnapshotInfo(
+      await invoke<unknown>("webdav_sync_fetch_remote_info"),
+    );
   },
 
   // ===== S3 Sync API =====
@@ -273,7 +327,9 @@ export const settingsApi = {
   },
 
   async s3SyncFetchRemoteInfo(): Promise<RemoteSnapshotInfo | { empty: true }> {
-    return await invoke("s3_sync_fetch_remote_info");
+    return readRemoteSnapshotInfo(
+      await invoke<unknown>("s3_sync_fetch_remote_info"),
+    );
   },
 
   async syncCurrentProvidersLive(): Promise<void> {
