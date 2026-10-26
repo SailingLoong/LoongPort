@@ -684,6 +684,92 @@ fn emit_download_progress(
     }
 }
 
+/// 下载路由的 reqwest 客户端：代理选择与探测一致（direct=绕过代理，
+/// 否则用清单声明的代理）。不设总超时——下载总时限由 bounded_download 统一执行。
+fn route_http_client(update: &Update, route: &policy::DownloadRoute) -> Option<reqwest::Client> {
+    let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(10));
+    if route.direct {
+        builder = builder.no_proxy();
+    } else if let Some(proxy) = &update.proxy {
+        builder = builder.proxy(reqwest::Proxy::all(proxy.as_str()).ok()?);
+    }
+    builder.build().ok()
+}
+
+/// 续传请求的 Range 头值；offset 为已持有的字节数。
+fn range_header_value(offset: usize) -> String {
+    format!("bytes={offset}-")
+}
+
+/// ranged 响应的三种处置：续传追加、服务器忽略 Range（整段重来）、官方源撤回。
+fn range_status_plan(status: u16) -> &'static str {
+    match status {
+        206 => "resume",
+        200 => "restart",
+        410 => "withdrawn",
+        _ => "unreachable",
+    }
+}
+
+/// 自研 ranged 拉取：从 `partial`（上次尝试留下的字节）继续下载同一资产。
+/// 组装完成后由调用方做 minisign 验签。网络失败时 `partial` 保留已收字节，
+/// 供下一条路由继续续传。
+enum RouteFetchError {
+    /// 官方源返回 410：版本已撤回，所有路由立即停止。
+    Withdrawn,
+    /// 普通失败（网络/状态码），消息面向诊断日志。
+    Failed(String),
+}
+
+async fn fetch_route_with_resume(
+    update: &Update,
+    route: &policy::DownloadRoute,
+    partial: &mut Vec<u8>,
+    progress: &watch::Sender<u64>,
+    mut emit: impl FnMut(u64, Option<u64>),
+) -> Result<(), RouteFetchError> {
+    let client = route_http_client(update, route)
+        .ok_or_else(|| RouteFetchError::Failed("无法构造 HTTP 客户端".into()))?;
+    let mut request = client.get(&route.url).headers(update.headers.clone());
+    if !partial.is_empty() {
+        request = request.header(reqwest::header::RANGE, range_header_value(partial.len()));
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|e| RouteFetchError::Failed(format!("请求失败: {e}")))?;
+    let status = response.status().as_u16();
+    match range_status_plan(status) {
+        "resume" => {}
+        "restart" => partial.clear(),
+        "withdrawn" if route.source == "official" => return Err(RouteFetchError::Withdrawn),
+        _ => {
+            return Err(RouteFetchError::Failed(format!(
+                "下载请求返回 HTTP {status}"
+            )))
+        }
+    }
+    // UI 的 total 用绝对值（偏移 + 本段长度），续传路由的进度因此跨路由连续。
+    let total = response
+        .content_length()
+        .map(|length| partial.len() as u64 + length);
+    let mut stream = response;
+    loop {
+        let Some(chunk) = stream
+            .chunk()
+            .await
+            .map_err(|e| RouteFetchError::Failed(format!("下载中断: {e}")))?
+        else {
+            return Ok(());
+        };
+        // bounded_download 的 idle 预算按绝对进度重置：续传路由从
+        // partial.len() 起算，切换后不会因「前 N 字节瞬间到账」误判停滞。
+        partial.extend_from_slice(&chunk);
+        progress.send_replace(partial.len() as u64);
+        emit(partial.len() as u64, total);
+    }
+}
+
 async fn probe_download_route(
     update: &Update,
     route: &policy::DownloadRoute,
@@ -790,6 +876,10 @@ async fn download_update_bytes(
         .inspect_err(|_| diagnostic.finish("failed", Some("no_routes"), None))
         .map_err(str::to_string)?;
     let mut failures = Vec::new();
+    // 跨路由续传缓冲：一条路由失败/停滞时保留已收字节，下一条路由带
+    // Range: bytes=N- 续续下载同一资产，切源不再从零开始。组装完成后
+    // 统一走 minisign 验签，截断或拼接错误在这里被拒。
+    let mut partial: Vec<u8> = Vec::new();
     for (index, route) in routes.into_iter().enumerate() {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
@@ -805,7 +895,7 @@ async fn download_update_bytes(
                 "switchingSource"
             },
             route.source,
-            0,
+            partial.len() as u64,
             None,
         );
         let route_event = |outcome| {
@@ -824,73 +914,75 @@ async fn download_update_bytes(
                 .field("direct", route.direct)
         };
         let mut route_diagnostic = UpdateDiagnostic::new(route_event);
-        let mut candidate = update.clone();
-        candidate.download_url = tauri::Url::parse(&route.url).map_err(|e| {
-            route_diagnostic.finish("failed", Some("invalid_url"), None);
-            diagnostic.finish("failed", Some("invalid_url"), None);
-            e.to_string()
-        })?;
-        candidate.no_proxy = route.direct;
-        candidate.timeout = Some(remaining);
-        let (progress, receiver) = watch::channel(0_u64);
-        let mut downloaded = 0_u64;
-        let download = candidate.download(
-            |length, total| {
-                downloaded = downloaded.saturating_add(length as u64);
-                progress.send_replace(downloaded);
-                emit_download_progress(app, id, "downloading", route.source, downloaded, total);
-            },
-            || {},
-        );
-        match policy::bounded_download(download, receiver, policy::DOWNLOAD_IDLE_BUDGET, remaining)
+        let (progress, receiver) = watch::channel(partial.len() as u64);
+        let source = route.source;
+        let emit_app = app.clone();
+        let fetch = async {
+            fetch_route_with_resume(
+                update,
+                &route,
+                &mut partial,
+                &progress,
+                |downloaded, total| {
+                    emit_download_progress(&emit_app, id, "downloading", source, downloaded, total);
+                },
+            )
+            .await
+        };
+        match policy::bounded_download(fetch, receiver, policy::DOWNLOAD_IDLE_BUDGET, remaining)
             .await
         {
-            Ok(bytes) => {
-                route_diagnostic.finish("completed", None, Some(bytes.len() as u64));
-                diagnostic.finish("completed", None, Some(bytes.len() as u64));
-                return Ok(bytes);
+            Ok(()) => {
+                // 组装完成：验签把关（与插件 download() 内联验签等价；装机前的
+                // 启动闸门还会再验一次）。失败按校验错误硬停，不换路由重试。
+                let verified = match updater_pubkey(app) {
+                    None => Err("缺少更新公钥，无法校验安装包".to_string()),
+                    Some(pubkey) => verify_installer_signature(
+                        &partial,
+                        &update.signature,
+                        &pubkey,
+                        &update.version,
+                        require_signed_version(app),
+                    ),
+                };
+                match verified {
+                    Ok(()) => {
+                        route_diagnostic.finish("completed", None, Some(partial.len() as u64));
+                        diagnostic.finish("completed", None, Some(partial.len() as u64));
+                        return Ok(std::mem::take(&mut partial));
+                    }
+                    Err(error) => {
+                        route_diagnostic.finish("failed", Some("signature_verification"), None);
+                        diagnostic.finish("failed", Some("verification_or_download"), None);
+                        return Err(format!("更新校验或下载失败，未安装：{error}"));
+                    }
+                }
+            }
+            Err(DownloadFailure::Operation(RouteFetchError::Withdrawn)) => {
+                route_diagnostic.finish("failed", Some("withdrawn"), None);
+                diagnostic.finish("failed", Some("withdrawn"), None);
+                return Err("该版本已撤回，请检查更新版本".into());
+            }
+            Err(DownloadFailure::Operation(RouteFetchError::Failed(error))) => {
+                route_diagnostic.finish("failed", Some("network"), Some(partial.len() as u64));
+                failures.push(format!("{}：{error}", route.source));
             }
             Err(DownloadFailure::TimedOut) => {
-                route_diagnostic.finish("failed", Some("total_timeout"), Some(downloaded));
+                route_diagnostic.finish(
+                    "failed",
+                    Some("total_timeout"),
+                    Some(partial.len() as u64),
+                );
                 diagnostic.finish("failed", Some("total_timeout"), None);
                 return Err("更新下载已达总时限，请换源重试或从官网下载".into());
             }
             Err(DownloadFailure::Stalled) => {
-                route_diagnostic.finish("failed", Some("stalled"), Some(downloaded));
+                route_diagnostic.finish("failed", Some("stalled"), Some(partial.len() as u64));
                 failures.push(format!("{}：60秒无下载进展", route.source))
             }
-            Err(DownloadFailure::Operation(error)) => {
-                // Updater 2.13.2 exposes HTTP status only in this typed Network
-                // variant. Match its exact generated 410 message, never an
-                // arbitrary error substring, and never bypass a withdrawal.
-                let withdrawn = matches!(&error, tauri_plugin_updater::Error::Network(message)
-                    if message == &format!("Download request failed with status: {}", reqwest::StatusCode::GONE));
-                let category = if withdrawn {
-                    "withdrawn"
-                } else {
-                    match &error {
-                        tauri_plugin_updater::Error::Reqwest(_)
-                        | tauri_plugin_updater::Error::Network(_) => "network",
-                        _ => "verification_or_download",
-                    }
-                };
-                route_diagnostic.finish("failed", Some(category), Some(downloaded));
-                if withdrawn {
-                    diagnostic.finish("failed", Some("withdrawn"), None);
-                    return Err("该版本已撤回，请检查更新版本".into());
-                }
-                if !matches!(
-                    &error,
-                    tauri_plugin_updater::Error::Reqwest(_)
-                        | tauri_plugin_updater::Error::Network(_)
-                ) {
-                    diagnostic.finish("failed", Some("verification_or_download"), None);
-                    return Err(format!("更新校验或下载失败，未安装：{error}"));
-                }
-                failures.push(format!("{}：{error}", route.source));
-            }
         }
-        // The previous full download future was dropped before the next starts.
+        // The previous fetch future was dropped before the next starts; partial
+        // carries everything received so far for the next route's Range resume.
     }
     diagnostic.finish("failed", Some("routes_exhausted"), None);
     Err(format!(
@@ -1330,6 +1422,29 @@ mod update_diagnostic_tests {
                 *outcomes.borrow(),
                 ["started", terminal.unwrap_or("dropped")]
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod range_resume_tests {
+    use super::{range_header_value, range_status_plan};
+
+    #[test]
+    fn range_headers_continue_from_the_bytes_already_held() {
+        assert_eq!(range_header_value(0), "bytes=0-");
+        assert_eq!(range_header_value(1), "bytes=1-");
+        assert_eq!(range_header_value(53150625), "bytes=53150625-");
+    }
+
+    #[test]
+    fn range_status_plan_maps_resume_restart_withdrawal_and_failure() {
+        assert_eq!(range_status_plan(206), "resume");
+        // 服务器忽略 Range（免费 CDN 常见）：整段重来，依旧正确。
+        assert_eq!(range_status_plan(200), "restart");
+        assert_eq!(range_status_plan(410), "withdrawn");
+        for unreachable in [301, 403, 404, 429, 500, 503] {
+            assert_eq!(range_status_plan(unreachable), "unreachable");
         }
     }
 }
