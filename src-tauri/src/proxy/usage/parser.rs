@@ -6,6 +6,7 @@
 //! - Codex API (非流式和流式)
 //! - Gemini API (非流式和流式)
 
+use crate::proxy::providers::transform::chat_completion_body;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -292,6 +293,8 @@ impl TokenUsage {
     ///
     /// 注意：记录原始 input_tokens，费用计算时再减去 cached_tokens
     pub fn from_codex_response_auto(body: &Value) -> Option<Self> {
+        let body = chat_completion_body(body);
+        let body = body.as_ref();
         let usage = body.get("usage")?;
 
         // 检测格式：OpenAI 使用 prompt_tokens，Codex 使用 input_tokens
@@ -331,6 +334,9 @@ impl TokenUsage {
 
     /// 从 OpenAI Chat Completions API 响应解析 (prompt_tokens, completion_tokens)
     pub fn from_openai_response(body: &Value) -> Option<Self> {
+        // 包在 `data` 里的 Chat 响应（#5658）按解包后的字段取 usage / model / id
+        let body = chat_completion_body(body);
+        let body = body.as_ref();
         let usage = body.get("usage")?;
 
         // OpenAI 使用 prompt_tokens 和 completion_tokens
@@ -1022,6 +1028,29 @@ mod tests {
         assert_eq!(usage.output_tokens, 500);
         assert_eq!(usage.cache_read_tokens, 200);
         assert_eq!(usage.model, Some("gpt-4o".to_string()));
+    }
+
+    #[test]
+    fn test_openai_response_reads_data_envelope() {
+        // #5658：包在 data 里的 Chat 响应也要记账
+        let body = json!({
+            "success": true,
+            "data": {
+                "id": "chatcmpl-wrapped",
+                "model": "relay/deepseek-v4.1-flash",
+                "choices": [{"message": {"role": "assistant", "content": "OK"}}],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 1}
+            }
+        });
+
+        for usage in [
+            TokenUsage::from_openai_response(&body).unwrap(),
+            TokenUsage::from_codex_response_auto(&body).unwrap(),
+        ] {
+            assert_eq!(usage.input_tokens, 12);
+            assert_eq!(usage.output_tokens, 1);
+            assert_eq!(usage.model.as_deref(), Some("relay/deepseek-v4.1-flash"));
+        }
     }
 
     #[test]
