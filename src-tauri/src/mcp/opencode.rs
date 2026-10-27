@@ -15,10 +15,11 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-use crate::app_config::{McpApps, McpServer, MultiAppConfig};
+use crate::app_config::{AppType, MultiAppConfig};
 use crate::error::AppError;
 use crate::opencode_config;
 
+use super::merge_imported_server;
 use super::validation::validate_server_spec;
 
 // ============================================================================
@@ -239,37 +240,9 @@ pub fn import_from_opencode(config: &mut MultiAppConfig) -> Result<usize, AppErr
             continue;
         }
 
-        if let Some(existing) = servers.get_mut(&id) {
-            // Existing server: just enable OpenCode app
-            if !existing.apps.opencode {
-                existing.apps.opencode = true;
-                changed += 1;
-                log::info!("MCP server '{id}' enabled for OpenCode");
-            }
-        } else {
-            // New server: default to only OpenCode enabled
-            servers.insert(
-                id.clone(),
-                McpServer {
-                    id: id.clone(),
-                    name: id.clone(),
-                    server: unified_spec,
-                    apps: McpApps {
-                        claude: false,
-                        codex: false,
-                        gemini: false,
-                        grokbuild: false,
-                        opencode: true,
-                        hermes: false,
-                    },
-                    description: None,
-                    homepage: None,
-                    docs: None,
-                    tags: Vec::new(),
-                },
-            );
+        if merge_imported_server(servers, &id, &unified_spec, &AppType::OpenCode) {
             changed += 1;
-            log::info!("Imported new MCP server '{id}' from OpenCode");
+            log::info!("MCP server '{id}' imported or enabled for OpenCode");
         }
     }
 

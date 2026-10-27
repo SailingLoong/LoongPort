@@ -5,10 +5,11 @@
 
 use serde_json::{json, Value};
 
-use crate::app_config::{McpApps, McpServer, MultiAppConfig};
+use crate::app_config::{AppType, MultiAppConfig};
 use crate::error::AppError;
 
 use super::codex::json_server_to_toml_table;
+use super::merge_imported_server;
 use super::validation::validate_server_spec;
 
 fn should_sync_grokbuild_mcp() -> bool {
@@ -102,28 +103,7 @@ pub fn import_from_grokbuild(config: &mut MultiAppConfig) -> Result<usize, AppEr
             continue;
         }
 
-        if let Some(existing) = servers.get_mut(id) {
-            if !existing.apps.grokbuild {
-                existing.apps.grokbuild = true;
-                changed += 1;
-            }
-        } else {
-            servers.insert(
-                id.clone(),
-                McpServer {
-                    id: id.clone(),
-                    name: id.clone(),
-                    server: spec,
-                    apps: McpApps {
-                        grokbuild: true,
-                        ..Default::default()
-                    },
-                    description: None,
-                    homepage: None,
-                    docs: None,
-                    tags: Vec::new(),
-                },
-            );
+        if merge_imported_server(servers, id, &spec, &AppType::GrokBuild) {
             changed += 1;
         }
     }

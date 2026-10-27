@@ -8,9 +8,10 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-use crate::app_config::{McpApps, McpConfig, McpServer, MultiAppConfig};
+use crate::app_config::{AppType, McpConfig, MultiAppConfig};
 use crate::error::AppError;
 
+use super::merge_imported_server;
 use super::validation::{extract_server_spec, validate_server_spec};
 
 fn should_sync_codex_mcp() -> bool {
@@ -232,37 +233,9 @@ pub fn import_from_codex(config: &mut MultiAppConfig) -> Result<usize, AppError>
                 continue;
             }
 
-            if let Some(existing) = servers.get_mut(id) {
-                // 已存在：仅启用 Codex 应用
-                if !existing.apps.codex {
-                    existing.apps.codex = true;
-                    changed += 1;
-                    log::info!("MCP 服务器 '{id}' 已启用 Codex 应用");
-                }
-            } else {
-                // 新建服务器：默认仅启用 Codex
-                servers.insert(
-                    id.clone(),
-                    McpServer {
-                        id: id.clone(),
-                        name: id.clone(),
-                        server: spec_v,
-                        apps: McpApps {
-                            claude: false,
-                            codex: true,
-                            gemini: false,
-                            grokbuild: false,
-                            opencode: false,
-                            hermes: false,
-                        },
-                        description: None,
-                        homepage: None,
-                        docs: None,
-                        tags: Vec::new(),
-                    },
-                );
+            if merge_imported_server(servers, id, &spec_v, &AppType::Codex) {
                 changed += 1;
-                log::info!("导入新 MCP 服务器 '{id}'");
+                log::info!("MCP server '{id}' imported or enabled for Codex");
             }
         }
         changed
