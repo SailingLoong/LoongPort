@@ -17,57 +17,119 @@ function job(name: string) {
   const end = lines.findIndex(
     (line, index) => index > start && /^  [\w-]+:/.test(line),
   );
-  return lines.slice(start + 1, end < 0 ? undefined : end).join("\n");
+  let block = lines.slice(start + 1, end < 0 ? undefined : end).join("\n");
+  // Resolve only the two CI whole-step-array aliases, not arbitrary YAML.
+  const alias = block.match(/^    steps: \*([a-z_]+)$/m);
+  if (alias) {
+    if (!["backend_archive_steps", "backend_test_steps"].includes(alias[1])) {
+      throw new Error(`Unexpected steps alias: ${alias[1]}`);
+    }
+    const anchorStart = lines.indexOf(`    steps: &${alias[1]}`);
+    if (anchorStart < 0) throw new Error(`Missing steps anchor: ${alias[1]}`);
+    const anchorEnd = lines.findIndex(
+      (line, index) => index > anchorStart && /^  [\w-]+:/.test(line),
+    );
+    const steps = lines
+      .slice(anchorStart + 1, anchorEnd < 0 ? undefined : anchorEnd)
+      .join("\n");
+    block = block.replace(alias[0], `    steps:\n${steps}`);
+  }
+  return block;
 }
 
+const backendTestJobs = [
+  "backend-tests-linux",
+  "backend-tests-windows",
+  "backend-tests-macos",
+];
+const backendBuildJobs = [
+  "backend-test-build-linux",
+  "backend-test-build-windows",
+  "backend-test-build-macos",
+];
+
 describe("CI manual verification entry point", () => {
-  it("pins the backend Node subprocess runtime before running Rust tests", () => {
-    const backend = job("backend-tests");
-    const setup = backend.indexOf("uses: actions/setup-node@v6");
-    expect(setup).toBeGreaterThanOrEqual(0);
-    expect(backend.slice(setup)).toMatch(/node-version-file: \.node-version/);
-    expect(setup).toBeLessThan(backend.indexOf("- name: Run tests"));
-    expect(backend).not.toMatch(/continue-on-error|--no-fail-fast/);
+  it("uses standard macOS 15 while preserving the original three-platform test matrix", () => {
+    expect(job("backend")).toContain(
+      "os: [ubuntu-22.04, windows-latest, macos-15]",
+    );
+    expect(workflow).not.toContain("macos-14");
+    const rows = [
+      ...workflow.matchAll(
+        /\{ os: ([^,]+), shard: (\d+), shards: (\d+), timeout: (\d+) \}/g,
+      ),
+    ].map((match) => match.slice(1));
+    expect(rows).toEqual([
+      ["ubuntu-22.04", "1", "2", "75"],
+      ["ubuntu-22.04", "2", "2", "75"],
+      ["windows-latest", "1", "4", "150"],
+      ["windows-latest", "2", "4", "150"],
+      ["windows-latest", "3", "4", "150"],
+      ["windows-latest", "4", "4", "150"],
+      ["macos-15", "1", "2", "90"],
+      ["macos-15", "2", "2", "90"],
+    ]);
+    expect(job("required-checks")).toContain("name: Required Checks");
+    expect(job("required-checks")).toContain("backend-windows-wsl2");
   });
 
-  it("checks the real pinned Node pipe and exports its exact executable", () => {
-    const backend = job("backend-tests");
-    const script = backend.match(
-      /node --input-type=module <<'NODE'\n([\s\S]+?)\n          NODE/,
-    );
-    expect(
-      script,
-      "backend Node preflight must execute before cargo",
-    ).not.toBeNull();
-    const directory = mkdtempSync(resolve(tmpdir(), "backend-node-preflight-"));
-    const environmentFile = resolve(directory, "github-env");
-    try {
-      const result = spawnSync(process.execPath, ["--input-type=module"], {
-        cwd: resolve(__dirname, "../.."),
-        input: script![1]
-          .split("\n")
-          .map((line) => line.slice(10))
-          .join("\n"),
-        env: { ...process.env, GITHUB_ENV: environmentFile },
-        encoding: "utf8",
-        timeout: 35_000,
-      });
-      expect(result.error).toBeUndefined();
-      expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toContain(
-        `Backend Node ${process.version}: ${process.execPath}`,
+  it.each(backendTestJobs)(
+    "pins %s Node subprocess runtime before Rust tests",
+    (name) => {
+      const backend = job(name);
+      const setup = backend.indexOf("uses: actions/setup-node@v6");
+      expect(setup).toBeGreaterThanOrEqual(0);
+      expect(backend.slice(setup)).toMatch(/node-version-file: \.node-version/);
+      expect(setup).toBeLessThan(backend.indexOf("- name: Run tests"));
+      expect(backend).not.toMatch(/continue-on-error|--no-fail-fast/);
+    },
+  );
+
+  it.each(backendTestJobs)(
+    "checks %s pinned Node pipe and exports its executable",
+    (name) => {
+      const backend = job(name);
+      const script = backend.match(
+        /node --input-type=module <<'NODE'\n([\s\S]+?)\n          NODE/,
       );
-      expect(result.stdout).toContain("Backend Node pipe preflight passed");
-      expect(readFileSync(environmentFile, "utf8")).toBe(
-        `QODER_HOST_NODE=${process.execPath}\n`,
+      expect(
+        script,
+        "backend Node preflight must execute before cargo",
+      ).not.toBeNull();
+      const directory = mkdtempSync(
+        resolve(tmpdir(), "backend-node-preflight-"),
       );
-    } finally {
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
+      const environmentFile = resolve(directory, "github-env");
+      try {
+        const result = spawnSync(process.execPath, ["--input-type=module"], {
+          cwd: resolve(__dirname, "../.."),
+          input: script![1]
+            .split("\n")
+            .map((line) => line.slice(10))
+            .join("\n"),
+          env: { ...process.env, GITHUB_ENV: environmentFile },
+          encoding: "utf8",
+          timeout: 35_000,
+        });
+        expect(result.error).toBeUndefined();
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).toContain(
+          `Backend Node ${process.version}: ${process.execPath}`,
+        );
+        expect(result.stdout).toContain("Backend Node pipe preflight passed");
+        expect(readFileSync(environmentFile, "utf8")).toBe(
+          `QODER_HOST_NODE=${process.execPath}\n`,
+        );
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("does not add a Node runtime to compile-only or WSL filesystem jobs", () => {
-    expect(job("backend")).not.toContain("uses: actions/setup-node");
+    for (const name of ["backend", ...backendBuildJobs]) {
+      expect(job(name)).not.toContain("uses: actions/setup-node");
+    }
     expect(job("backend-windows-wsl2")).not.toContain(
       "uses: actions/setup-node",
     );
@@ -100,12 +162,45 @@ describe("CI manual verification entry point", () => {
     expect(shouldCheckout).toBe(expected);
   });
 
-  it.each(["frontend", "backend", "backend-windows-wsl2"])(
-    "forces %s on manual dispatch while keeping PR path filtering",
-    (name) => {
-      expect(job(name)).toMatch(
-        /if: github\.event_name != 'pull_request' \|\| needs\.changes\.outputs\.(frontend|backend) == 'true'/,
+  it.each([
+    "frontend",
+    "backend",
+    "backend-windows-wsl2",
+    ...backendBuildJobs,
+    ...backendTestJobs,
+  ])("forces %s on manual dispatch while keeping PR path filtering", (name) => {
+    expect(job(name)).toMatch(
+      /if: github\.event_name != 'pull_request' \|\| needs\.changes\.outputs\.(frontend|backend) == 'true'/,
+    );
+  });
+
+  it.each([
+    ["linux", "ubuntu-22.04", 2],
+    ["windows", "windows-latest", 4],
+    ["macos", "macos-15", 2],
+  ])(
+    "builds %s once without blocking other platforms",
+    (platform, os, count) => {
+      const producer = job(`backend-test-build-${platform}`);
+      const consumer = job(`backend-tests-${platform}`);
+      expect(producer).toContain(`os: [${os}]`);
+      expect(consumer).toContain(
+        `needs: [changes, backend-test-build-${platform}]`,
       );
+      expect(consumer).toContain(
+        "name: Backend Tests (${{ matrix.os }} ${{ matrix.shard }}/${{ matrix.shards }})",
+      );
+      expect(consumer.match(/- \{ os:/g)).toHaveLength(Number(count));
+      expect(producer).toContain("nextest_archive.py build");
+      expect(consumer).toContain("nextest_archive.py run");
+      expect(consumer).not.toContain("Swatinem/rust-cache");
+      expect(consumer).not.toContain("cargo nextest run");
+      for (const name of [
+        `backend-test-build-${platform}`,
+        `backend-tests-${platform}`,
+      ]) {
+        expect(job("required-checks")).toContain(name);
+      }
     },
   );
 
@@ -119,9 +214,10 @@ describe("CI manual verification entry point", () => {
     (changes, runtime, expected) => {
       const gate = job("required-checks");
       const dependencies = gate
-        .match(/needs: \[([^\]]+)\]/)![1]
+        .match(/needs:\s*\[([^\]]+)\]/)![1]
         .split(",")
-        .map((name) => name.trim());
+        .map((name) => name.trim())
+        .filter(Boolean);
       const results = dependencies.map((name) =>
         name === "changes"
           ? changes

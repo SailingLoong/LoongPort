@@ -38,6 +38,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Test CI helpers and workflow contracts (no network or package changes)
+        run: python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v
+
       - name: Install actionlint
         env:
           ACTIONLINT_VERSION: 1.7.12
@@ -90,6 +93,7 @@ jobs:
               - "components.json"
               - ".github/workflows/**"
             backend:
+              - "scripts/ci/**"
               - "src-tauri/**"
               - "rust-toolchain.toml"
               # Qoder Rust tests execute these Node runtime/worker inputs.
@@ -196,7 +200,7 @@ jobs:
         # 测试挪到 backend-tests：那边用 cargo-nextest 按测试名哈希分片并行，
         # Windows 腿 6200+ 串行测试曾实跑 4.7 小时（2 核 runner + 进程型测试），
         # 静态/测试混跑还让每个分片重复付一遍 clippy 的编译。
-        os: [ubuntu-22.04, windows-latest, macos-14]
+        os: [ubuntu-22.04, windows-latest, macos-15]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -211,15 +215,8 @@ jobs:
 
       - name: Install Linux system deps
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libssl-dev \
-            libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
-            || sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.0-dev
-          sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
-            || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
+        # Retry transport failures without imposing a new download/dpkg deadline.
+        run: sudo python3 scripts/ci/linux_deps.py
 
       - name: Isolate Cargo cache home
         shell: bash
@@ -278,29 +275,92 @@ jobs:
           cargo check -p loongport-cli --manifest-path src-tauri/Cargo.toml \
             --target x86_64-unknown-linux-musl
 
-  backend-tests:
+  backend-test-build-linux:
+    name: Build backend test archive
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true'
+    outputs:
+      nextest-version: ${{ steps.archive.outputs.nextest-version }}
+    env:
+      CI_RUNNER_LABEL: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04]
+    steps: &backend_archive_steps
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        # 工具链同 backend job：跟 rust-toolchain.toml 走（理由见那边注释）。
+        run: rustup show
+
+      - name: Install Linux system deps
+        if: runner.os == 'Linux'
+        # Retry transport failures without imposing a new download/dpkg deadline.
+        run: sudo python3 scripts/ci/linux_deps.py
+
+      # Only the archive producer saves dependency artifacts for this platform.
+      # Workspace outputs stay out of this cache so source changes do not create
+      # another full target archive on every commit.
+      - name: Isolate Cargo cache home
+        shell: bash
+        run: |
+          ci_cargo_home="$RUNNER_TEMP/loongport-ci-cargo"
+          mkdir -p "$ci_cargo_home"
+          echo "CARGO_HOME=$ci_cargo_home" >> "$GITHUB_ENV"
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: ci-backend-v2-${{ runner.os }}-${{ runner.arch }}
+          cache-bin: "false"
+          save-if: "true"
+
+      - name: Create frontend dist placeholder
+        shell: bash
+        run: mkdir -p dist
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Build backend test archive (default GUI features)
+        id: archive
+        shell: bash
+        run: python scripts/ci/nextest_archive.py build --output "$RUNNER_TEMP/nextest-artifact"
+
+      - name: Upload same-run platform test archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}-${{ matrix.os }}-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            ${{ runner.temp }}/nextest-artifact/tests.tar.zst
+            ${{ runner.temp }}/nextest-artifact/manifest.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  backend-tests-linux:
     name: Backend Tests (${{ matrix.os }} ${{ matrix.shard }}/${{ matrix.shards }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.timeout }}
-    needs: changes
+    needs: [changes, backend-test-build-linux]
     if: github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true'
+    env:
+      CI_RUNNER_LABEL: ${{ matrix.os }}
+      NEXTEST_VERSION: ${{ needs.backend-test-build-linux.outputs.nextest-version }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # 分片数按各平台历史实跑时长定：Windows 串行实测 4.7h（2 核 + 大量
-          # 子进程型测试，进程创建与 Defender 扫描是 ubuntu 的数倍）→ 4 片；
-          # ubuntu ~1.6h / macOS ~1.1h → 各 2 片。nextest 的 count 分片按测试
-          # 名哈希切分，跨运行稳定：任何测试恰好落进且只落进一片。
           - { os: ubuntu-22.04, shard: 1, shards: 2, timeout: 75 }
           - { os: ubuntu-22.04, shard: 2, shards: 2, timeout: 75 }
-          - { os: windows-latest, shard: 1, shards: 4, timeout: 150 }
-          - { os: windows-latest, shard: 2, shards: 4, timeout: 150 }
-          - { os: windows-latest, shard: 3, shards: 4, timeout: 150 }
-          - { os: windows-latest, shard: 4, shards: 4, timeout: 150 }
-          - { os: macos-14, shard: 1, shards: 2, timeout: 90 }
-          - { os: macos-14, shard: 2, shards: 2, timeout: 90 }
-    steps:
+    steps: &backend_test_steps
       - name: Checkout
         uses: actions/checkout@v6
 
@@ -343,33 +403,8 @@ jobs:
 
       - name: Install Linux system deps
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libssl-dev \
-            libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
-            || sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.0-dev
-          sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
-            || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
-
-      # Share dependency artifacts; only the first shard per platform saves them.
-      # Workspace outputs stay out of this cache so source changes do not create
-      # another full target archive on every commit.
-      - name: Isolate Cargo cache home
-        shell: bash
-        run: |
-          ci_cargo_home="$RUNNER_TEMP/loongport-ci-cargo"
-          mkdir -p "$ci_cargo_home"
-          echo "CARGO_HOME=$ci_cargo_home" >> "$GITHUB_ENV"
-
-      - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-          shared-key: ci-backend-v2-${{ runner.os }}-${{ runner.arch }}
-          cache-bin: "false"
-          save-if: ${{ matrix.shard == 1 }}
+        # Retry transport failures without imposing a new download/dpkg deadline.
+        run: sudo python3 scripts/ci/linux_deps.py
 
       - name: Create frontend dist placeholder
         shell: bash
@@ -378,16 +413,88 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest
+          tool: cargo-nextest@${{ env.NEXTEST_VERSION }}
 
-      - name: Run tests
-        # --profile ci：src-tauri/.config/nextest.toml 里给 CI 档配了重试，
-        # 只兜时序型偶发；一致性失败连挂三次仍会红。
+      - name: Download same-run platform test archive
+        uses: actions/download-artifact@v4
+        with:
+          name: nextest-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}-${{ matrix.os }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/nextest-artifact
+
+      - name: Run tests from validated archive
+        # Keep ci retries and original count partition; never rebuild on consumers.
         shell: bash
         run: |
-          cargo nextest run --profile ci \
-            --manifest-path src-tauri/Cargo.toml \
-            --partition count:${{ matrix.shard }}/${{ matrix.shards }}
+          python scripts/ci/nextest_archive.py run --output "$RUNNER_TEMP/nextest-artifact" \
+            --shard ${{ matrix.shard }} --shards ${{ matrix.shards }}
+
+  backend-test-build-windows:
+    name: Build backend test archive
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true'
+    outputs:
+      nextest-version: ${{ steps.archive.outputs.nextest-version }}
+    env:
+      CI_RUNNER_LABEL: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+    steps: *backend_archive_steps
+
+  backend-tests-windows:
+    name: Backend Tests (${{ matrix.os }} ${{ matrix.shard }}/${{ matrix.shards }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.timeout }}
+    needs: [changes, backend-test-build-windows]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true'
+    env:
+      CI_RUNNER_LABEL: ${{ matrix.os }}
+      NEXTEST_VERSION: ${{ needs.backend-test-build-windows.outputs.nextest-version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, shard: 1, shards: 4, timeout: 150 }
+          - { os: windows-latest, shard: 2, shards: 4, timeout: 150 }
+          - { os: windows-latest, shard: 3, shards: 4, timeout: 150 }
+          - { os: windows-latest, shard: 4, shards: 4, timeout: 150 }
+    steps: *backend_test_steps
+
+  backend-test-build-macos:
+    name: Build backend test archive
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true'
+    outputs:
+      nextest-version: ${{ steps.archive.outputs.nextest-version }}
+    env:
+      CI_RUNNER_LABEL: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15]
+    steps: *backend_archive_steps
+
+  backend-tests-macos:
+    name: Backend Tests (${{ matrix.os }} ${{ matrix.shard }}/${{ matrix.shards }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.timeout }}
+    needs: [changes, backend-test-build-macos]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.backend == 'true'
+    env:
+      CI_RUNNER_LABEL: ${{ matrix.os }}
+      NEXTEST_VERSION: ${{ needs.backend-test-build-macos.outputs.nextest-version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15, shard: 1, shards: 2, timeout: 90 }
+          - { os: macos-15, shard: 2, shards: 2, timeout: 90 }
+    steps: *backend_test_steps
 
   backend-windows-wsl2:
     name: Backend Checks (Windows + WSL2 home)
@@ -511,7 +618,20 @@ jobs:
     name: Required Checks
     runs-on: ubuntu-latest
     if: always()
-    needs: [changes, frontend, backend, backend-tests, backend-windows-wsl2, workflow-lint]
+    needs:
+      [
+        changes,
+        frontend,
+        backend,
+        backend-test-build-linux,
+        backend-tests-linux,
+        backend-test-build-windows,
+        backend-tests-windows,
+        backend-test-build-macos,
+        backend-tests-macos,
+        backend-windows-wsl2,
+        workflow-lint,
+      ]
     steps:
       - name: Gate on upstream results
         shell: bash
