@@ -244,10 +244,10 @@ fn service_for_flow(db: Arc<Database>, id: &str) -> Result<Arc<Service>, PublicE
         db,
         context
             .as_ref()
-            .map(|(context, version, _)| (context, version.as_deref())),
+            .map(|request| (&request.context, request.app_version.as_deref())),
         context
             .as_ref()
-            .and_then(|(_, _, device)| device.as_deref()),
+            .and_then(|request| request.device_mid.as_deref()),
     )
 }
 fn flow_error(_: FlowError) -> PublicError {

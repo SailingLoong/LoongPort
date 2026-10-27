@@ -15,6 +15,12 @@ const MAX_RECEIPTS: usize = 16;
 const FLOW_LIFETIME: Duration = Duration::from_secs(600);
 const RECEIPT_LIFETIME: Duration = Duration::from_secs(600);
 
+pub(crate) struct FlowRequestContext {
+    pub context: LibraryContext,
+    pub app_version: Option<String>,
+    pub device_mid: Option<String>,
+}
+
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LoginError {
@@ -624,14 +630,15 @@ impl LoginFlowStore {
     pub(crate) fn request_context(
         &self,
         id: &str,
-    ) -> Result<Option<(LibraryContext, Option<String>, Option<String>)>, FlowError> {
+    ) -> Result<Option<FlowRequestContext>, FlowError> {
         let flows = self.0.lock().map_err(|_| FlowError::Poisoned)?;
         let flow = flows.get(id).ok_or(FlowError::Missing)?;
         Ok(flow.draft.as_ref().and_then(|draft| {
-            draft
-                .context
-                .clone()
-                .map(|context| (context, draft.app_version.clone(), draft.device_mid.clone()))
+            draft.context.clone().map(|context| FlowRequestContext {
+                context,
+                app_version: draft.app_version.clone(),
+                device_mid: draft.device_mid.clone(),
+            })
         }))
     }
     pub(crate) fn progress(&self, id: &str, now: Instant) -> Result<LoginProgress, FlowError> {
