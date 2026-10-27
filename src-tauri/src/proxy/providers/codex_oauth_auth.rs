@@ -761,7 +761,6 @@ impl CodexOAuthManager {
             let text = response.text().await.unwrap_or_default();
             let refresh_error_code = extract_refresh_error_code(&text);
             if status == reqwest::StatusCode::UNAUTHORIZED
-                || status == reqwest::StatusCode::FORBIDDEN
                 || matches!(
                     refresh_error_code.as_deref(),
                     Some(
