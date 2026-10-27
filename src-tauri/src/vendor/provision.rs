@@ -521,7 +521,8 @@ mod tests {
             assert_eq!(
                 bundle.rows.len(),
                 if crate::vendor::is_free_plan(Vendor::OpenCode, bundle.plan.id_segment) {
-                    4
+                    assert_eq!(bundle.rows[0].0, AppType::OpenCode);
+                    1
                 } else {
                     6
                 },
