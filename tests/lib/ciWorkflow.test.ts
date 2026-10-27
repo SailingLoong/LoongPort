@@ -64,7 +64,7 @@ describe("CI manual verification entry point", () => {
     const script = minimaxStep();
     expect(script).toContain("set -euo pipefail");
     expect(script).toContain(
-      "--locked --manifest-path src-tauri/Cargo.toml --features gui,test-hooks --test minimax_shared_routing",
+      '--locked --manifest-path src-tauri/Cargo.toml --features "gui,test-hooks" --test minimax_shared_routing',
     );
     expect(script).toContain("-- --list --color never");
     expect(script).toContain("-- --test-threads=1 --color never");

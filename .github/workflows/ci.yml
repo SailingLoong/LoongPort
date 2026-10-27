@@ -268,7 +268,7 @@ jobs:
             expired_native_access_in_ordered_group_never_calls_a_and_uses_b
             expired_native_access_manual_target_never_calls_a_or_switches_to_b
           )
-          target=(--locked --manifest-path src-tauri/Cargo.toml --features gui,test-hooks --test minimax_shared_routing)
+          target=(--locked --manifest-path src-tauri/Cargo.toml --features "gui,test-hooks" --test minimax_shared_routing)
           cargo test "${target[@]}" -- --list --color never | tee "$RUNNER_TEMP/minimax-discovery.log"
           for name in "${expected[@]}"; do
             grep -Fx "$name: test" "$RUNNER_TEMP/minimax-discovery.log"
