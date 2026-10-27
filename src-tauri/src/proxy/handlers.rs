@@ -52,6 +52,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
+use subtle::ConstantTimeEq;
 
 // ============================================================================
 // 健康检查和状态查询（简单端点）
@@ -277,25 +278,48 @@ fn validate_claude_desktop_gateway_auth(
         .db
         .builtin_client_key("claude-desktop", "claude-desktop")
         .map_err(|e| ProxyError::AuthError(e.to_string()))?;
-    let Some(value) = headers.get(axum::http::header::AUTHORIZATION) else {
-        return Err(ProxyError::AuthError(
-            "Claude Desktop gateway 缺少 Authorization 头".to_string(),
-        ));
-    };
-    let value = value
-        .to_str()
-        .map_err(|_| ProxyError::AuthError("Authorization 头格式无效".to_string()))?;
-    let token = value
-        .strip_prefix("Bearer ")
-        .or_else(|| value.strip_prefix("bearer "))
-        .unwrap_or("")
-        .trim();
-    if token != expected {
-        return Err(ProxyError::AuthError(
-            "Claude Desktop gateway token 无效".to_string(),
-        ));
+    validate_claude_desktop_gateway_token(headers, &expected)
+}
+
+/// 比较 Claude Desktop gateway token：所有认证失败路径共用同一个错误，
+/// token 内容用常量时间比较（长度不保密，`ct_eq` 隐藏内容差异位置）。
+fn validate_claude_desktop_gateway_token(
+    headers: &axum::http::HeaderMap,
+    expected: &str,
+) -> Result<(), ProxyError> {
+    let auth_error =
+        || ProxyError::AuthError("Claude Desktop gateway authentication failed".to_string());
+    let token = extract_gateway_token(headers).ok_or_else(auth_error)?;
+    if token.as_bytes().ct_eq(expected.as_bytes()).unwrap_u8() != 1 {
+        return Err(auth_error());
     }
     Ok(())
+}
+
+/// 从请求头提取 Claude Desktop gateway token。
+///
+/// Claude 桌面端按 Anthropic 的认证头惯例用 `x-api-key` 发 token；其他客户端
+/// （以及桌面端自己的显式配置）可能用 `Authorization: Bearer <token>`。两者都接受，
+/// 同时存在时优先 `Authorization`；本函数只取原始 token，不做有效性判断，
+/// 与期望值的比较由调用方负责。
+fn extract_gateway_token(headers: &axum::http::HeaderMap) -> Option<String> {
+    if let Some(value) = headers.get(axum::http::header::AUTHORIZATION) {
+        if let Ok(s) = value.to_str() {
+            // 接受 "Bearer " / "bearer " 前缀；都没有时把整个值当 token（宽松解析）
+            let token = s
+                .strip_prefix("Bearer ")
+                .or_else(|| s.strip_prefix("bearer "))
+                .unwrap_or(s)
+                .trim();
+            return Some(token.to_string());
+        }
+    }
+    if let Some(value) = headers.get("x-api-key") {
+        if let Ok(s) = value.to_str() {
+            return Some(s.trim().to_string());
+        }
+    }
+    None
 }
 
 /// Claude 格式转换处理（独有逻辑）
@@ -2964,16 +2988,80 @@ async fn log_usage(
 mod tests {
     use super::{
         body_looks_like_sse, chat_sse_to_response_value, classify_body_for_diagnostics,
-        codex_proxy_error_json, responses_sse_stream_to_anthropic_message,
+        codex_proxy_error_json, extract_gateway_token, responses_sse_stream_to_anthropic_message,
         responses_sse_to_response_value, should_use_claude_transform_streaming, transform,
-        upstream_body_parse_error,
+        upstream_body_parse_error, validate_claude_desktop_gateway_token,
     };
     use crate::proxy::ProxyError;
+    use axum::http::{header::AUTHORIZATION, HeaderMap, HeaderValue};
     use bytes::Bytes;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    #[test]
+    fn gateway_token_extraction_prefers_authorization_and_accepts_x_api_key() {
+        // #5123：桌面端按 Anthropic 惯例发 x-api-key；Authorization: Bearer 仍优先
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer token-a"));
+        headers.insert("x-api-key", HeaderValue::from_static("token-b"));
+        assert_eq!(extract_gateway_token(&headers).as_deref(), Some("token-a"));
+
+        headers.remove(AUTHORIZATION);
+        assert_eq!(extract_gateway_token(&headers).as_deref(), Some("token-b"));
+
+        // 小写 bearer 前缀与无前缀都宽松接受；两头都缺时返回 None
+        let mut lenient = HeaderMap::new();
+        lenient.insert(AUTHORIZATION, HeaderValue::from_static("bearer token-c"));
+        assert_eq!(extract_gateway_token(&lenient).as_deref(), Some("token-c"));
+        lenient.insert(AUTHORIZATION, HeaderValue::from_static("token-d"));
+        assert_eq!(extract_gateway_token(&lenient).as_deref(), Some("token-d"));
+        assert_eq!(extract_gateway_token(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn claude_desktop_gateway_auth_rejects_invalid_credentials_uniformly() {
+        // #7488：所有失败路径共用同一错误文案；正确 token 通过
+        let token = "gw-token-value";
+        let auth_header = |value: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(AUTHORIZATION, HeaderValue::from_str(value).unwrap());
+            headers
+        };
+        let mut x_api_key = HeaderMap::new();
+        x_api_key.insert("x-api-key", HeaderValue::from_static(token));
+
+        assert!(validate_claude_desktop_gateway_token(
+            &auth_header(&format!("Bearer {token}")),
+            token
+        )
+        .is_ok());
+        assert!(validate_claude_desktop_gateway_token(&x_api_key, token).is_ok());
+
+        let mut non_utf8 = HeaderMap::new();
+        non_utf8.insert(AUTHORIZATION, HeaderValue::from_bytes(b"\xff").unwrap());
+
+        let invalid_headers = [
+            HeaderMap::new(),
+            auth_header(""),
+            auth_header("Basic abc"),
+            auth_header("Bearer wrong-token"),
+            auth_header("Bearer gw-t"),
+            non_utf8,
+        ];
+        for headers in invalid_headers {
+            let err = validate_claude_desktop_gateway_token(&headers, token)
+                .expect_err("invalid credentials must fail");
+            let message = err.to_string();
+            assert_eq!(
+                message,
+                ProxyError::AuthError("Claude Desktop gateway authentication failed".to_string())
+                    .to_string()
+            );
+            assert!(!message.contains(token));
+        }
+    }
 
     #[test]
     fn body_looks_like_sse_detects_unlabeled_sse_prefixes() {
