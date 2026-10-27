@@ -1,3 +1,4 @@
+import { StrictMode, useState } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { SyncRestoreDialog } from "@/components/settings/SyncRestoreDialog";
@@ -8,6 +9,96 @@ const paste = (field: HTMLElement, text: string) =>
   fireEvent.paste(field, { clipboardData: { getData: () => text } });
 
 describe("SyncRestoreDialog literal source input", () => {
+  it("preserves early input on asynchronous mount without mocking React scheduling", async () => {
+    const raw = "synthetic early source";
+    const onRestore = vi
+      .fn()
+      .mockRejectedValue(new Error("sync.restore_unverified"));
+    function Parent() {
+      const [open, setOpen] = useState(false);
+      return (
+        <>
+          <button
+            onClick={() => {
+              void Promise.resolve().then(() => setOpen(true));
+            }}
+          >
+            open
+          </button>
+          {open && (
+            <SyncRestoreDialog
+              deviceName="Source"
+              onRestore={onRestore}
+              onClose={vi.fn()}
+            />
+          )}
+        </>
+      );
+    }
+    render(
+      <StrictMode>
+        <Parent />
+      </StrictMode>,
+    );
+    let field: HTMLTextAreaElement | null = null;
+    const observer = new MutationObserver(() => {
+      field = document.querySelector<HTMLTextAreaElement>(
+        "#sync-restore-password",
+      );
+      if (!field) return;
+      observer.disconnect();
+      paste(field, raw);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "open" }));
+      await waitFor(() => expect(field).not.toBeNull());
+      expect(field).toHaveValue(raw);
+      fireEvent.click(
+        screen.getByRole("button", { name: "syncRestore.confirm" }),
+      );
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "syncRestore.failed",
+      );
+      expect(onRestore).toHaveBeenCalledExactlyOnceWith(raw);
+      expect(field).toHaveValue("");
+    } finally {
+      observer.disconnect();
+    }
+  });
+
+  it("retains input for unchanged authority and discards it across real mode changes and reopening", () => {
+    const onRestore = vi.fn();
+    const props = { deviceName: "Source", onRestore, onClose: vi.fn() };
+    const view = render(<SyncRestoreDialog {...props} />);
+    const raw = "synthetic\r\nsource";
+    paste(screen.getByLabelText("syncRestore.password"), raw);
+    view.rerender(<SyncRestoreDialog {...props} sourceInputRequired />);
+    expect(
+      screen.getByRole("button", { name: "syncRestore.confirm" }),
+    ).toBeEnabled();
+    view.rerender(<SyncRestoreDialog {...props} sourceInputRequired={false} />);
+    expect(
+      screen.queryByLabelText("syncRestore.password"),
+    ).not.toBeInTheDocument();
+    view.rerender(<SyncRestoreDialog {...props} sourceInputRequired />);
+    expect(screen.getByLabelText("syncRestore.password")).toHaveValue("");
+    expect(
+      screen.getByRole("button", { name: "syncRestore.confirm" }),
+    ).toBeDisabled();
+    paste(screen.getByLabelText("syncRestore.password"), raw);
+    fireEvent.click(screen.getByRole("button", { name: "common.cancel" }));
+    expect(props.onClose).toHaveBeenCalledOnce();
+    expect(screen.getByLabelText("syncRestore.password")).toHaveValue("");
+    view.unmount();
+    render(<SyncRestoreDialog {...props} />);
+    expect(screen.getByLabelText("syncRestore.password")).toHaveValue("");
+    expect(
+      screen.getByRole("button", { name: "syncRestore.confirm" }),
+    ).toBeDisabled();
+    expect(onRestore).not.toHaveBeenCalled();
+  });
+
   it("preserves mixed line endings through paste and a later edit, consumes once and clears before the pending reply", async () => {
     let finish!: () => void;
     const onRestore = vi.fn(
