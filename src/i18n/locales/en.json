@@ -3634,7 +3634,8 @@
       "loginFailed": "Sign-in failed: {{reason}}",
       "openKeyPage": "Manage API key",
       "userEditedHint": "This provider account has manual changes for the current platform. Reapplying the key configuration updates only the API key and preserves all other settings. Select to restore the defaults.",
-      "editConfirmMessage": "After you save, LoongPort will no longer overwrite manual changes for this provider account on the current platform. Reapplying the key configuration will update only the API key.\n\nTo undo your changes, select “Restore default configuration.” The API key is preserved."
+      "editConfirmMessage": "After you save, LoongPort will no longer overwrite manual changes for this provider account on the current platform. Reapplying the key configuration will update only the API key.\n\nTo undo your changes, select “Restore default configuration.” The API key is preserved.",
+      "opencodeFreeExternalUnavailable": "External free-chat requests are paused. Saved configuration is retained for direct OpenCode use; paid API / Go access is preserved."
     },
     "imageTab": {
       "companionNotice": "Generate images here, or from CLI chats",

@@ -112,3 +112,72 @@ case!(
     unknown_first_account_is_not_skippable_empty_state,
     "personal_unknown_first"
 );
+
+case!(external_policy_free_false, "policy_free_false");
+
+case!(
+    external_policy_free_paid_key_route,
+    "policy_free_paid_key_route"
+);
+
+case!(external_policy_fallback_free, "policy_fallback_free");
+
+case!(external_policy_override_free, "policy_override_free");
+
+case!(external_policy_unknown, "policy_unknown");
+
+case!(
+    external_policy_paid_go_preserved,
+    "policy_paid_go_preserved"
+);
+
+case!(
+    external_policy_other_platforms_preserved,
+    "policy_other_platforms_preserved"
+);
+
+case!(
+    external_consumer_runtime_free_fallback,
+    "runtime_free_fallback"
+);
+
+case!(
+    external_consumer_runtime_unknown_override,
+    "runtime_unknown_override"
+);
+
+case!(
+    external_consumer_personal_runtime_free_fallback,
+    "personal_runtime_free_fallback"
+);
+
+case!(external_consumer_free_config, "free_config");
+
+case!(
+    external_consumer_free_legacy_inventory,
+    "free_legacy_inventory"
+);
+
+case!(external_policy_go_beam_exact, "policy_go_beam_exact");
+
+case!(external_policy_current_catalog, "policy_current_catalog");
+
+case!(
+    external_policy_channel_normalization,
+    "policy_channel_normalization"
+);
+
+case!(
+    external_consumer_personal_runtime_beam_go,
+    "personal_runtime_beam_go"
+);
+
+case!(external_policy_sticky_rejection, "policy_sticky_rejection");
+case!(
+    external_consumer_group_free_no_paid_fallback,
+    "personal_policy_group_free"
+);
+case!(
+    external_consumer_group_unknown_no_paid_fallback,
+    "personal_policy_group_unknown"
+);

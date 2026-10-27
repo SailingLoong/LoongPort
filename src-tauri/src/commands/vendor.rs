@@ -119,6 +119,9 @@ pub struct VendorPlanRow {
     pub can_edit_config: bool,
     /// 当前 tab 下这个 plan 是否已有可切换的接入配置。
     pub can_switch: bool,
+    /// Product policy only; saved provider data is retained and remains editable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub switch_blocked_reason: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -172,6 +175,7 @@ impl From<creds::VendorRow> for VendorAccountRow {
                         user_edited: None,
                         can_edit_config: false,
                         can_switch: false,
+                        switch_blocked_reason: None,
                     })
                     .collect()
             })
@@ -371,7 +375,12 @@ fn vendor_account_for_app(
                 .is_some();
         any_provider_exists |= provider_exists;
         plan.can_edit_config = key_ready && provider_exists;
-        plan.can_switch = provider_exists;
+        plan.switch_blocked_reason = (plan.plan_id == "opencode-free"
+            && crate::vendor::opencode::Plan::Free
+                .config_for(app_type)
+                .is_none())
+        .then_some("opencodeFreeExternalUnavailable");
+        plan.can_switch = provider_exists && plan.switch_blocked_reason.is_none();
         plan.user_edited = provider_exists
             .then(|| user_edited_for(state, plan, app_type))
             .flatten();
@@ -428,6 +437,13 @@ pub async fn vendor_switch(
         .ok_or_else(|| format!("不认识的厂商：{}", row.vendor_id))?;
     let plan = crate::vendor::plan_by_segment(vendor, &plan)
         .ok_or_else(|| format!("不认识的接入变体：{plan}"))?;
+    if plan.id_segment == "opencode-free"
+        && crate::vendor::opencode::Plan::Free
+            .config_for(&app_type)
+            .is_none()
+    {
+        return Err("opencode.external_free_chat_unavailable: Free-tier chat requires direct OpenCode use; saved configuration is unchanged".into());
+    }
     let provider_id = provision::provider_id_for(plan.id_segment, account_id);
     if state
         .db
@@ -2640,7 +2656,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn opencode_free_shared_entry_refreshes_locally_and_restores_its_policy() {
+    async fn opencode_free_native_entry_preserves_legacy_external_config_without_enabling_it() {
         let _home = crate::secrets::testing::TestHome::new().unwrap();
         let state = mem_state();
         let row_id = seed_opencode_row(&state);
@@ -2651,66 +2667,96 @@ mod tests {
         let provisioned = provision_impl(&state, row_id).await.unwrap();
         assert!(
             !provisioned.key_created,
-            "existing key must avoid remote provisioning"
+            "existing key avoids remote provisioning"
         );
         let source = provision::provider_id_for("opencode-free", "wrk_x");
+        assert!(state
+            .db
+            .get_provider_by_id(&source, "codex")
+            .unwrap()
+            .is_none());
         let row = with_conn(&state, |conn, vault| creds::get(conn, vault, row_id))
             .unwrap()
             .unwrap();
-        let dto = vendor_account_for_app(&state, row.clone(), &AppType::Codex);
+        for app in [
+            AppType::Codex,
+            AppType::Claude,
+            AppType::Hermes,
+            AppType::OpenClaw,
+        ] {
+            let dto = vendor_account_for_app(&state, row.clone(), &app);
+            let free = dto
+                .plans
+                .iter()
+                .find(|p| p.plan_id == "opencode-free")
+                .unwrap();
+            assert!(!free.can_switch);
+            assert_eq!(
+                free.switch_blocked_reason,
+                Some("opencodeFreeExternalUnavailable")
+            );
+        }
+        let dto = vendor_account_for_app(&state, row, &AppType::OpenCode);
         assert!(
             dto.plans
                 .iter()
-                .find(|plan| plan.plan_id == "opencode-free")
+                .find(|p| p.plan_id == "opencode-free")
                 .unwrap()
                 .can_switch
         );
-        let unsupported = vendor_account_for_app(&state, row, &AppType::Claude);
-        assert!(
-            !unsupported
-                .plans
-                .iter()
-                .find(|plan| plan.plan_id == "opencode-free")
-                .unwrap()
-                .can_switch
+        // Historical external Free settings are retained verbatim, not silently
+        // upgraded, retargeted to paid, or deleted by account refresh.
+        let settings = crate::relay::provider_config::settings_config_with_roles_and_models(
+            &AppType::Codex,
+            "SYNTHETIC_ONE_KEY",
+            "Saved Free",
+            crate::vendor::opencode::FREE_API_ORIGIN,
+            "deepseek-v4.1-flash-free",
+            None,
+            None,
+            crate::vendor::opencode::Plan::Free.style(),
+        )
+        .unwrap();
+        let provider = crate::provider::Provider::with_id(
+            source.clone(),
+            "Saved Free".into(),
+            settings.clone(),
+            None,
         );
-        let mut provider = state
-            .db
-            .get_provider_by_id(&source, "codex")
-            .unwrap()
-            .unwrap();
-        provider.settings_config["config"] = serde_json::json!(provider.settings_config["config"]
-            .as_str()
-            .unwrap()
-            .replace("glm-5.3-flash-free", "deepseek-v4.1-flash-free"));
-        provider
-            .settings_config
-            .as_object_mut()
-            .unwrap()
-            .remove("freeOnly");
         state.db.save_provider("codex", &provider).unwrap();
         provision_impl(&state, row_id).await.unwrap();
-        let refreshed = state
-            .db
-            .get_provider_by_id(&source, "codex")
-            .unwrap()
-            .unwrap();
-        assert_eq!(refreshed.settings_config["freeOnly"], true);
         assert_eq!(
-            crate::relay::provider_config::extract_model(&refreshed.settings_config).as_deref(),
-            Some("deepseek-v4.1-flash-free")
+            state
+                .db
+                .get_provider_by_id(&source, "codex")
+                .unwrap()
+                .unwrap()
+                .settings_config,
+            settings
         );
-        vendor_reset_plan_config_impl(&state, &source, "codex")
+        assert!(vendor_reset_plan_config_impl(&state, &source, "codex")
+            .await
+            .is_err());
+        assert_eq!(
+            state
+                .db
+                .get_provider_by_id(&source, "codex")
+                .unwrap()
+                .unwrap()
+                .settings_config,
+            settings
+        );
+        vendor_reset_plan_config_impl(&state, &source, "opencode")
             .await
             .unwrap();
-        let restored = state
+        let native = state
             .db
-            .get_provider_by_id(&source, "codex")
+            .get_provider_by_id(&source, "opencode")
             .unwrap()
             .unwrap();
-        assert_eq!(restored.settings_config["freeOnly"], true);
+        assert_eq!(native.settings_config["freeOnly"], true);
         assert_eq!(
-            restored.settings_config["modelCatalog"]["models"]
+            native.settings_config["modelCatalog"]["models"]
                 .as_array()
                 .unwrap()
                 .len(),
@@ -2718,8 +2764,8 @@ mod tests {
         );
         assert_eq!(
             crate::relay::provider_config::extract_api_key(
-                &restored.settings_config,
-                &AppType::Codex
+                &native.settings_config,
+                &AppType::OpenCode
             )
             .as_deref(),
             Some("SYNTHETIC_ONE_KEY")

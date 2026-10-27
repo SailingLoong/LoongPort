@@ -83,6 +83,7 @@ export interface VendorPlanInfo {
   canEditConfig: boolean;
   /** 当前 tab 下这个 plan 是否已有可切换的接入配置。 */
   canSwitch: boolean;
+  switchBlockedReason?: "opencodeFreeExternalUnavailable" | null;
 }
 
 export interface VendorAccountList {
