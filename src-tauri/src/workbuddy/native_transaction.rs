@@ -406,7 +406,8 @@ pub(crate) fn recover(
     Ok(Outcome::Restored)
 }
 
-#[cfg(test)]
+// Admission pins are currently Unix-only; do not imply Windows activation support.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     struct Owner {
@@ -507,7 +508,7 @@ mod tests {
         }
     }
     fn setup(marker: bool) -> (tempfile::TempDir, Paths, Image) {
-        let d = tempfile::tempdir().unwrap();
+        let d = crate::secrets::testing::tempdir().unwrap();
         let p = Paths::at(d.path()).unwrap();
         std::fs::write(&p.auth, b"A").unwrap();
         if marker {
@@ -1150,7 +1151,7 @@ mod tests {
     }
     #[test]
     fn same_path_replaced_root_cannot_reuse_preview_identity() {
-        let outer = tempfile::tempdir().unwrap();
+        let outer = crate::secrets::testing::tempdir().unwrap();
         let root = outer.path().join("root");
         std::fs::create_dir(&root).unwrap();
         let p = Paths::at(&root).unwrap();
@@ -1288,6 +1289,41 @@ pub(super) mod owner_wire {
         pub(in super::super) journal: Option<Journal>,
     }
     impl State {
+        /// Synthetic codec/phase fixture, NOT a valid filesystem admission or native activation.
+        /// Kept inside the real wire owner so tests do not duplicate its private JSON schema.
+        #[cfg(test)]
+        pub(in super::super) fn fixture(root: &Path, phase: Phase) -> Self {
+            let mut state = Self::initial("synthetic-phase-fixture".into());
+            let admission = state.stamp.clone();
+            state.stamp.revision = if phase == Phase::Prepared { 1 } else { 2 };
+            state.journal = Some(Journal {
+                admission,
+                version: 1,
+                request: "synthetic-receipt".into(),
+                root: root.into(),
+                root_identity: RootIdentity {
+                    device: 0,
+                    inode: 0,
+                    uid: 0,
+                },
+                context: NativeContext {
+                    product: "workbuddy".into(),
+                    region: "cn".into(),
+                    realm: "www.workbuddy.cn".into(),
+                    source: "synthetic-machine".into(),
+                },
+                before: Image {
+                    auth: Some(Zeroizing::new(b"A".to_vec())),
+                    marker: None,
+                },
+                after: Image {
+                    auth: Some(Zeroizing::new(b"B".to_vec())),
+                    marker: None,
+                },
+                phase,
+            });
+            state
+        }
         pub(in super::super) fn initial(generation: String) -> Self {
             Self {
                 stamp: Stamp {
@@ -1472,5 +1508,32 @@ pub(super) mod owner_wire {
             // Decode the private canonical representation to enforce the persisted contract.
             Self::decode(&next.encode()?)
         }
+    }
+}
+
+#[cfg(all(test, not(unix)))]
+mod unsupported_platform_tests {
+    use super::*;
+    #[test]
+    fn unsupported_admission_refuses_without_touching_native_files() {
+        let dir = crate::secrets::testing::tempdir().unwrap();
+        let paths = Paths::at(dir.path()).unwrap();
+        std::fs::write(&paths.auth, b"A").unwrap();
+        std::fs::write(&paths.marker, b"logged-out").unwrap();
+        let before = observe(&mut Files, &paths).unwrap();
+        let stamp = owner_wire::State::initial("synthetic-owner".into()).stamp;
+        let context = NativeContext {
+            product: "workbuddy".into(),
+            region: "cn".into(),
+            realm: "www.workbuddy.cn".into(),
+            source: "synthetic-machine".into(),
+        };
+        assert!(matches!(
+            Admission::preview(&paths, &context, &stamp, "preview", &before, b"B"),
+            Err(Failure::UnsafePath)
+        ));
+        assert!(observe(&mut Files, &paths).unwrap() == before);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+        assert!(Paths::at(&dir.path().join("../escape")).is_err());
     }
 }

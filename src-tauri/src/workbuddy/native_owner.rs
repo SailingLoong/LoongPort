@@ -260,7 +260,7 @@ mod tests {
     }
     #[test]
     fn encrypted_initialization_reopens_using_actual_registered_codec() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::secrets::testing::tempdir().unwrap();
         let storage = StorageContext::Encrypted(VaultContext::generate().unwrap());
         let binding = || (storage.identity(), 7);
         let mut owner = Owner::new(dir.path(), &storage, 7, &binding);
@@ -277,7 +277,7 @@ mod tests {
     }
     #[test]
     fn explicit_plaintext_is_registered_and_epoch_changes_refuse_writes() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::secrets::testing::tempdir().unwrap();
         let storage = plain();
         let epoch = std::cell::Cell::new(3);
         let binding = || (storage.identity(), epoch.get());
@@ -292,7 +292,7 @@ mod tests {
     }
     #[test]
     fn invalid_explicit_mode_and_unreadable_documents_never_fallback_or_reinitialize() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::secrets::testing::tempdir().unwrap();
         let mut storage = plain();
         if let StorageContext::Plaintext(ref mut p) = storage {
             p.format_version = 999;
@@ -317,6 +317,7 @@ mod tests {
         assert!(owner.initialize().is_err());
         assert_eq!(std::fs::read(path).unwrap(), b"lpenc:damaged");
     }
+    #[cfg(unix)]
     fn context() -> super::super::native::NativeContext {
         super::super::native::NativeContext {
             product: "workbuddy".into(),
@@ -326,10 +327,11 @@ mod tests {
         }
     }
     #[test]
+    #[cfg(unix)]
     fn disk_owner_commit_receipt_survives_reopen_and_aba_rejects_old_ticket() {
         use super::super::native_transaction::*;
-        let store = tempfile::tempdir().unwrap();
-        let client = tempfile::tempdir().unwrap();
+        let store = crate::secrets::testing::tempdir().unwrap();
+        let client = crate::secrets::testing::tempdir().unwrap();
         let storage = StorageContext::Encrypted(VaultContext::generate().unwrap());
         let binding = || (storage.identity(), 1);
         let mut owner = Owner::new(store.path(), &storage, 1, &binding);
@@ -376,6 +378,7 @@ mod tests {
         );
     }
     #[test]
+    #[cfg(unix)]
     fn durable_prepared_reopens_and_restores_without_permanent_pending_receipt() {
         use super::super::native_transaction::*;
         struct Crash(Files);
@@ -391,8 +394,8 @@ mod tests {
                 self.0.remove(p)
             }
         }
-        let store = tempfile::tempdir().unwrap();
-        let client = tempfile::tempdir().unwrap();
+        let store = crate::secrets::testing::tempdir().unwrap();
+        let client = crate::secrets::testing::tempdir().unwrap();
         let storage = plain();
         let binding = || (storage.identity(), 1);
         let mut owner = Owner::new(store.path(), &storage, 1, &binding);
@@ -464,7 +467,7 @@ mod tests {
     }
     #[test]
     fn aliases_and_identity_change_refuse_owner_writes() {
-        let store = tempfile::tempdir().unwrap();
+        let store = crate::secrets::testing::tempdir().unwrap();
         let storage = plain();
         let changed = std::cell::Cell::new(false);
         let binding = || {
@@ -500,10 +503,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn durable_write_then_binding_failure_keeps_pending_and_no_native_write() {
         use super::super::native_transaction::*;
-        let store = tempfile::tempdir().unwrap();
-        let client = tempfile::tempdir().unwrap();
+        let store = crate::secrets::testing::tempdir().unwrap();
+        let client = crate::secrets::testing::tempdir().unwrap();
         let storage = plain();
         let armed = std::cell::Cell::new(false);
         let file = store.path().join("workbuddy_native_transaction.json");
@@ -562,37 +566,14 @@ mod tests {
     }
     #[test]
     fn strict_owned_wire_rejects_duplicate_unknown_phase_and_bad_terminal_root() {
-        use super::super::native_transaction::*;
-        let store = tempfile::tempdir().unwrap();
-        let client = tempfile::tempdir().unwrap();
+        let store = crate::secrets::testing::tempdir().unwrap();
+        let client = crate::secrets::testing::tempdir().unwrap();
         let storage = plain();
         let binding = || (storage.identity(), 1);
-        let mut owner = Owner::new(store.path(), &storage, 1, &binding);
-        owner.initialize().unwrap();
-        std::fs::write(client.path().join("workbuddy-desktop.info"), b"synthetic-A").unwrap();
-        let paths = Paths::at(client.path()).unwrap();
-        let context = context();
-        let stamp = owner.load().unwrap().0;
-        let ticket = Admission::preview(
-            &paths,
-            &context,
-            &stamp,
-            "strict",
-            &observe(&mut Files, &paths).unwrap(),
-            b"synthetic-B",
-        )
-        .unwrap();
-        apply(
-            &paths,
-            &mut Files,
-            &mut owner,
-            &mut || true,
-            &context,
-            &ticket,
-        )
-        .unwrap();
+        let owner = Owner::new(store.path(), &storage, 1, &binding);
+        let (_, _, original) =
+            super::testing::phase_receipts(store.path(), &storage, client.path());
         let path = store.path().join("workbuddy_native_transaction.json");
-        let original = std::fs::read(&path).unwrap();
         for (key, value) in [
             ("phase", serde_json::json!(99)),
             ("root", serde_json::json!("/tmp/../unknown")),
@@ -619,7 +600,7 @@ mod tests {
         use crate::secrets::owned_file::{
             OwnedFile, AUTH_FILES, WORKBUDDY_FILE, WORKBUDDY_NATIVE_JOURNAL_FILE,
         };
-        let store = tempfile::tempdir().unwrap();
+        let store = crate::secrets::testing::tempdir().unwrap();
         let storage = StorageContext::Encrypted(VaultContext::generate().unwrap());
         let binding = || (storage.identity(), 1);
         let journal = OwnedFile::registered(WORKBUDDY_NATIVE_JOURNAL_FILE).unwrap();
@@ -640,7 +621,7 @@ mod tests {
     }
     #[test]
     fn pure_inspect_uses_borrowed_old_context_while_original_write_guard_is_held() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::secrets::testing::tempdir().unwrap();
         let storage = plain();
         let binding = || (storage.identity(), 0);
         assert_eq!(inspect(root.path(), &storage).unwrap(), Disposition::Absent);
@@ -662,6 +643,7 @@ mod tests {
         assert!(inspect(root.path(), &invalid).is_err());
     }
     #[test]
+    #[cfg(unix)]
     fn pure_inspect_distinguishes_actual_prepared_restored_and_committed_without_writing() {
         use super::super::native_transaction::*;
         struct Crash(Files);
@@ -677,8 +659,8 @@ mod tests {
                 self.0.remove(p)
             }
         }
-        let root = tempfile::tempdir().unwrap();
-        let client = tempfile::tempdir().unwrap();
+        let root = crate::secrets::testing::tempdir().unwrap();
+        let client = crate::secrets::testing::tempdir().unwrap();
         let storage = plain();
         let binding = || (storage.identity(), 0);
         let mut owner = Owner::new(root.path(), &storage, 0, &binding);
@@ -752,8 +734,33 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), committed);
     }
     #[test]
+    fn pure_inspect_distinguishes_synthetic_codec_phases_on_every_platform() {
+        let root = crate::secrets::testing::tempdir().unwrap();
+        let client = crate::secrets::testing::tempdir().unwrap();
+        for storage in [
+            plain(),
+            StorageContext::Encrypted(crate::secrets::VaultContext::generate().unwrap()),
+        ] {
+            let (prepared, restored, committed) =
+                super::testing::phase_receipts(root.path(), &storage, client.path());
+            let path = root
+                .path()
+                .join(crate::secrets::owned_file::WORKBUDDY_NATIVE_JOURNAL_FILE);
+            for (bytes, expected) in [
+                (prepared, Disposition::Pending),
+                (restored, Disposition::Clear),
+                (committed, Disposition::Clear),
+            ] {
+                std::fs::write(&path, &bytes).unwrap();
+                assert_eq!(inspect(root.path(), &storage).unwrap(), expected);
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            }
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+    #[test]
     fn pure_inspect_never_treats_wrong_key_corruption_or_unknown_version_as_absent() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::secrets::testing::tempdir().unwrap();
         let storage = StorageContext::Encrypted(VaultContext::generate().unwrap());
         let binding = || (storage.identity(), 0);
         let mut owner = Owner::new(root.path(), &storage, 0, &binding);
@@ -799,7 +806,7 @@ mod session_tests {
     }
     impl Fixture {
         fn new() -> Self {
-            let root = tempfile::tempdir().unwrap();
+            let root = crate::secrets::testing::tempdir().unwrap();
             let data = root.path().join("data");
             let device = root.path().join("device");
             let control = root.path().join("control");
@@ -1025,7 +1032,8 @@ mod session_tests {
 }
 
 /// Synthetic receipt fixtures for the original generation tests. These exercise
-/// actual journal serialization and transaction phases, never a handwritten wire schema.
+/// actual journal serialization; Unix uses real transaction phases, nonUnix uses typed
+/// codec-only fixtures. Neither path is a handwritten wire schema or activation proof.
 #[cfg(test)]
 pub(crate) mod testing {
     use super::super::native_transaction::*;
@@ -1042,6 +1050,37 @@ pub(crate) mod testing {
     pub(crate) fn initialize(owner: &mut Owner<'_>) -> Result<(), Failure> {
         owner.initialize()
     }
+    /// Codec/phase-only fixture; it does not invoke a native filesystem transaction.
+    pub(crate) fn phase_receipts(
+        root: &Path,
+        storage: &StorageContext,
+        client: &Path,
+    ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let binding = || (storage.identity(), 0);
+        let owner = Owner::new(root, storage, 0, &binding);
+        let path = root.join(crate::secrets::owned_file::WORKBUDDY_NATIVE_JOURNAL_FILE);
+        let encode = |phase| {
+            owner
+                .write(&owner_wire::State::fixture(client, phase))
+                .unwrap();
+            std::fs::read(&path).unwrap()
+        };
+        (
+            encode(Phase::Prepared),
+            encode(Phase::Restored),
+            encode(Phase::Committed),
+        )
+    }
+    #[cfg(not(unix))]
+    pub(crate) fn receipts(
+        root: &Path,
+        storage: &StorageContext,
+        client: &Path,
+    ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        // Generation gates are platform-independent, even where activation is unsupported.
+        phase_receipts(root, storage, client)
+    }
+    #[cfg(unix)]
     pub(crate) fn receipts(
         root: &Path,
         storage: &StorageContext,

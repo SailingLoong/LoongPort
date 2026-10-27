@@ -1058,7 +1058,7 @@ mod native_owner_regressions {
         f.store.parent().unwrap().join("isolated-configs")
     }
     fn receipts(f: &Fixture) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-        let client = tempfile::tempdir().unwrap();
+        let client = crate::secrets::testing::tempdir().unwrap();
         let context = f.db.secret_session().write().unwrap();
         testing::receipts(&f.root, &context, client.path())
     }

@@ -634,7 +634,7 @@ mod native_selected_owner {
     }
     impl Fixture {
         fn new() -> Self {
-            let root = tempfile::tempdir().unwrap();
+            let root = crate::secrets::testing::tempdir().unwrap();
             let store = root.path().join("control/app_paths.json");
             let data = root.path().join("data");
             let device = root.path().join("device");
@@ -731,12 +731,24 @@ mod native_selected_owner {
         drop(guard);
         let guard = lock_selected_source_at(&f.snapshot()).unwrap();
         let lock = f.store.parent().unwrap().join("app_paths.selection.lock");
-        std::fs::rename(&lock, lock.with_extension("saved")).unwrap();
-        std::fs::create_dir(&lock).unwrap();
-        std::fs::write(lock.join("foreign"), b"sentinel").unwrap();
-        assert!(guard.verify_unchanged().is_err());
-        drop(guard);
-        assert_eq!(std::fs::read(lock.join("foreign")).unwrap(), b"sentinel");
+        #[cfg(windows)]
+        {
+            // Original FileLock pins the directory against rename on Windows.
+            // Refusal is the safety contract, not a reason to weaken the owner.
+            assert!(std::fs::rename(&lock, lock.with_extension("saved")).is_err());
+            assert!(guard.verify_unchanged().is_ok());
+            drop(guard);
+            assert!(!lock.exists());
+        }
+        #[cfg(not(windows))]
+        {
+            std::fs::rename(&lock, lock.with_extension("saved")).unwrap();
+            std::fs::create_dir(&lock).unwrap();
+            std::fs::write(lock.join("foreign"), b"sentinel").unwrap();
+            assert!(guard.verify_unchanged().is_err());
+            drop(guard);
+            assert_eq!(std::fs::read(lock.join("foreign")).unwrap(), b"sentinel");
+        }
     }
     #[cfg(unix)]
     #[test]
