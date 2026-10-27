@@ -744,10 +744,20 @@ impl FixtureTransport {
                 .as_ref()
                 .is_some_and(|credentials| {
                     credentials.access_token.starts_with("synthetic-")
-                        && credentials
+                        && (credentials
                             .refresh_token
                             .as_deref()
                             .is_some_and(|r| r.starts_with("synthetic-"))
+                            || (lease.snapshot.account.id == "synthetic-native-a"
+                                && credentials.access_token == "synthetic-native-a-access"
+                                && credentials.kind == catalog::CredentialKind::NativeAccessOnly
+                                && credentials.refresh_token.is_none()
+                                && credentials.native_source.as_ref().is_some_and(|source| {
+                                    source.format == catalog::NativeSourceFormat::PublicCliOAuthV1
+                                        && source.generation == 1
+                                        && source.fingerprint == "a".repeat(64)
+                                        && !source.rejected
+                                })))
                 })
             && self.binding == lease.snapshot.binding
             && lease

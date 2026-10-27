@@ -113,3 +113,14 @@ async fn changed_configured_native_model_cannot_resolve_old_group_source() {
     )
     .await;
 }
+
+#[cfg(feature = "test-hooks")]
+native_case!(
+    expired_native_access_in_ordered_group_never_calls_a_and_uses_b,
+    "expired_ordered"
+);
+#[cfg(feature = "test-hooks")]
+native_case!(
+    expired_native_access_manual_target_never_calls_a_or_switches_to_b,
+    "expired_manual"
+);
