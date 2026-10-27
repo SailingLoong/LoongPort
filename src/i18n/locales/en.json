@@ -2607,6 +2607,7 @@
       "empty": "No repositories",
       "invalidUrl": "Invalid repository URL format",
       "addSuccess": "Repository {{owner}}/{{name}} added, detected {{count}} skills",
+      "savedRefreshFailed": "Repository {{owner}}/{{name}} was saved, but skills could not be refreshed. Refresh to see the current results.",
       "addFailed": "Failed to add",
       "removeSuccess": "Repository {{owner}}/{{name}} removed",
       "removeFailed": "Failed to remove",
