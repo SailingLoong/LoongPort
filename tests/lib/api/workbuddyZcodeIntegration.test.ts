@@ -17,7 +17,12 @@ it("batch WorkBuddy claims use one explicit backend command without ZCode partic
 });
 
 it("keeps WorkBuddy explicit single-account claims separate from ZCode automatic participants", async () => {
-  await zcodeClaimApi.setAuto("/synthetic/zcode", true, ["zcode-a"]);
+  await zcodeClaimApi.setAuto(
+    "/synthetic/zcode",
+    true,
+    ["zcode-a"],
+    "context:0",
+  );
   await workbuddyApi.list();
   await workbuddyApi.refresh("workbuddy-a");
   await workbuddyApi.refreshAll();
@@ -28,6 +33,7 @@ it("keeps WorkBuddy explicit single-account claims separate from ZCode automatic
         dataRoot: "/synthetic/zcode",
         enabled: true,
         participants: ["zcode-a"],
+        expectedRevision: "context:0",
       },
     ],
     ["list_workbuddy_accounts"],

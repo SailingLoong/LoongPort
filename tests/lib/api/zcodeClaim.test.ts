@@ -6,14 +6,19 @@ it("preserves library scope and returns backend-owned claim state", async () => 
   const state = { enabled: false, participants: [], records: {}, busy: false };
   vi.mocked(invoke).mockResolvedValue(state);
   expect(await zcodeClaimApi.state("/synthetic/library")).toEqual(state);
-  await zcodeClaimApi.setAuto("/synthetic/library", true, ["a"]);
+  await zcodeClaimApi.setAuto("/synthetic/library", true, ["a"], "context:0");
   await zcodeClaimApi.start("/synthetic/library", ["a"], true);
   await zcodeClaimApi.cancel("/synthetic/library");
   expect(vi.mocked(invoke).mock.calls).toEqual([
     ["get_zcode_claim_state", { dataRoot: "/synthetic/library" }],
     [
       "set_zcode_claim_auto",
-      { dataRoot: "/synthetic/library", enabled: true, participants: ["a"] },
+      {
+        dataRoot: "/synthetic/library",
+        enabled: true,
+        participants: ["a"],
+        expectedRevision: "context:0",
+      },
     ],
     [
       "start_zcode_claim",

@@ -61,8 +61,8 @@ export function automaticClaimSetting(account: Account) {
       enabled =
         snapshot.value.enabled &&
         snapshot.value.participants.includes(account.id);
-      canEnable = !snapshot.value.busy;
-      canDisable = !snapshot.value.busy;
+      canEnable = !snapshot.value.busy && !!snapshot.value.consentRevision;
+      canDisable = canEnable;
       if (snapshot.value.busy) reason = "claimSettings.reason.busy";
       else if (snapshot.value.records[account.id]?.reason)
         reason = "claimSettings.reason.actionRequired";
@@ -174,6 +174,19 @@ export async function setZCodeAutomaticSelection(
   if (snapshot?.kind !== "zcode") throw new Error("Unavailable policy");
   const current = await zcodeClaimApi.state(snapshot.dataRoot);
   if (current.busy) throw new Error("Owner busy");
+  if (
+    !snapshot.value.consentRevision ||
+    accounts.some((account) => {
+      const reviewed = account.snapshot;
+      return (
+        reviewed?.kind !== "zcode" ||
+        reviewed.dataRoot !== snapshot.dataRoot ||
+        reviewed.value.consentRevision !== snapshot.value.consentRevision
+      );
+    }) ||
+    current.consentRevision !== snapshot.value.consentRevision
+  )
+    throw new Error("Changed policy");
   const selected = new Set(accounts.map((account) => account.id));
   const participants = enabled
     ? [
@@ -187,8 +200,11 @@ export async function setZCodeAutomaticSelection(
     snapshot.dataRoot,
     enabled || (current.enabled && participants.length > 0),
     participants,
+    snapshot.value.consentRevision,
   );
   if (
+    !next.consentRevision ||
+    next.consentRevision === snapshot.value.consentRevision ||
     accounts.some(
       (account) =>
         (next.enabled && next.participants.includes(account.id)) !== enabled,
@@ -227,6 +243,7 @@ export function automaticPolicyStamp(account: Account): string {
     case "zcode":
       return JSON.stringify([
         s.dataRoot,
+        s.value.consentRevision,
         s.value.enabled && s.value.participants.includes(account.id),
       ]);
     default:
@@ -261,7 +278,12 @@ export function sameAutomaticClaimOwner(a: Account, b: Account): boolean {
         x.source === y.source
       );
     case "zcode":
-      return y.kind === "zcode" && x.dataRoot === y.dataRoot;
+      return (
+        y.kind === "zcode" &&
+        x.dataRoot === y.dataRoot &&
+        !!x.value.consentRevision &&
+        x.value.consentRevision === y.value.consentRevision
+      );
     default:
       return false;
   }

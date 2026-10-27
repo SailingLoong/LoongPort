@@ -141,6 +141,7 @@ it("does not enable outsiders or discard active outsiders through ZCode's shared
     kind: "zcode",
     dataRoot: "synthetic-root",
     value: {
+      consentRevision: "context:0",
       enabled: true,
       participants: ["synthetic"],
       records: {},
@@ -148,12 +149,14 @@ it("does not enable outsiders or discard active outsiders through ZCode's shared
     },
   });
   api.zcode.mockImplementation(async (_root, enabled, participants) => ({
+    consentRevision: "context:1",
     enabled,
     participants,
     records: {},
     busy: false,
   }));
   api.zcodeRead.mockResolvedValue({
+    consentRevision: "context:0",
     enabled: true,
     participants: ["outside", "synthetic"],
     records: {},
@@ -161,10 +164,16 @@ it("does not enable outsiders or discard active outsiders through ZCode's shared
   });
   const [off] = await setZCodeAutomaticSelection([account], false);
   expect(automaticClaimSetting(off).enabled).toBe(false);
-  expect(api.zcode).toHaveBeenCalledWith("synthetic-root", true, ["outside"]);
+  expect(api.zcode).toHaveBeenCalledWith(
+    "synthetic-root",
+    true,
+    ["outside"],
+    "context:0",
+  );
   const disabled = row({
     kind: "zcode",
     value: {
+      consentRevision: "context:0",
       enabled: false,
       participants: ["outside"],
       records: {},
@@ -172,6 +181,7 @@ it("does not enable outsiders or discard active outsiders through ZCode's shared
     },
   });
   api.zcodeRead.mockResolvedValue({
+    consentRevision: "context:0",
     enabled: false,
     participants: ["outside"],
     records: {},
@@ -179,7 +189,12 @@ it("does not enable outsiders or discard active outsiders through ZCode's shared
   });
   const [on] = await setZCodeAutomaticSelection([disabled], true);
   expect(automaticClaimSetting(on).enabled).toBe(true);
-  expect(api.zcode).toHaveBeenLastCalledWith(undefined, true, ["synthetic"]);
+  expect(api.zcode).toHaveBeenLastCalledWith(
+    undefined,
+    true,
+    ["synthetic"],
+    "context:0",
+  );
 });
 
 it("rejects a mismatched Qoder context before calling its setter", async () => {
@@ -199,4 +214,52 @@ it("rejects a mismatched Qoder context before calling its setter", async () => {
   api.qoder.mockResolvedValue({ ...value, revision: 3, enabled: true });
   await expect(setAutomaticClaimSetting(account, true)).rejects.toThrow();
   expect(api.qoder).not.toHaveBeenCalled();
+});
+
+it("does not rebase a stale ZCode grant onto a newer revocation", async () => {
+  const old = {
+    enabled: true,
+    participants: ["synthetic"],
+    records: {},
+    busy: false,
+    consentRevision: "context:1",
+  };
+  const account = row({
+    kind: "zcode",
+    dataRoot: "synthetic-root",
+    value: old,
+  });
+  api.zcodeRead.mockResolvedValue({
+    ...old,
+    enabled: false,
+    participants: [],
+    consentRevision: "context:2",
+  });
+  api.zcode.mockImplementation(async (_root, enabled, participants) => ({
+    ...old,
+    enabled,
+    participants,
+    consentRevision: "context:3",
+  }));
+  await expect(setZCodeAutomaticSelection([account], true)).rejects.toThrow();
+  expect(api.zcode).not.toHaveBeenCalled();
+});
+
+it("fails closed for missing or mixed ZCode consent snapshots", async () => {
+  const value = { enabled: false, participants: [], records: {}, busy: false };
+  const missing = row({ kind: "zcode", value });
+  api.zcodeRead.mockResolvedValue(value);
+  expect(automaticClaimSetting(missing).canEnable).toBe(false);
+  await expect(setZCodeAutomaticSelection([missing], true)).rejects.toThrow();
+  const a = row({
+    kind: "zcode",
+    value: { ...value, consentRevision: "context:1" },
+  });
+  const b = row({
+    kind: "zcode",
+    value: { ...value, consentRevision: "context:2" },
+  });
+  api.zcodeRead.mockResolvedValue(a.snapshot!.value);
+  await expect(setZCodeAutomaticSelection([a, b], true)).rejects.toThrow();
+  expect(api.zcode).not.toHaveBeenCalled();
 });
