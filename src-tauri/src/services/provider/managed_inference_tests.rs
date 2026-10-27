@@ -168,7 +168,11 @@ fn direct_selection_rejects_both_original_service_and_modern_application_control
                     ProviderService::switch(&fixture.state, app.clone(), &provider.id)
                         .unwrap_err()
                         .to_string()
-                        .contains("本地路由")
+                        .contains(if platform == "workbuddy" {
+                            "workbuddy.inference_paused"
+                        } else {
+                            "本地路由"
+                        })
                 );
                 if modern {
                     let _guard = futures::executor::block_on(
@@ -186,7 +190,11 @@ fn direct_selection_rejects_both_original_service_and_modern_application_control
                     )
                     .unwrap_err()
                     .to_string()
-                    .contains("本地路由"));
+                    .contains(if platform == "workbuddy" {
+                        "workbuddy.inference_paused"
+                    } else {
+                        "本地路由"
+                    }));
                 }
                 assert_eq!(std::fs::read(&fixture.path).unwrap(), before);
                 assert_eq!(
@@ -227,12 +235,31 @@ fn entering_proxy_and_selecting_account_uses_original_mode_and_request_router() 
                     .await
                     .unwrap();
                 assert!(fixture.mode().is_proxy());
-                fixture
+                let selected = fixture
                     .state
                     .proxy_service
                     .switch_proxy_target(app.as_str(), &provider.id)
-                    .await
-                    .unwrap();
+                    .await;
+                if platform == "workbuddy" {
+                    assert!(selected.unwrap_err().contains("workbuddy.inference_paused"));
+                    assert_eq!(
+                        fixture
+                            .state
+                            .db
+                            .get_current_provider(app.as_str())
+                            .unwrap()
+                            .as_deref(),
+                        Some("native")
+                    );
+                    fixture
+                        .state
+                        .proxy_service
+                        .set_takeover_for_app(app.as_str(), false)
+                        .await
+                        .unwrap();
+                    return;
+                }
+                selected.unwrap();
                 let routes =
                     crate::proxy::provider_router::ProviderRouter::new(fixture.state.db.clone())
                         .select_providers(app.as_str())

@@ -62,6 +62,7 @@ async function readAccounts(
       authProvider: platform,
       id: row.id,
       label: row.label,
+      inferencePaused: states.get(row.id) === "paused",
       // Old check-in canRefresh/canClaim says nothing about the new audience.
       available: ["ready", "refreshRequired"].includes(
         states.get(row.id) ?? "",
@@ -524,7 +525,7 @@ export function ManagedAccountProviderSection({
                 · {item.label}
                 {item.available
                   ? ""
-                  : ` (${copy("unavailable", "需重新登录或暂不可用")})`}
+                  : ` (${item.inferencePaused ? t("workbuddy.inference.state.paused", { defaultValue: "WorkBuddy 模型请求已暂停；账号管理和国内签到仍可用" }) : copy("unavailable", "需重新登录或暂不可用")})`}
               </option>
             ))}
           </select>

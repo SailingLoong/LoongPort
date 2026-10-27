@@ -88,6 +88,9 @@ fn select_legacy_locked_with_commit(
         .db
         .get_provider_by_id(&selection.provider_id, app.as_str())?
         .ok_or_else(|| AppError::Config("Provider does not exist".into()))?;
+    if crate::proxy::managed_accounts::uses_workbuddy_model_route(&provider) {
+        return Err(AppError::Config("workbuddy.inference_paused".into()));
+    }
     crate::services::provider::validate_provider_selection(&state.db, app, &provider.id)?;
     let selected_settings = selection
         .model

@@ -4935,7 +4935,8 @@
         "needsAuthorization": "尚未允許推理；已有完整登入可直接啟用",
         "ready": "推理授權已儲存（實際消費尚未驗收）",
         "refreshRequired": "推理授權需要重新整理",
-        "expired": "登入憑證已過期，請補充授權"
+        "expired": "登入憑證已過期，請補充授權",
+        "paused": "WorkBuddy 模型請求已暫停；帳號管理和國內簽到仍可用"
       }
     }
   },

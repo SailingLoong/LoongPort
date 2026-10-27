@@ -179,7 +179,7 @@ async fn expiry_consumer_never_adds_a_candidate_outside_authorized_list() {
 /// replaced by the guarded in-process synthetic transport.
 #[tokio::test]
 #[serial_test::serial]
-async fn expiry_consumer_native_owner_fields_reach_b_dispatch_without_changing_current() {
+async fn expiry_consumer_cached_workbuddy_credit_evidence_does_not_restore_model_permission() {
     use crate::{
         provider::{AuthBinding, AuthBindingSource},
         workbuddy::inference::FixtureTransport,
@@ -236,16 +236,12 @@ async fn expiry_consumer_native_owner_fields_reach_b_dispatch_without_changing_c
         json!({"model":"client-alias","stream":true,"max_tokens":16,
             "messages":[{"role":"user","content":"earlier history"},{"role":"assistant","content":"earlier answer"},{"role":"user","content":"continue"}],
             "tools":[{"name":"probe","description":"synthetic","input_schema":{"type":"object","properties":{}}}]}),
-        http::HeaderMap::new(),extensions,f.providers.clone()).await.unwrap_or_else(|e|panic!("{}",e.error));
-    assert_eq!(result.provider.id, "expiry-b");
-    assert_eq!(result.outbound_model.as_deref(), Some("final-model"));
-    let captured = transport.captured();
-    assert_eq!(captured.len(), 1);
-    assert_eq!(captured[0].0, "Bearer fixture-access-synthetic-expiry-b");
-    assert_eq!(captured[0].1["model"], "final-model");
-    assert_eq!(captured[0].1["messages"][0]["content"], "earlier history");
-    assert_eq!(captured[0].1["messages"][1]["content"], "earlier answer");
-    assert_eq!(captured[0].1["tools"][0]["function"]["name"], "probe");
+        http::HeaderMap::new(),extensions,f.providers.clone()).await;
+    assert!(
+        matches!(result, Err(ForwardError { error: ProxyError::InvalidRequest(reason), .. }) if reason == "workbuddy.inference_paused")
+    );
+    assert!(transport.captured().is_empty());
+    assert_eq!(transport.attempts(), 0);
     assert_eq!(
         f.db.get_current_provider("claude").unwrap().as_deref(),
         Some("expiry-a")
@@ -258,13 +254,6 @@ async fn expiry_consumer_native_owner_fields_reach_b_dispatch_without_changing_c
     assert_eq!(
         f.forwarder.failover_manager.join_spawned_for_test().await,
         0
-    );
-    FixtureTransport::retire_fixture_grant(f.db.secret_session(), "synthetic-expiry-b")
-        .await
-        .unwrap();
-    assert!(
-        result.response.bytes_with_limit(64 * 1024).await.is_err(),
-        "the actual selected B owner must still fence unread response bytes"
     );
 }
 

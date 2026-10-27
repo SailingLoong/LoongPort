@@ -1682,6 +1682,7 @@ impl super::ProviderService {
                     &provider.id,
                     previous,
                     previous_local_id,
+                    crate::services::proxy::HotSwitchIntent::PreserveImportedTarget,
                 ),
             )
             .map_err(AppError::Message)?;

@@ -1412,3 +1412,26 @@ it("stops inference without cancelling shared login or automatic claims", async 
   expect(api.setAutomatic).not.toHaveBeenCalled();
   expect(api.claim).not.toHaveBeenCalled();
 });
+
+it("paused WorkBuddy keeps domestic check-in and balance but no inference actions", async () => {
+  api.listInferenceAccounts.mockResolvedValue([
+    { id: row.id, state: "paused" },
+  ]);
+  render(<WorkBuddyAccounts />);
+  await screen.findByText("workbuddy.inference.state.paused");
+  expect(
+    screen.queryByRole("button", { name: "workbuddy.inference.authorize" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "workbuddy.inference.models" }),
+  ).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "workbuddy.claim" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "common.refresh" })).toBeEnabled();
+  await userEvent.click(
+    screen.getByRole("button", { name: "workbuddy.claim" }),
+  );
+  await waitFor(() => expect(api.claim).toHaveBeenCalledWith(row.id));
+  expect(api.beginInferenceLogin).not.toHaveBeenCalled();
+  expect(api.discoverModels).not.toHaveBeenCalled();
+  expect(api.setInferenceConsent).not.toHaveBeenCalled();
+});

@@ -17,7 +17,7 @@ macro_rules! case {
     };
 }
 case!(
-    configured_original_workbuddy_account_needs_no_optional_ranking_snapshot,
+    paused_workbuddy_configuration_is_visible_without_ranking_or_source_proof,
     "source"
 );
 case!(
@@ -34,23 +34,23 @@ case!(
     "unconfigured_model"
 );
 case!(
-    inference_consent_revoked_after_review_prevents_group_commit,
+    healthy_minimax_retired_after_review_prevents_group_commit,
     "preview_revoke"
 );
 case!(
-    captured_consent_does_not_revive_after_disable_and_enable,
+    paused_workbuddy_does_not_revive_after_disable_and_enable,
     "revive"
 );
 case!(
-    captured_original_grant_cannot_switch_to_replacement_grant,
+    paused_workbuddy_does_not_revive_after_replacement_grant,
     "replace"
 );
 case!(
-    explicit_channel_denial_11004_never_falls_back_across_native_accounts,
+    paused_workbuddy_never_sends_to_channel_denial_fixture,
     "denied11004"
 );
 case!(
-    explicit_account_restriction_11140_never_falls_back_across_native_accounts,
+    paused_workbuddy_never_sends_to_account_restriction_fixture,
     "denied11140"
 );
 case!(
@@ -58,15 +58,15 @@ case!(
     "nonstream"
 );
 case!(
-    committed_workbuddy_stream_never_replays_to_other_native_owner,
+    paused_stream_never_opens_or_replays_to_other_native_owner,
     "stream"
 );
 case!(
-    retired_workbuddy_owner_fences_all_buffered_response_bytes,
+    paused_workbuddy_never_produces_buffered_response_bytes,
     "revoke"
 );
 case!(
-    original_oauth_refresh_keeps_next_request_canonical_without_ranking_or_discovery,
+    paused_model_route_does_not_refresh_expired_original_grant,
     "refresh"
 );
 
@@ -75,7 +75,7 @@ case!(
     "wb_skip"
 );
 case!(
-    automatic_group_skips_minimax_local_pre_request_revocation,
+    automatic_group_with_revoked_minimax_and_paused_workbuddy_has_no_source,
     "mm_skip"
 );
 case!(
@@ -93,4 +93,30 @@ case!(
 case!(
     runtime_model_conflict_is_not_treated_as_skippable_local_unavailability,
     "runtime_model_changed"
+);
+
+case!(workbuddy_paused_source, "paused_source");
+
+case!(workbuddy_paused_preview, "paused_preview");
+
+case!(workbuddy_paused_group, "paused_group");
+
+case!(workbuddy_paused_manual, "paused_manual");
+
+case!(all_paused_group_has_no_outside_fallback, "all_paused");
+case!(healthy_minimax_manual_route_remains_available, "mm_manual");
+
+case!(
+    workbuddy_paused_selection_ipc_is_zero_write,
+    "paused_select"
+);
+
+case!(
+    old_paused_workbuddy_current_survives_real_source_import,
+    "paused_import"
+);
+
+case!(
+    workbuddy_paused_legacy_selection_and_model_order_are_zero_write,
+    "paused_legacy_select"
 );

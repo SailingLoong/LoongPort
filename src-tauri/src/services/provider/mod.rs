@@ -256,6 +256,7 @@ pub enum ProviderRoutingBadge {
 pub enum ProviderSwitchBlockReason {
     OfficialBlockedByProxy,
     NativeSourceUnavailable,
+    WorkbuddyInferencePaused,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -489,8 +490,13 @@ pub fn provider_presentation_with_context(
     } else {
         None
     };
-    let switch_blocked_reason = (context.app_taken_over && is_official && !supports_official)
-        .then_some(ProviderSwitchBlockReason::OfficialBlockedByProxy);
+    let switch_blocked_reason =
+        if crate::proxy::managed_accounts::uses_workbuddy_model_route(provider) {
+            Some(ProviderSwitchBlockReason::WorkbuddyInferencePaused)
+        } else {
+            (context.app_taken_over && is_official && !supports_official)
+                .then_some(ProviderSwitchBlockReason::OfficialBlockedByProxy)
+        };
     let uses_official_subscription_usage =
         provider_uses_official_subscription_usage(app_type, provider);
     let account_route = managed_inference::is_managed_inference(provider);
@@ -6550,6 +6556,9 @@ impl ProviderService {
                 .db
                 .get_provider_by_id(id, app_type.as_str())?
                 .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
+            if crate::proxy::managed_accounts::uses_workbuddy_model_route(&provider) {
+                return Err(AppError::Config("workbuddy.inference_paused".into()));
+            }
             validate_provider_selection(&state.db, &app_type, id)?;
             let mode = {
                 let vault = state.db.secret_session().read()?;
@@ -6618,6 +6627,9 @@ impl ProviderService {
                 .db
                 .get_provider_by_id(id, app_type.as_str())?
                 .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
+            if crate::proxy::managed_accounts::uses_workbuddy_model_route(&provider) {
+                return Err(AppError::Config("workbuddy.inference_paused".into()));
+            }
             validate_provider_selection(&state.db, &app_type, id)?;
             with_provider_config_transaction(state, &app_type, &provider, || {
                 crate::proxy::auto_strategy::set_model_pref(&state.db, app_type.as_str(), None)?;
@@ -6648,6 +6660,9 @@ impl ProviderService {
             .get(id)
             .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
 
+        if crate::proxy::managed_accounts::uses_workbuddy_model_route(_provider) {
+            return Err(AppError::Config("workbuddy.inference_paused".into()));
+        }
         validate_provider_selection(&state.db, &app_type, id)?;
 
         // OMO providers are switched through their own exclusive path.

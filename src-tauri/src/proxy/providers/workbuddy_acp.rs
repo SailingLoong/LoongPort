@@ -82,7 +82,7 @@ fn input(
     }
     let url = reqwest::Url::parse(&config.link).map_err(|_| failure())?;
     let secure = url.scheme() == "https";
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     let secure = secure || (url.scheme() == "http" && url.host_str() == Some("127.0.0.1"));
     if !secure
         || crate::proxy::http_client::url_has_credentials(&config.link)
@@ -250,6 +250,19 @@ pub(crate) async fn forward(
     endpoint: &str,
     body: &Value,
 ) -> Result<ProxyResponse, ProxyError> {
+    crate::proxy::managed_accounts::workbuddy_model_admission()?;
+    forward_protocol(app, method, provider, endpoint, body).await
+}
+
+// Retained private ACP protocol primitive; no production caller can enter it
+// without the public capability withdrawal above. Unit tests use loopback only.
+async fn forward_protocol(
+    app: &AppType,
+    method: &http::Method,
+    provider: &Provider,
+    endpoint: &str,
+    body: &Value,
+) -> Result<ProxyResponse, ProxyError> {
     let (config, text, streaming) = input(app, method, provider, endpoint, body)?;
     let guard = session_guard(&config)?;
     let client = crate::proxy::http_client::get_authenticated().map_err(|_| failure())?;
@@ -376,3 +389,10 @@ pub(crate) async fn forward(
 }
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(all(
+    any(feature = "gui", test),
+    any(test, debug_assertions, feature = "test-hooks")
+))]
+#[path = "workbuddy_acp_pause_fixture.rs"]
+pub(crate) mod pause_fixture;

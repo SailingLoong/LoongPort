@@ -1505,3 +1505,21 @@ it("does not confuse exact WorkBuddy IDs with their trimmed live replacement", a
   expect(await screen.findByRole("alert")).toHaveTextContent("重新获取");
   expect(invoke).not.toHaveBeenCalled();
 });
+
+it("shows an explicitly paused WorkBuddy account without offering model admission", async () => {
+  vi.mocked(workbuddyApi.list).mockResolvedValue([
+    { id: "paused-wb", label: "Paused CN account" },
+  ] as never);
+  vi.mocked(workbuddyApi.listInferenceAccounts).mockResolvedValue([
+    { id: "paused-wb", state: "paused" },
+  ] as never);
+  mount();
+  const option = await screen.findByRole("option", {
+    name: /Paused CN account/,
+  });
+  expect(option).toBeDisabled();
+  expect(option).toHaveTextContent(
+    "WorkBuddy 模型请求已暂停；账号管理和国内签到仍可用",
+  );
+  expect(workbuddyApi.discoverModels).not.toHaveBeenCalled();
+});

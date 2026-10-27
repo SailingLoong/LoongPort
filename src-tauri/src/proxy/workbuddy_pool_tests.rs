@@ -1,45 +1,18 @@
-//! Original ProxyServer -> selected pool -> WorkBuddy owner -> final Body tests.
-//! Only the upstream is synthetic. No replacement router or public-network fallback.
+//! Public ProxyServer pause matrix. No WorkBuddy request is permitted now.
+//! Historical wire/refusal/stream assertions remain in inference_tests as private
+//! protocol regression; these tests no longer claim to reach a paused upstream.
 use super::*;
 use crate::provider::{AuthBinding, AuthBindingSource, Provider, ProviderMeta};
 use crate::workbuddy::inference::FixtureTransport;
-use axum::{
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
-};
+use axum::http::StatusCode;
 use bytes::Bytes;
-use futures::StreamExt;
 use serde_json::{json, Value};
 use std::time::Duration;
-
-const TEXT: &str = "synthetic WorkBuddy answer";
-const FIRST:&str="data: {\"id\":\"chat-synthetic\",\"object\":\"chat.completion.chunk\",\"model\":\"synthetic-wb-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"synthetic WorkBuddy answer\"},\"finish_reason\":null}]}\n\n";
-const DONE:&str="data: {\"id\":\"chat-synthetic\",\"object\":\"chat.completion.chunk\",\"model\":\"synthetic-wb-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}\n\ndata: [DONE]\n\n";
-#[derive(Clone, Copy)]
-enum Behavior {
-    Complete,
-    FirstRateLimited,
-    FirstRetiredAfterReceipt,
-    Refused(u16, i64),
-    StreamRefusal,
-    StreamFailure,
-    CleanEof,
-    CompletedThenError(bool),
-    UnicodeFirst,
-    StructuredStreamDenial(i64, bool),
-}
-#[derive(Clone)]
-struct Captured {
-    headers: HeaderMap,
-    body: Value,
-}
 struct Fixture {
     db: Arc<Database>,
     proxy: ProxyServer,
     transport: FixtureTransport,
-    calls: Arc<std::sync::Mutex<Vec<Captured>>>,
-    retirement_completed: Arc<std::sync::atomic::AtomicBool>,
-    release: Arc<tokio::sync::Notify>,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
     origin: String,
     upstream: tokio::task::JoinHandle<()>,
     _serial: tokio::sync::OwnedMutexGuard<()>,
@@ -51,9 +24,7 @@ impl Drop for Fixture {
     }
 }
 impl Fixture {
-    async fn new(behavior: Behavior) -> Self {
-        let home = crate::secrets::testing::TestHome::new().unwrap();
-        assert!(std::env::var_os("CC_SWITCH_TEST_HOME").is_some());
+    async fn new() -> Self {
         static SERIAL: std::sync::OnceLock<Arc<tokio::sync::Mutex<()>>> =
             std::sync::OnceLock::new();
         let serial = SERIAL
@@ -61,72 +32,18 @@ impl Fixture {
             .clone()
             .lock_owned()
             .await;
+        let home = crate::secrets::testing::TestHome::new().unwrap();
         let db = Arc::new(Database::memory().unwrap());
         let accounts =
             FixtureTransport::seed_accounts(db.secret_session(), &["synthetic-a", "synthetic-b"])
                 .await
                 .unwrap();
-        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let upstream_calls = calls.clone();
-        let retirement_db = db.clone();
-        let retirement_completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let upstream_retirement = retirement_completed.clone();
-        let release = Arc::new(tokio::sync::Notify::new());
-        let upstream_release = release.clone();
-        let app=axum::Router::new().route("/v2/chat/completions",axum::routing::post(move |headers:HeaderMap,axum::Json(body):axum::Json<Value>|{
-            let calls=upstream_calls.clone();let release=upstream_release.clone();let retirement_db=retirement_db.clone();let retirement_completed=upstream_retirement.clone();async move {
-                let first=headers.get("authorization").unwrap()=="Bearer fixture-access-synthetic-a";
-                calls.lock().unwrap().push(Captured{headers,body});
-                if first && matches!(behavior, Behavior::FirstRetiredAfterReceipt) {
-                    // Complete request receipt is established by the JSON extractor.
-                    FixtureTransport::retire_fixture_grant(retirement_db.secret_session(), "synthetic-a").await.unwrap();
-                        retirement_completed.store(true, std::sync::atomic::Ordering::Release);
-                }
-                if first&&matches!(behavior,Behavior::FirstRateLimited){return(StatusCode::TOO_MANY_REQUESTS,[("retry-after","0")],axum::Json(json!({"code":429,"msg":"fixture-access-synthetic-a"}))).into_response();}
-                if let Behavior::Refused(status,code)=behavior{return(StatusCode::from_u16(status).unwrap(),axum::Json(json!({"error":{"data":{"code":code,"msg":"fixture-access-synthetic-a"}}}))).into_response();}
-                if first {
-                    if let Behavior::StructuredStreamDenial(code, late) = behavior {
-                        let stream = async_stream::stream! {
-                            if late {
-                                yield Ok::<Bytes, std::io::Error>(Bytes::from_static(FIRST.as_bytes()));
-                                release.notified().await;
-                            }
-                            // Deliberately lacks event:error / top-level error. Exact
-                            // upstream numeric code still establishes a refusal.
-                            yield Ok::<Bytes, std::io::Error>(Bytes::from(format!("data: {{\"data\":{{\"code\":{code}}}}}\n\n")));
-                            yield Ok(Bytes::from_static(DONE.as_bytes()));
-                        };
-                        return ([("content-type", "text/event-stream")], axum::body::Body::from_stream(stream)).into_response();
-                    }
-                }
-                if first && matches!(behavior, Behavior::UnicodeFirst) {
-                    let encoded: String = "fixture-access-synthetic-a".chars().map(|c| format!("\\u{:04x}", c as u32)).collect();
-                    let wire = format!("data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{encoded}\"}}}}]}}\n\ndata: [DONE]\n\n");
-                    return ([("content-type", "text/event-stream")], wire).into_response();
-                }
-                if let Behavior::CompletedThenError(done) = behavior {
-                    let stream = async_stream::stream! {
-                        yield Ok::<Bytes, std::io::Error>(Bytes::from_static(FIRST.as_bytes()));
-                        release.notified().await;
-                        if done { yield Ok(Bytes::from_static(b"data: [DONE]\n\n")); }
-                        else { yield Ok(Bytes::from_static(b"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")); }
-                        tokio::task::yield_now().await;
-                        yield Ok(Bytes::from_static(b"data: {\"error\":{\"type\":\"server_error\",\"code\":503,\"message\":\"general synthetic server error\"}}\n\n"));
-                    };
-                    return ([("content-type", "text/event-stream")], axum::body::Body::from_stream(stream)).into_response();
-                }
-                if matches!(behavior,Behavior::StreamRefusal|Behavior::StreamFailure|Behavior::CleanEof){
-                    let stream=async_stream::stream!{
-                        yield Ok::<Bytes,std::io::Error>(Bytes::from_static(FIRST.as_bytes()));
-                        release.notified().await;
-                        if matches!(behavior,Behavior::StreamFailure){yield Err(std::io::Error::other("fixture-access-synthetic-a synthetic failure"));}
-                        else if matches!(behavior,Behavior::StreamRefusal){yield Ok(Bytes::from_static(b"data: {\"error\":{\"type\":\"access_denied\",\"code\":11140,\"message\":\"WorkBuddy restricted this account\"}}\n\n"));}
-                    };
-                    return ([("content-type","text/event-stream")],axum::body::Body::from_stream(stream)).into_response();
-                }
-                ([("content-type","text/event-stream")],format!("{FIRST}{DONE}")).into_response()
-            }
-        }));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits = calls.clone();
+        let app = axum::Router::new().fallback(move || {
+            hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { StatusCode::BAD_REQUEST }
+        });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let upstream = tokio::spawn(async move {
@@ -175,17 +92,26 @@ impl Fixture {
             Arc::new(crate::proxy::model_alignment::ModelAlignmentAlerts::new()),
         );
         Self {
-            _home: home,
             db,
             proxy,
             transport,
             calls,
-            retirement_completed,
-            release,
             origin,
             upstream,
             _serial: serial,
+            _home: home,
         }
+    }
+    async fn assert_paused(&self, response: axum::response::Response) {
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = collect(response).await;
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("workbuddy.inference_paused"), "{text}");
+        assert!(!text.contains("fixture-access"));
+        assert!(!text.contains("message_stop") && !text.contains("response.completed"));
+        assert_eq!(self.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(self.transport.attempts(), 0);
+        self.idle().await;
     }
     async fn request(&self, path: &str, body: Value) -> axum::response::Response {
         self.request_with(path, body, Some(self.transport.clone()))
@@ -240,300 +166,194 @@ async fn collect(response: axum::response::Response) -> Bytes {
     .unwrap()
     .unwrap()
 }
-fn wire(call: &Captured, account: &str) {
-    assert_eq!(
-        call.headers["authorization"],
-        format!("Bearer fixture-access-{account}")
-    );
-    assert_eq!(call.headers["x-user-id"], account);
-    assert_eq!(call.headers["x-domain"], "www.workbuddy.cn");
-    assert_eq!(call.headers["user-agent"], "WorkBuddy/5.5.6");
-    assert_eq!(call.headers["accept-encoding"], "identity");
-    assert_eq!(call.body["stream"], true);
-    assert!(!call.headers.contains_key("x-api-key"));
-}
-
-#[tokio::test]
-#[serial_test::serial]
-async fn workbuddy_chat_original_pool_uses_second_account_after_technical_429() {
-    let f = Fixture::new(Behavior::FirstRateLimited).await;
-    let request = chat(true);
-    let response = f.request("/v1/chat/completions", request.clone()).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let bytes = collect(response).await;
-    assert!(String::from_utf8_lossy(&bytes).contains(TEXT));
-    assert!(!String::from_utf8_lossy(&bytes).contains("fixture-access"));
-    let calls = f.calls.lock().unwrap().clone();
-    assert_eq!(calls.len(), 2);
-    wire(&calls[0], "synthetic-a");
-    wire(&calls[1], "synthetic-b");
-    assert_eq!(calls[1].body["messages"], request["messages"]);
-    assert_eq!(f.transport.attempts(), 2);
-    f.idle().await;
-}
-#[tokio::test]
-#[serial_test::serial]
-async fn workbuddy_exact_denials_are_terminal_before_account_failover() {
-    for (status, code) in [(403, 11004), (403, 11140), (401, 11140), (200, 11004)] {
-        let f = Fixture::new(Behavior::Refused(status, code)).await;
-        let response = f.request("/v1/chat/completions", chat(true)).await;
-        assert!(!response.status().is_success());
-        let bytes = collect(response).await;
-        assert!(!String::from_utf8_lossy(&bytes).contains("fixture-access"));
-        assert!(String::from_utf8_lossy(&bytes).contains(&format!("workbuddy_{code}")));
-        assert_eq!(f.calls.lock().unwrap().len(), 1);
-        assert_eq!(f.transport.attempts(), 1);
-        f.idle().await;
-    }
-}
-#[tokio::test]
-#[serial_test::serial]
-async fn workbuddy_nonstream_request_is_explicitly_unsupported_and_zero_post() {
-    let f = Fixture::new(Behavior::Complete).await;
-    let response = f.request("/v1/chat/completions", chat(false)).await;
-    assert!(!response.status().is_success());
-    let _ = collect(response).await;
-    assert_eq!(f.transport.attempts(), 0);
-    assert!(f.calls.lock().unwrap().is_empty());
-    f.idle().await;
-}
-#[tokio::test]
-#[serial_test::serial]
-async fn workbuddy_final_body_rejects_retired_session_after_original_prime() {
-    let f = Fixture::new(Behavior::Complete).await;
-    let response = f.request("/v1/chat/completions", chat(true)).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    f.db.secret_session().set_blocked(true);
-    assert!(tokio::time::timeout(
-        Duration::from_secs(5),
-        axum::body::to_bytes(response.into_body(), 1024 * 1024)
-    )
-    .await
-    .unwrap()
-    .is_err());
-    assert_eq!(f.calls.lock().unwrap().len(), 1);
-    f.idle().await;
-}
-#[tokio::test]
-#[serial_test::serial]
-async fn workbuddy_midstream_failure_and_refusal_never_replay_or_switch_account() {
-    for behavior in [Behavior::StreamFailure, Behavior::StreamRefusal] {
-        let f = Fixture::new(behavior).await;
-        let response = f.request("/v1/chat/completions", chat(true)).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let mut stream = response.into_body().into_data_stream();
-        let mut emitted = Vec::new();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !String::from_utf8_lossy(&emitted).contains(TEXT) {
-                emitted.extend_from_slice(&stream.next().await.expect("output absent").unwrap());
-            }
-        })
-        .await
-        .unwrap();
-        f.release.notify_one();
-        let mut failed = false;
-        let mut failure = String::new();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while let Some(chunk) = stream.next().await {
-                match chunk {
-                    Ok(bytes) => emitted.extend_from_slice(&bytes),
-                    Err(error) => {
-                        failed = true;
-                        failure = error.to_string();
-                        break;
-                    }
-                }
-            }
-        })
-        .await
-        .unwrap();
-        drop(stream);
-        let text = String::from_utf8_lossy(&emitted);
-        assert_eq!(text.matches(TEXT).count(), 1);
-        assert!(!text.contains("fixture-access"));
-        if matches!(behavior, Behavior::StreamRefusal) {
-            assert!(text.contains("11140") || failure.contains("11140"));
-        } else {
-            assert!(failed || text.contains("error"));
-        }
-        assert_eq!(f.calls.lock().unwrap().len(), 1);
-        assert_eq!(f.transport.attempts(), 1);
-        f.idle().await;
-    }
-}
-#[tokio::test]
-#[serial_test::serial]
-async fn workbuddy_claude_original_entry_converts_tools_once_into_chat() {
-    let f = Fixture::new(Behavior::Complete).await;
-    let response=f.request("/v1/messages",json!({"model":"synthetic-wb-model","stream":true,"max_tokens":64,"system":"preserved system","tools":[{"name":"lookup","description":"test","input_schema":{"type":"object","properties":{"city":{"type":"string"}}}}],"tool_choice":{"type":"auto"},"messages":[{"role":"user","content":"synthetic prompt"}]})).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let bytes = collect(response).await;
-    let text = String::from_utf8_lossy(&bytes);
-    assert!(text.contains(TEXT));
-    assert!(text.contains("content_block_delta"));
-    let calls = f.calls.lock().unwrap().clone();
-    assert_eq!(calls.len(), 1);
-    wire(&calls[0], "synthetic-a");
-    assert_eq!(calls[0].body["tools"][0]["type"], "function");
-    assert_eq!(calls[0].body["tools"][0]["function"]["name"], "lookup");
-    assert!(calls[0].body["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|m| m["role"] == "system" && m["content"] == "preserved system"));
-    f.idle().await;
-}
-#[tokio::test]
-#[serial_test::serial]
-async fn workbuddy_missing_or_foreign_fixture_is_zero_http_without_public_fallback() {
-    let f = Fixture::new(Behavior::Complete).await;
-    let response = f
-        .request_with("/v1/chat/completions", chat(true), None)
+#[cfg_attr(test, tokio::test)]
+#[cfg_attr(test, serial_test::serial)]
+async fn workbuddy_all_account_auto_pool_is_paused_without_retry() {
+    let f = Fixture::new().await;
+    f.assert_paused(f.request("/v1/chat/completions", chat(true)).await)
         .await;
-    assert!(!response.status().is_success());
-    let _ = collect(response).await;
-    assert_eq!(f.transport.attempts(), 0);
-    for id in ["workbuddy-a", "workbuddy-b"] {
-        f.proxy.reset_provider_circuit_breaker(id, "codex").await;
+}
+#[cfg_attr(test, tokio::test)]
+#[cfg_attr(test, serial_test::serial)]
+async fn workbuddy_manual_selection_never_switches_account() {
+    let f = Fixture::new().await;
+    let mut c = f.db.get_proxy_config_for_app("codex").await.unwrap();
+    c.auto_failover_enabled = false;
+    f.db.update_proxy_config_for_app(c).await.unwrap();
+    f.assert_paused(f.request("/v1/chat/completions", chat(true)).await)
+        .await;
+}
+#[cfg_attr(test, tokio::test)]
+#[cfg_attr(test, serial_test::serial)]
+async fn workbuddy_nonstream_is_paused_without_post() {
+    let f = Fixture::new().await;
+    f.assert_paused(f.request("/v1/chat/completions", chat(false)).await)
+        .await;
+}
+#[cfg_attr(test, tokio::test)]
+#[cfg_attr(test, serial_test::serial)]
+async fn workbuddy_paused_response_contains_no_buffered_upstream_bytes() {
+    let f = Fixture::new().await;
+    let r = f.request("/v1/chat/completions", chat(true)).await;
+    f.db.secret_session().set_blocked(true);
+    f.assert_paused(r).await;
+}
+#[cfg_attr(test, tokio::test)]
+#[cfg_attr(test, serial_test::serial)]
+async fn workbuddy_repeated_requests_never_open_stream_or_change_accounts() {
+    let f = Fixture::new().await;
+    for _ in 0..2 {
+        f.assert_paused(f.request("/v1/chat/completions", chat(true)).await)
+            .await;
     }
+}
+#[cfg_attr(test, tokio::test)]
+#[cfg_attr(test, serial_test::serial)]
+async fn workbuddy_claude_tools_input_is_paused_before_conversion_dispatch() {
+    let f = Fixture::new().await;
+    let body = json!({"model":"synthetic-wb-model","stream":true,"max_tokens":64,"system":"preserved system","tools":[{"name":"lookup","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"synthetic"}]});
+    f.assert_paused(f.request("/v1/messages", body).await).await;
+}
+#[cfg_attr(test, tokio::test)]
+#[cfg_attr(test, serial_test::serial)]
+async fn workbuddy_missing_or_foreign_fixture_has_zero_http() {
+    let f = Fixture::new().await;
+    f.assert_paused(
+        f.request_with("/v1/chat/completions", chat(true), None)
+            .await,
+    )
+    .await;
     let foreign = Database::memory().unwrap();
     FixtureTransport::seed_accounts(foreign.secret_session(), &["synthetic-foreign"])
         .await
         .unwrap();
     let wrong = FixtureTransport::loopback(foreign.secret_session(), &f.origin).unwrap();
-    let response = f
-        .request_with("/v1/chat/completions", chat(true), Some(wrong.clone()))
-        .await;
-    assert!(!response.status().is_success());
-    let _ = collect(response).await;
+    f.assert_paused(
+        f.request_with("/v1/chat/completions", chat(true), Some(wrong.clone()))
+            .await,
+    )
+    .await;
     assert_eq!(wrong.attempts(), 0);
-    assert!(f.calls.lock().unwrap().is_empty());
-    f.idle().await;
 }
-
-#[tokio::test]
-#[serial_test::serial]
-async fn workbuddy_codex_responses_original_entry_roundtrips_text_and_tools_via_chat() {
-    let f = Fixture::new(Behavior::Complete).await;
-    let response = f.request("/v1/responses", json!({
-        "model":"synthetic-wb-model", "stream":true, "instructions":"preserved Codex instruction",
-        "tools":[{"type":"function","name":"lookup","description":"test","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}],
-        "input":"synthetic prompt"
-    })).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let bytes = collect(response).await;
-    let text = String::from_utf8_lossy(&bytes);
-    assert!(text.contains("response.output_text.delta"));
-    assert!(text.contains("response.completed"));
-    assert!(text.contains(TEXT));
-    let calls = f.calls.lock().unwrap().clone();
-    assert_eq!(calls.len(), 1);
-    wire(&calls[0], "synthetic-a");
-    assert_eq!(calls[0].body["tools"][0]["type"], "function");
-    assert_eq!(calls[0].body["tools"][0]["function"]["name"], "lookup");
-    assert!(calls[0].body["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|message| {
-            matches!(message["role"].as_str(), Some("system" | "developer"))
-                && message["content"] == "preserved Codex instruction"
-        }));
-    f.idle().await;
+#[cfg_attr(test, tokio::test)]
+#[cfg_attr(test, serial_test::serial)]
+async fn workbuddy_codex_responses_tools_input_is_paused_before_dispatch() {
+    let f = Fixture::new().await;
+    let body = json!({"model":"synthetic-wb-model","stream":true,"instructions":"preserved Codex instruction","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"input":"synthetic prompt"});
+    f.assert_paused(f.request("/v1/responses", body).await)
+        .await;
 }
-#[tokio::test]
-#[serial_test::serial]
-async fn workbuddy_unsafe_first_event_is_terminal_and_never_uses_second_account() {
-    for endpoint in ["/v1/chat/completions", "/v1/responses"] {
-        let f = Fixture::new(Behavior::UnicodeFirst).await;
-        let body = if endpoint.ends_with("responses") {
-            json!({"model":"synthetic-wb-model","stream":true,"input":"synthetic prompt"})
-        } else {
-            chat(true)
-        };
-        let response = f.request(endpoint, body).await;
-        assert!(!response.status().is_success());
-        let bytes = collect(response).await;
-        let text = String::from_utf8_lossy(&bytes);
-        assert!(!text.contains("fixture-access"));
-        assert!(!text.contains("\\u0066"));
-        assert!(!text.contains(TEXT));
-        assert_eq!(f.calls.lock().unwrap().len(), 1);
-        assert_eq!(f.transport.attempts(), 1);
-        f.idle().await;
-    }
+#[cfg_attr(test, tokio::test)]
+#[cfg_attr(test, serial_test::serial)]
+async fn workbuddy_empty_input_is_never_model_permission() {
+    let f = Fixture::new().await;
+    f.assert_paused(
+        f.request(
+            "/v1/chat/completions",
+            json!({"model":"synthetic-wb-model","stream":true,"messages":[]}),
+        )
+        .await,
+    )
+    .await;
 }
-
-#[tokio::test]
-#[serial_test::serial]
-async fn workbuddy_structured_sse_refusal_keeps_meaning_at_all_original_entries() {
+#[cfg_attr(test, tokio::test)]
+#[cfg_attr(test, serial_test::serial)]
+async fn workbuddy_all_three_public_entries_pause_stream_and_nonstream() {
+    let f = Fixture::new().await;
     for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
-        for code in [11004, 11140] {
-            for late in [false, true] {
-                let f = Fixture::new(Behavior::StructuredStreamDenial(code, late)).await;
-                let body = if path.ends_with("responses") {
-                    json!({"model":"synthetic-wb-model","stream":true,"input":"synthetic prompt"})
-                } else {
-                    json!({"model":"synthetic-wb-model","stream":true,"max_tokens":256,"messages":[{"role":"user","content":"synthetic prompt"}]})
-                };
-                let response = f.request(path, body).await;
-                if !late {
-                    assert!(!response.status().is_success());
-                }
-                let mut stream = response.into_body().into_data_stream();
-                let mut bytes = Vec::new();
-                let mut failure = String::new();
-                tokio::time::timeout(Duration::from_secs(5), async {
-                    if late {
-                        while !String::from_utf8_lossy(&bytes).contains(TEXT) {
-                            bytes.extend_from_slice(
-                                &stream.next().await.expect("visible output absent").unwrap(),
-                            );
-                        }
-                        f.release.notify_one();
-                    }
-                    while let Some(chunk) = stream.next().await {
-                        match chunk {
-                            Ok(chunk) => bytes.extend_from_slice(&chunk),
-                            Err(error) => {
-                                failure = error.to_string();
-                                break;
-                            }
-                        }
-                    }
-                })
-                .await
-                .unwrap();
-                drop(stream);
-                let text = String::from_utf8_lossy(&bytes);
-                let terminal = format!("{text}{failure}");
-                assert!(
-                    terminal.contains(&code.to_string()),
-                    "{path}: refusal code lost"
-                );
-                let meaning = if code == 11004 {
-                    "unapproved channel"
-                } else {
-                    "unusual activity"
-                };
-                assert!(terminal.contains(meaning), "{path}: refusal meaning lost");
-                assert!(!text.contains("response.completed"));
-                assert!(!text.contains("message_stop"));
-                assert!(!text.contains("fixture-access"));
-                assert_eq!(text.matches(TEXT).count(), usize::from(late));
-                assert_eq!(f.calls.lock().unwrap().len(), 1);
-                assert_eq!(f.transport.attempts(), 1);
-                f.idle().await;
-            }
+        for stream in [true, false] {
+            let body = if path.ends_with("responses") {
+                json!({"model":"synthetic-wb-model","stream":stream,"input":"synthetic"})
+            } else {
+                json!({"model":"synthetic-wb-model","stream":stream,"max_tokens":32,"messages":[{"role":"user","content":"synthetic"}]})
+            };
+            f.assert_paused(f.request(path, body).await).await;
         }
     }
 }
+#[cfg_attr(test, tokio::test)]
+#[cfg_attr(test, serial_test::serial)]
+async fn workbuddy_pause_does_not_rewrite_provider_or_priority() {
+    let f = Fixture::new().await;
+    let before = serde_json::to_value(f.db.get_all_providers("codex").unwrap()).unwrap();
+    let queue = serde_json::to_value(f.db.get_failover_queue("codex").unwrap()).unwrap();
+    f.assert_paused(f.request("/v1/chat/completions", chat(true)).await)
+        .await;
+    assert_eq!(
+        serde_json::to_value(f.db.get_all_providers("codex").unwrap()).unwrap(),
+        before
+    );
+    assert_eq!(
+        serde_json::to_value(f.db.get_failover_queue("codex").unwrap()).unwrap(),
+        queue
+    );
+}
+#[cfg_attr(test, tokio::test)]
+#[cfg_attr(test, serial_test::serial)]
+async fn workbuddy_free_only_stays_terminal_without_any_model_request() {
+    let f = Fixture::new().await;
+    let mut body = chat(true);
+    body["model"] = json!("openrouter/free");
+    let r = f.request("/v1/chat/completions", body).await;
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    assert!(String::from_utf8_lossy(&collect(r).await).contains("Free-only route unavailable"));
+    assert_eq!(f.transport.attempts(), 0);
+    assert_eq!(f.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+#[cfg_attr(test, tokio::test)]
+#[cfg_attr(test, serial_test::serial)]
+async fn workbuddy_replaced_grant_cannot_resurrect_paused_route() {
+    let f = Fixture::new().await;
+    FixtureTransport::mutate_fixture_grant(f.db.secret_session(), "synthetic-a", "replace")
+        .await
+        .unwrap();
+    f.assert_paused(f.request("/v1/chat/completions", chat(true)).await)
+        .await;
+}
+#[cfg_attr(test, tokio::test)]
+#[cfg_attr(test, serial_test::serial)]
+async fn workbuddy_retired_first_owner_does_not_enable_second_paused_owner() {
+    let f = Fixture::new().await;
+    FixtureTransport::retire_fixture_grant(f.db.secret_session(), "synthetic-a")
+        .await
+        .unwrap();
+    f.assert_paused(f.request("/v1/chat/completions", chat(true)).await)
+        .await;
+}
 
-#[test]
+#[cfg_attr(test, test)]
 fn workbuddy_managed_protocol_is_mutually_exclusive_despite_editable_metadata() {
     use crate::proxy::providers::{
         codex_provider_uses_anthropic, codex_provider_uses_chat_completions, get_claude_api_format,
     };
+    // Downstream client names/ordinary BYOK endpoints are not upstream accounts.
+    for name in ["WorkBuddy", "CodeBuddy"] {
+        let p = Provider::with_id(
+            "synthetic-downstream".into(),
+            name.into(),
+            json!({"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:9","ANTHROPIC_AUTH_TOKEN":"synthetic-byok"}}),
+            None,
+        );
+        assert!(!crate::proxy::managed_accounts::uses_workbuddy_model_route(
+            &p
+        ));
+    }
+    for kind in ["qoder_sdk", "qoder_cn", "qoder_cn_device"] {
+        let mut p = Provider::with_id(
+            "synthetic-qoder".into(),
+            "Original Qoder".into(),
+            json!({"workbuddy_acp":{}}),
+            None,
+        );
+        p.meta = Some(ProviderMeta {
+            provider_type: Some(kind.into()),
+            ..Default::default()
+        });
+        assert!(crate::proxy::qoder_http::enabled(&p));
+        assert!(!crate::proxy::managed_accounts::uses_workbuddy_model_route(
+            &p
+        ));
+    }
     for (auth_provider, expected) in [
         ("workbuddy", "openai_chat"),
         ("minimax_code", "anthropic"),
@@ -579,149 +399,53 @@ fn workbuddy_managed_protocol_is_mutually_exclusive_despite_editable_metadata() 
     }
 }
 
-#[tokio::test]
-#[serial_test::serial]
-async fn workbuddy_clean_eof_after_output_is_terminal_at_all_original_entries() {
-    for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
-        let f = Fixture::new(Behavior::CleanEof).await;
-        let body = if path.ends_with("responses") {
-            json!({"model":"synthetic-wb-model","stream":true,"input":"synthetic prompt"})
-        } else {
-            json!({"model":"synthetic-wb-model","stream":true,"max_tokens":256,"messages":[{"role":"user","content":"synthetic prompt"}]})
-        };
-        let response = f.request(path, body).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let mut stream = response.into_body().into_data_stream();
-        let mut bytes = Vec::new();
-        let mut failed = false;
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !String::from_utf8_lossy(&bytes).contains(TEXT) {
-                bytes.extend_from_slice(
-                    &stream.next().await.expect("visible output absent").unwrap(),
-                );
-            }
-            // End a valid HTTP/SSE transport without a protocol completion event.
-            f.release.notify_one();
-            while let Some(chunk) = stream.next().await {
-                match chunk {
-                    Ok(chunk) => bytes.extend_from_slice(&chunk),
-                    Err(_) => {
-                        failed = true;
-                        break;
-                    }
-                }
-            }
-        })
-        .await
-        .unwrap();
-        drop(stream);
-        let text = String::from_utf8_lossy(&bytes);
-        assert!(
-            failed || text.contains("error"),
-            "{path}: clean EOF became success"
-        );
-        assert!(!text.contains("response.completed"));
-        assert!(!text.contains("message_stop"));
-        assert!(!text.contains("[DONE]"));
-        assert!(!text.contains("fixture-access"));
-        assert_eq!(text.matches(TEXT).count(), 1);
-        assert_eq!(f.calls.lock().unwrap().len(), 1);
-        assert_eq!(f.transport.attempts(), 1);
-        f.idle().await;
-    }
-}
-
-#[tokio::test]
-#[serial_test::serial]
-async fn workbuddy_completion_then_error_cannot_escape_at_all_original_entries() {
-    for terminal_done in [false, true] {
-        for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
-            let f = Fixture::new(Behavior::CompletedThenError(terminal_done)).await;
-            let body = if path.ends_with("responses") {
-                json!({"model":"synthetic-wb-model","stream":true,"input":"synthetic prompt"})
-            } else {
-                json!({"model":"synthetic-wb-model","stream":true,"max_tokens":256,"messages":[{"role":"user","content":"synthetic prompt"}]})
-            };
-            let response = f.request(path, body).await;
-            assert_eq!(response.status(), StatusCode::OK);
-            let mut stream = response.into_body().into_data_stream();
-            let mut bytes = Vec::new();
-            let mut failed = false;
-            tokio::time::timeout(Duration::from_secs(5), async {
-                while !String::from_utf8_lossy(&bytes).contains(TEXT) {
-                    bytes.extend_from_slice(
-                        &stream.next().await.expect("visible output absent").unwrap(),
-                    );
-                }
-                // Emit a completion signal followed by a general error only after visible output.
-                f.release.notify_one();
-                while let Some(chunk) = stream.next().await {
-                    match chunk {
-                        Ok(chunk) => bytes.extend_from_slice(&chunk),
-                        Err(_) => {
-                            failed = true;
-                            break;
-                        }
-                    }
-                }
-            })
-            .await
-            .unwrap();
-            drop(stream);
-            let text = String::from_utf8_lossy(&bytes);
-            assert!(
-                failed || text.contains("error"),
-                "{path}: completion followed by error became success"
-            );
-            assert!(!text.contains("response.completed"));
-            assert!(!text.contains("message_stop"));
-            assert!(!text.contains("[DONE]"));
-            assert!(!text.contains("\"finish_reason\":\"stop\""));
-            assert!(!text.contains("fixture-access"));
-            assert_eq!(text.matches(TEXT).count(), 1);
-            assert_eq!(f.calls.lock().unwrap().len(), 1);
-            assert_eq!(f.transport.attempts(), 1);
-            f.idle().await;
+/// Same original public consumer cases, exposed only to the synthetic test target.
+#[cfg(all(feature = "gui", feature = "test-hooks", not(test)))]
+pub(crate) async fn verify(case: &str) {
+    match case {
+        "workbuddy_all_account_auto_pool_is_paused_without_retry" => {
+            workbuddy_all_account_auto_pool_is_paused_without_retry().await
         }
+        "workbuddy_manual_selection_never_switches_account" => {
+            workbuddy_manual_selection_never_switches_account().await
+        }
+        "workbuddy_nonstream_is_paused_without_post" => {
+            workbuddy_nonstream_is_paused_without_post().await
+        }
+        "workbuddy_paused_response_contains_no_buffered_upstream_bytes" => {
+            workbuddy_paused_response_contains_no_buffered_upstream_bytes().await
+        }
+        "workbuddy_repeated_requests_never_open_stream_or_change_accounts" => {
+            workbuddy_repeated_requests_never_open_stream_or_change_accounts().await
+        }
+        "workbuddy_claude_tools_input_is_paused_before_conversion_dispatch" => {
+            workbuddy_claude_tools_input_is_paused_before_conversion_dispatch().await
+        }
+        "workbuddy_missing_or_foreign_fixture_has_zero_http" => {
+            workbuddy_missing_or_foreign_fixture_has_zero_http().await
+        }
+        "workbuddy_codex_responses_tools_input_is_paused_before_dispatch" => {
+            workbuddy_codex_responses_tools_input_is_paused_before_dispatch().await
+        }
+        "workbuddy_empty_input_is_never_model_permission" => {
+            workbuddy_empty_input_is_never_model_permission().await
+        }
+        "workbuddy_all_three_public_entries_pause_stream_and_nonstream" => {
+            workbuddy_all_three_public_entries_pause_stream_and_nonstream().await
+        }
+        "workbuddy_pause_does_not_rewrite_provider_or_priority" => {
+            workbuddy_pause_does_not_rewrite_provider_or_priority().await
+        }
+        "workbuddy_free_only_stays_terminal_without_any_model_request" => {
+            workbuddy_free_only_stays_terminal_without_any_model_request().await
+        }
+        "workbuddy_replaced_grant_cannot_resurrect_paused_route" => {
+            workbuddy_replaced_grant_cannot_resurrect_paused_route().await
+        }
+        "workbuddy_retired_first_owner_does_not_enable_second_paused_owner" => {
+            workbuddy_retired_first_owner_does_not_enable_second_paused_owner().await
+        }
+        "protocol" => workbuddy_managed_protocol_is_mutually_exclusive_despite_editable_metadata(),
+        _ => panic!("unknown public pause case"),
     }
-}
-
-#[tokio::test]
-#[serial_test::serial]
-async fn workbuddy_owner_retired_after_receipt_never_replays() {
-    let f = Fixture::new(Behavior::FirstRetiredAfterReceipt).await;
-    let response = f.request("/v1/chat/completions", chat(true)).await;
-    assert!(
-        f.retirement_completed
-            .load(std::sync::atomic::Ordering::Acquire),
-        "upstream must complete persisted owner retirement, not merely drop the connection"
-    );
-    assert_eq!(
-        f.calls.lock().unwrap().len(),
-        1,
-        "post-send owner invalidation cannot select account B"
-    );
-    assert!(!response.status().is_success());
-    drop(response);
-    f.idle().await;
-}
-
-#[tokio::test]
-#[serial_test::serial]
-async fn workbuddy_owner_retired_before_send_can_select_other_account() {
-    let f = Fixture::new(Behavior::Complete).await;
-    FixtureTransport::retire_fixture_grant(f.db.secret_session(), "synthetic-a")
-        .await
-        .unwrap();
-    let response = f.request("/v1/chat/completions", chat(true)).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let calls = f.calls.lock().unwrap().clone();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(
-        calls[0].headers["authorization"],
-        "Bearer fixture-access-synthetic-b"
-    );
-    let body = collect(response).await;
-    assert!(String::from_utf8_lossy(&body).contains(TEXT));
-    f.idle().await;
 }

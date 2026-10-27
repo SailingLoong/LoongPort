@@ -469,6 +469,12 @@ function TierRow({
             {tier?.effectiveModel ?? item.model}
           </p>
         )}
+        {item.presentation.switchBlockedReason ===
+          "workbuddyInferencePaused" && (
+          <p className="mt-1 break-words text-xs leading-5 text-amber-700 dark:text-amber-400">
+            {t("workbuddy.inference.state.paused")}
+          </p>
+        )}
         {tier?.skipReason && (
           <p className="mt-1 break-words text-xs leading-5 text-amber-700 dark:text-amber-400">
             {t(`applications.skipReasons.${tier.skipReason}`, {

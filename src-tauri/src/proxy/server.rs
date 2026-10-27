@@ -898,9 +898,9 @@ mod tests {
 #[path = "minimax_pool_tests.rs"]
 mod minimax_pool_tests;
 
-#[cfg(test)]
+#[cfg(any(test, all(feature = "gui", feature = "test-hooks")))]
 #[path = "workbuddy_pool_tests.rs"]
-mod workbuddy_pool_tests;
+pub(crate) mod workbuddy_pool_tests;
 
 #[cfg(all(test, unix))]
 #[path = "zcode_pool_tests.rs"]

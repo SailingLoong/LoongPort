@@ -826,6 +826,9 @@ export function WorkBuddyAccounts({
                   </div>
                 </div>
               );
+              const inferencePaused = inferenceAccounts.some(
+                (row) => row.id === account.id && row.state === "paused",
+              );
               const authorization = (
                 <>
                   <p role="status">
@@ -840,6 +843,8 @@ export function WorkBuddyAccounts({
                             refreshRequired:
                               "Inference authorization needs refresh",
                             expired: "Inference authorization expired",
+                            paused:
+                              "WorkBuddy model requests are paused; account management and domestic check-in remain available",
                           } as const
                         )[
                           inferenceAccounts.find((row) => row.id === account.id)
@@ -848,20 +853,22 @@ export function WorkBuddyAccounts({
                       },
                     )}
                   </p>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={
-                      busy !== null ||
-                      (inferenceTarget === account.id &&
-                        inferenceBusy === "begin")
-                    }
-                    onClick={() => void beginInference(account.id)}
-                  >
-                    {t("workbuddy.inference.authorize", {
-                      defaultValue: "Authorize inference",
-                    })}
-                  </Button>
+                  {!inferencePaused && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={
+                        busy !== null ||
+                        (inferenceTarget === account.id &&
+                          inferenceBusy === "begin")
+                      }
+                      onClick={() => void beginInference(account.id)}
+                    >
+                      {t("workbuddy.inference.authorize", {
+                        defaultValue: "Authorize inference",
+                      })}
+                    </Button>
+                  )}
                   {inferenceAccounts.some(
                     (row) =>
                       row.id === account.id &&
@@ -880,7 +887,7 @@ export function WorkBuddyAccounts({
                   )}
                 </>
               );
-              const inference = (
+              const inference = inferencePaused ? null : (
                 <>
                   <Button
                     size="sm"
@@ -1005,9 +1012,11 @@ export function WorkBuddyAccounts({
                     inference={
                       <>
                         {inference}
-                        <p className="text-xs text-muted-foreground">
-                          {t("automaticStatus.inferenceUnverified")}
-                        </p>
+                        {!inferencePaused && (
+                          <p className="text-xs text-muted-foreground">
+                            {t("automaticStatus.inferenceUnverified")}
+                          </p>
+                        )}
                       </>
                     }
                   />
