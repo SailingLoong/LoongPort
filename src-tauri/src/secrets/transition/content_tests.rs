@@ -919,13 +919,9 @@ mod native_content_consumer {
                 "{}::child_selector_is_busy",
                 module_path!().split_once("::").unwrap().1
             );
-            let out = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--ignored", "--exact", &test])
-                .env("LP_CONTENT_CONSUMER_STORE", &store)
-                .output()
-                .unwrap();
+            let out = run_selector_child(&test, &store);
             assert!(
-                out.status.success(),
+                selector_child_observed_busy(&out),
                 "{}",
                 String::from_utf8_lossy(&out.stdout)
             );
@@ -942,12 +938,49 @@ mod native_content_consumer {
         assert!(!journal(&f).exists());
         assert!(isolated_scope::lock_selection_at(&store).is_ok());
     }
+    fn run_selector_child(test: &str, store: &Path) -> std::process::Output {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", test])
+            .env("LP_CONTENT_CONSUMER_STORE", store)
+            .output()
+            .unwrap()
+    }
+    fn selector_child_observed_busy(output: &std::process::Output) -> bool {
+        // libtest returns 0 for zero matches; only the reached helper emits 79.
+        output.status.code() == Some(79)
+    }
+    #[test]
+    fn selector_child_protocol_rejects_zero_matches_and_requires_busy_hit() {
+        let temporary = crate::secrets::testing::tempdir().unwrap();
+        let store = temporary.path().join("app_paths.json");
+        let guard = isolated_scope::lock_selection_at(&store).unwrap();
+        let exact = format!(
+            "{}::child_selector_is_busy",
+            module_path!().split_once("::").unwrap().1
+        );
+        let missing = run_selector_child(&format!("{exact}__not_a_test"), &store);
+        assert!(
+            missing.status.success(),
+            "zero matches is a harness success"
+        );
+        assert!(!selector_child_observed_busy(&missing));
+        let matched = run_selector_child(&exact, &store);
+        assert!(
+            selector_child_observed_busy(&matched),
+            "{}",
+            String::from_utf8_lossy(&matched.stdout)
+        );
+        drop(guard);
+        let free = run_selector_child(&exact, &store);
+        assert!(!selector_child_observed_busy(&free));
+    }
     #[test]
     #[ignore]
     fn child_selector_is_busy() {
         let path = std::env::var_os("LP_CONTENT_CONSUMER_STORE")
             .expect("parent fixture sets selector path");
         assert!(isolated_scope::lock_selection_at(Path::new(&path)).is_err());
+        std::process::exit(79);
     }
     #[test]
     #[serial_test::serial]

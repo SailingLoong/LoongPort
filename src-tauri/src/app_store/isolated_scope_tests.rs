@@ -667,7 +667,7 @@ mod native_selected_owner {
             .output()
             .unwrap();
         assert!(
-            out.status.success(),
+            super::selector_probe_matched(&out),
             "{}",
             String::from_utf8_lossy(&out.stdout)
         );
@@ -681,6 +681,7 @@ mod native_selected_owner {
             lock_selection_at(Path::new(&store)).is_ok(),
             std::env::var("LP_TEST_SELECTION_EXPECT").unwrap() == "free"
         );
+        std::process::exit(79);
     }
     #[test]
     fn two_consumers_share_original_lock_through_guard_scope() {
@@ -802,7 +803,7 @@ mod content_source_owner {
             .output()
             .unwrap();
         assert!(
-            out.status.success(),
+            super::selector_probe_matched(&out),
             "{}",
             String::from_utf8_lossy(&out.stdout)
         );
@@ -816,6 +817,7 @@ mod content_source_owner {
             lock_selection_at(Path::new(&store)).is_err(),
             std::env::var("LP_TEST_CONTENT_BUSY").unwrap() == "yes"
         );
+        std::process::exit(79);
     }
     #[test]
     fn missing_control_parent_is_initialized_without_touching_source_or_selector() {
@@ -1117,4 +1119,18 @@ mod content_replacement_admission {
         assert!(!replacement.exists());
         assert!(!store.exists());
     }
+}
+
+// A libtest zero-match invocation exits successfully without running a helper.
+fn selector_probe_matched(output: &std::process::Output) -> bool {
+    output.status.code() == Some(79)
+}
+#[test]
+fn selector_child_protocol_rejects_zero_test_matches() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "__loongport_no_such_selector_child__"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(!selector_probe_matched(&output));
 }
