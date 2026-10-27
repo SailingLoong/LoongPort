@@ -233,8 +233,8 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
     };
 
     const handleAddRepo = async (repo: SkillRepo) => {
+      await addRepoMutation.mutateAsync(repo);
       try {
-        await addRepoMutation.mutateAsync(repo);
         // Await discovery so we can report the real count
         const { data: freshSkills } = await refetchDiscoverable();
         const count =

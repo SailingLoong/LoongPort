@@ -192,7 +192,7 @@ const McpFormModal: React.FC<McpFormModalProps> = ({
     const presetWithDesc = getMcpPresetWithDescription(preset, t);
 
     const id = ensureUniqueId(presetWithDesc.id);
-    setFormId(id);
+    handleIdChange(id);
     setFormName(presetWithDesc.name || presetWithDesc.id);
     setFormDescription(presetWithDesc.description || "");
     setFormHomepage(presetWithDesc.homepage || "");
@@ -213,7 +213,7 @@ const McpFormModal: React.FC<McpFormModalProps> = ({
 
   const applyCustom = () => {
     setSelectedPreset(-1);
-    setFormId("");
+    handleIdChange("");
     setFormName("");
     setFormDescription("");
     setFormHomepage("");
@@ -229,8 +229,8 @@ const McpFormModal: React.FC<McpFormModalProps> = ({
 
     if (useToml) {
       const err = validateTomlConfig(nextValue);
+      setConfigError(err);
       if (err) {
-        setConfigError(err);
         return;
       }
 
@@ -269,7 +269,7 @@ const McpFormModal: React.FC<McpFormModalProps> = ({
   };
 
   const handleWizardApply = (title: string, json: string) => {
-    setFormId(title);
+    handleIdChange(title);
     if (!formName.trim()) {
       setFormName(title);
     }
