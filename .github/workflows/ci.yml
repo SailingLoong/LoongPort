@@ -38,6 +38,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Test Linux dependency installer (no network or package changes)
+        run: python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v
+
       - name: Install actionlint
         env:
           ACTIONLINT_VERSION: 1.7.12
@@ -90,6 +93,7 @@ jobs:
               - "components.json"
               - ".github/workflows/**"
             backend:
+              - "scripts/ci/**"
               - "src-tauri/**"
               - "rust-toolchain.toml"
               # Qoder Rust tests execute these Node runtime/worker inputs.
@@ -211,15 +215,8 @@ jobs:
 
       - name: Install Linux system deps
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libssl-dev \
-            libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
-            || sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.0-dev
-          sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
-            || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
+        # Retry transport failures without imposing a new download/dpkg deadline.
+        run: sudo python3 scripts/ci/linux_deps.py
 
       - name: Isolate Cargo cache home
         shell: bash
@@ -343,15 +340,8 @@ jobs:
 
       - name: Install Linux system deps
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libssl-dev \
-            libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
-            || sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.0-dev
-          sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
-            || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
+        # Retry transport failures without imposing a new download/dpkg deadline.
+        run: sudo python3 scripts/ci/linux_deps.py
 
       # Share dependency artifacts; only the first shard per platform saves them.
       # Workspace outputs stay out of this cache so source changes do not create
