@@ -4,6 +4,154 @@ use cc_switch_lib::{update_settings, AppSettings, AppType, Prompt, PromptService
 use std::fs;
 use support::{create_test_state, ensure_test_home, reset_test_fs, test_mutex};
 
+#[cfg(unix)]
+fn with_read_only_directory<T>(path: &std::path::Path, action: impl FnOnce() -> T) -> T {
+    use std::os::unix::fs::PermissionsExt;
+
+    struct RestorePermissions<'a>(&'a std::path::Path, fs::Permissions);
+    impl Drop for RestorePermissions<'_> {
+        fn drop(&mut self) {
+            fs::set_permissions(self.0, self.1.clone())
+                .expect("restore test directory permissions");
+        }
+    }
+
+    let _restore = RestorePermissions(path, fs::metadata(path).unwrap().permissions());
+    fs::set_permissions(path, fs::Permissions::from_mode(0o555)).unwrap();
+    action()
+}
+
+#[cfg(unix)]
+fn active_prompt() -> Prompt {
+    Prompt {
+        id: "active".into(),
+        name: "Saved instructions".into(),
+        content: "original instructions\n".into(),
+        description: Some("Saved metadata".into()),
+        enabled: true,
+        created_at: Some(1),
+        updated_at: Some(2),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn editing_enabled_prompt_after_native_write_failure_preserves_saved_prompt() {
+    let _guard = test_mutex().lock().unwrap();
+    reset_test_fs();
+    let path = ensure_test_home().join(".codex/AGENTS.md");
+    let state = create_test_state().unwrap();
+    let previous = active_prompt();
+    PromptService::upsert_prompt(&state, AppType::Codex, &previous.id, previous.clone()).unwrap();
+    let edited = Prompt {
+        name: "Edited instructions".into(),
+        content: "edited instructions\n".into(),
+        description: None,
+        updated_at: Some(3),
+        ..previous.clone()
+    };
+
+    let result = with_read_only_directory(path.parent().unwrap(), || {
+        PromptService::upsert_prompt(&state, AppType::Codex, &previous.id, edited)
+    });
+
+    assert!(matches!(
+        result,
+        Err(cc_switch_lib::AppError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::PermissionDenied
+    ));
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "original instructions\n"
+    );
+    // Read the database directly: get_prompts would backfill from the live file
+    // and could hide a partially saved edit.
+    let saved = state.db.get_prompts(AppType::Codex.as_str()).unwrap();
+    assert_eq!(
+        serde_json::to_value(&saved["active"]).unwrap(),
+        serde_json::to_value(previous).unwrap()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn disabling_last_prompt_after_native_clear_failure_preserves_saved_prompt() {
+    let _guard = test_mutex().lock().unwrap();
+    reset_test_fs();
+    let path = ensure_test_home().join(".codex/AGENTS.md");
+    let state = create_test_state().unwrap();
+    let previous = active_prompt();
+    PromptService::upsert_prompt(&state, AppType::Codex, &previous.id, previous.clone()).unwrap();
+    let disabled = Prompt {
+        enabled: false,
+        ..previous.clone()
+    };
+
+    let result = with_read_only_directory(path.parent().unwrap(), || {
+        PromptService::upsert_prompt(&state, AppType::Codex, &previous.id, disabled)
+    });
+
+    assert!(matches!(
+        result,
+        Err(cc_switch_lib::AppError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::PermissionDenied
+    ));
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "original instructions\n"
+    );
+    let saved = state.db.get_prompts(AppType::Codex.as_str()).unwrap();
+    assert_eq!(
+        serde_json::to_value(&saved["active"]).unwrap(),
+        serde_json::to_value(previous).unwrap()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_native_write_compensates_the_stored_id_not_the_requested_id() {
+    let _guard = test_mutex().lock().unwrap();
+    for existing_stored_row in [false, true] {
+        reset_test_fs();
+        let path = ensure_test_home().join(".codex/AGENTS.md");
+        let state = create_test_state().unwrap();
+        let requested = Prompt {
+            id: "requested".into(),
+            enabled: false,
+            ..active_prompt()
+        };
+        state.db.save_prompt("codex", &requested).unwrap();
+        if existing_stored_row {
+            state.db.save_prompt("codex", &active_prompt()).unwrap();
+        }
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "original instructions\n").unwrap();
+        let before = state.db.get_prompts("codex").unwrap();
+        let attempted = Prompt {
+            content: "attempted edit".into(),
+            ..active_prompt()
+        };
+
+        let result = with_read_only_directory(path.parent().unwrap(), || {
+            PromptService::upsert_prompt(&state, AppType::Codex, "requested", attempted)
+        });
+
+        assert!(matches!(
+            result,
+            Err(cc_switch_lib::AppError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::PermissionDenied
+        ));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "original instructions\n"
+        );
+        assert_eq!(
+            serde_json::to_value(state.db.get_prompts("codex").unwrap()).unwrap(),
+            serde_json::to_value(before).unwrap()
+        );
+    }
+}
+
 #[test]
 fn prompt_list_refreshes_external_edits_without_changing_inactive_templates() {
     let _guard = test_mutex().lock().unwrap();
