@@ -10,6 +10,12 @@ import unittest
 from unittest.mock import patch
 
 SCRIPT = Path(__file__).with_name('nextest_archive.py')
+# Actual nextest --version stdout in PR727 job 122301891430, 2026-10-27.
+REAL_NEXTEST_VERSION = '''cargo-nextest 0.9.149 (3fe4ef319 2026-10-20)
+release: 0.9.149
+commit-hash: 3fe4ef31972f24e0c94cfe291718eab0fe678260
+commit-date: 2026-10-20
+host: x86_64-unknown-linux-gnu'''
 
 
 class ArchiveContract(unittest.TestCase):
@@ -109,6 +115,30 @@ class ArchiveContract(unittest.TestCase):
             self.build()
             for shard in range(1,total+1): self.run_archive(shard,total)
 
+    def test_real_multiline_nextest_version_pins_release_and_preserves_provenance(self):
+        output = self.root/'github-output'
+        self.env['GITHUB_OUTPUT'] = str(output)
+        for newline in ['\n', '\r\n']:
+            with self.subTest(newline=repr(newline)):
+                output.unlink(missing_ok=True)
+                self.version = REAL_NEXTEST_VERSION.replace('\n', newline)
+                self.build()
+                self.assertEqual(output.read_text(), 'nextest-version=0.9.149\n')
+                manifest = json.loads((self.out/'manifest.json').read_text())
+                self.assertEqual(manifest['identity']['nextest_version'], self.version)
+                self.run_archive()
+                self.version = self.version.replace('3fe4ef31972f24e0c94cfe291718eab0fe678260', 'a'*40)
+                with self.assertRaises(ValueError): self.run_archive()
+
+    def test_multiline_version_rejects_malformed_or_conflicting_metadata(self):
+        for bad in [REAL_NEXTEST_VERSION+'\nother-output=injected',
+                    REAL_NEXTEST_VERSION.replace('release: 0.9.149','release: 0.9.148'),
+                    REAL_NEXTEST_VERSION+'\nhost: other-host',
+                    REAL_NEXTEST_VERSION.replace('commit-date: 2026-10-20','commit-date: invalid')]:
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.version = bad
+                self.build()
+
     def test_build_exports_verified_exact_nextest_version(self):
         output = self.root/'github-output'
         self.env['GITHUB_OUTPUT'] = str(output)
@@ -150,7 +180,7 @@ args = sys.argv[1:]
 with open(os.environ['FAKE_LOG'], 'a') as stream:
     stream.write(json.dumps([pathlib.Path(sys.argv[0]).name] + args) + "\\n")
 if pathlib.Path(sys.argv[0]).name == 'git': print(os.environ['GITHUB_SHA'])
-elif args == ['nextest', '--version']: print('cargo-nextest 0.9.100')
+elif args == ['nextest', '--version']: print(os.environ['FAKE_VERSION'])
 elif args[:2] == ['nextest', 'archive']:
     pathlib.Path(args[args.index('--archive-file')+1]).write_bytes(b'process fake archive')
 elif args[:2] == ['nextest', 'run']: sys.exit(int(os.environ.get('FAKE_EXIT', '0')))
@@ -160,7 +190,7 @@ else: sys.exit(91)
             path = fakebin/name
             path.write_text(program)
             path.chmod(0o755)
-        env = dict(os.environ, **self.env, FAKE_LOG=str(log))
+        env = dict(os.environ, **self.env, FAKE_LOG=str(log), FAKE_VERSION=REAL_NEXTEST_VERSION)
         env['PATH'] = str(fakebin)+os.pathsep+env['PATH']
         base = [sys.executable, str(SCRIPT.resolve())]
         build = subprocess.run(base+['build','--output',str(self.out)], cwd=self.root,

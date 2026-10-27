@@ -45,13 +45,31 @@ def digest(path):
     return checksum.hexdigest()
 
 
+def exact_nextest_version(output):
+    """Extract the release token without discarding full-version provenance."""
+    lines = output.splitlines()
+    version = re.fullmatch(r'cargo-nextest (\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?: [^\r\n]+)?',
+                           lines[0] if lines else '')
+    if version is None:
+        raise ValueError('Unrecognized nextest version; cannot pin archive consumer')
+    # Modern nextest --version includes these metadata lines. Accept that real
+    # format, but never copy arbitrary multiline text into GITHUB_OUTPUT.
+    fields = {'release': re.escape(version.group(1)), 'commit-hash': r'[0-9a-f]{40}',
+              'commit-date': r'\d{4}-\d{2}-\d{2}', 'host': r'[A-Za-z0-9_.-]+'}
+    seen = set()
+    for line in lines[1:]:
+        key, separator, value = line.partition(': ')
+        if (not separator or key not in fields or key in seen
+                or re.fullmatch(fields[key], value) is None):
+            raise ValueError('Unrecognized or conflicting nextest version metadata')
+        seen.add(key)
+    return version.group(1)
+
+
 def build(root, output, env):
     expected = identity(root, env)
     # install-action accepts tool@exact-version. Validate before writing outputs.
-    version = re.fullmatch(r'cargo-nextest (\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?: [^\r\n]+)?',
-                           expected['nextest_version'])
-    if version is None:
-        raise ValueError('Unrecognized nextest version; cannot pin archive consumer')
+    version = exact_nextest_version(expected['nextest_version'])
     output.mkdir(parents=True, exist_ok=True)
     manifest = output / 'manifest.json'
     # A failed retry must not leave a previous successful manifest eligible.
@@ -65,7 +83,7 @@ def build(root, output, env):
     manifest.write_text(json.dumps(data, indent=2)+'\n', encoding='utf-8')
     if env.get('GITHUB_OUTPUT'):
         with Path(env['GITHUB_OUTPUT']).open('a', encoding='utf-8') as stream:
-            stream.write(f"nextest-version={version.group(1)}\n")
+            stream.write(f"nextest-version={version}\n")
     print(f"nextest archive: {data['bytes']} bytes; sha256={data['sha256']}", flush=True)
 
 
