@@ -92,15 +92,36 @@ def run(root, output, env, shard, shards):
     if shards != PLATFORMS[env['CI_RUNNER_LABEL']][1] or not 1 <= shard <= shards:
         raise ValueError('Partition does not match original platform coverage')
     data = json.loads((output / 'manifest.json').read_text(encoding='utf-8'))
-    if data.get('schema') != 1 or data.get('identity') != expected:
+    archived_identity = data.get('identity')
+    if (data.get('schema') != 1 or not isinstance(archived_identity, dict)
+            or archived_identity.keys() != expected.keys()
+            or any(not isinstance(value, str) or not value for value in archived_identity.values())):
+        raise ValueError('Archive identity schema mismatch')
+    mismatches = {key for key in expected.keys() | archived_identity.keys()
+                  if expected.get(key) != archived_identity.get(key)}
+    if mismatches and mismatches != {'ImageVersion'}:
         # env!(CARGO_MANIFEST_DIR) paths cannot be fixed by workspace-remap.
-        raise ValueError('Archive identity/version/source path mismatch')
+        raise ValueError('Archive identity/version/source path mismatch: '
+                         + ', '.join(sorted(mismatches)))
     archive = output / 'tests.tar.zst'
     if archive.stat().st_size != data.get('bytes') or digest(archive) != data.get('sha256'):
         raise ValueError('Archive size or SHA256 mismatch')
-    execute(['cargo', 'nextest', 'run', '--profile', 'ci',
-             '--archive-file', str(archive), '--workspace-remap', expected['workspace'],
-             '--partition', f'count:{shard}/{shards}'], cwd=root)
+    if mismatches == {'ImageVersion'}:
+        # Floating hosted labels can select different image revisions in one run.
+        # Do not execute the archive on a different image: compile from this same
+        # verified checkout, retaining the original GUI features/profile/shard.
+        print('nextest execution: mode=local_rebuild reason=ImageVersion '
+              + json.dumps({'archive': archived_identity['ImageVersion'],
+                            'runner': expected['ImageVersion']}), flush=True)
+        execute(['cargo', 'nextest', 'run', '--profile', 'ci',
+                 '--manifest-path', str(root / 'src-tauri/Cargo.toml'),
+                 '--partition', f'count:{shard}/{shards}'], cwd=root)
+    else:
+        print('nextest execution: mode=reuse', flush=True)
+        execute(['cargo', 'nextest', 'run', '--profile', 'ci',
+                 '--archive-file', str(archive), '--workspace-remap', expected['workspace'],
+                 '--partition', f'count:{shard}/{shards}'], cwd=root)
+
 
 
 def main():

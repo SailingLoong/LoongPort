@@ -1,5 +1,7 @@
 """Contract tests; fake cargo proves orchestration, not Rust/archive portability."""
 import importlib.util
+from contextlib import redirect_stdout
+import io
 import json
 import os
 import subprocess
@@ -72,10 +74,68 @@ class ArchiveContract(unittest.TestCase):
     def test_identity_mismatch_rejected_before_tests(self):
         self.build()
         for key in self.env:
+            if key == 'ImageVersion':
+                continue  # Separately tested: reject archive, rebuild locally.
             with self.subTest(key=key):
                 changed = dict(self.env, **{key: self.env[key]+'wrong'})
                 with self.assertRaises(ValueError):
                     self.helper.run(self.root, self.out, changed, 1, 2)
+        self.assertFalse(any(c[:3] == ['cargo','nextest','run'] for c in self.calls))
+
+    def test_real_image_drift_rejects_archive_and_rebuilds_original_partition(self):
+        # Actual producer/consumer images from run40538744469 Ubuntu shard1.
+        self.env['ImageVersion'] = '20261025.340.1'
+        self.build()
+        self.env['ImageVersion'] = '20261012.322.1'
+        log = io.StringIO()
+        with redirect_stdout(log): self.run_archive(2, 2)
+        self.assertEqual(self.calls[-1], ['cargo','nextest','run','--profile','ci',
+                         '--manifest-path',str(self.root/'src-tauri/Cargo.toml'),
+                         '--partition','count:2/2'])
+        self.assertIn('mode=local_rebuild', log.getvalue())
+        self.assertIn('reason=ImageVersion', log.getvalue())
+        self.assertIn('20261025.340.1', log.getvalue())
+        self.assertIn('20261012.322.1', log.getvalue())
+
+    def test_matching_image_reports_archive_reuse(self):
+        self.build()
+        log = io.StringIO()
+        with redirect_stdout(log): self.run_archive()
+        self.assertIn('mode=reuse', log.getvalue())
+        self.assertIn('--archive-file', self.calls[-1])
+        self.assertNotIn('--manifest-path', self.calls[-1])
+
+    def test_image_drift_never_hides_other_identity_mismatches(self):
+        self.build()
+        for key in self.env:
+            if key == 'ImageVersion': continue
+            changed = dict(self.env, ImageVersion='20261012.322.1')
+            changed[key] += '-wrong'
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                self.helper.run(self.root, self.out, changed, 1, 2)
+        self.env['ImageVersion'] = '20261012.322.1'
+        self.version += '-different'
+        with self.assertRaises(ValueError): self.run_archive()
+        self.assertFalse(any(c[:3] == ['cargo','nextest','run'] for c in self.calls))
+
+    def test_image_drift_never_hides_incomplete_or_extra_identity(self):
+        self.build()
+        manifest_path = self.out/'manifest.json'
+        original = json.loads(manifest_path.read_text())
+        for missing in [True, False]:
+            altered = json.loads(json.dumps(original))
+            if missing: del altered['identity']['ImageVersion']
+            else: altered['identity']['unexpected'] = None
+            manifest_path.write_text(json.dumps(altered))
+            with self.subTest(missing=missing), self.assertRaises(ValueError):
+                self.run_archive()
+        self.assertFalse(any(c[:3] == ['cargo','nextest','run'] for c in self.calls))
+
+    def test_image_drift_never_hides_corrupt_archive(self):
+        self.build()
+        self.env['ImageVersion'] = '20261012.322.1'
+        (self.out/'tests.tar.zst').write_bytes(b'tampered')
+        with self.assertRaises(ValueError): self.run_archive()
         self.assertFalse(any(c[:3] == ['cargo','nextest','run'] for c in self.calls))
 
     def test_digest_mismatch_rejected(self):
@@ -202,9 +262,18 @@ else: sys.exit(91)
         failed = subprocess.run(args, cwd=self.root, env=dict(env, FAKE_EXIT='17'),
                                 capture_output=True, text=True)
         self.assertNotEqual(failed.returncode, 0)
+        drift_env = dict(env, ImageVersion='20261012.322.1')
+        rebuilt = subprocess.run(args, cwd=self.root, env=drift_env, capture_output=True, text=True)
+        self.assertEqual(rebuilt.returncode, 0, rebuilt.stderr)
+        self.assertIn('mode=local_rebuild', rebuilt.stdout)
+        rebuild_failed = subprocess.run(args, cwd=self.root, env=dict(drift_env, FAKE_EXIT='17'),
+                                        capture_output=True, text=True)
+        self.assertNotEqual(rebuild_failed.returncode, 0)
         calls = [json.loads(line) for line in log.read_text().splitlines()]
         self.assertEqual(sum(c[:3] == ['cargo','nextest','archive'] for c in calls), 1)
-        self.assertEqual(sum(c[:3] == ['cargo','nextest','run'] for c in calls), 2)
+        self.assertEqual(sum(c[:3] == ['cargo','nextest','run'] for c in calls), 4)
+        self.assertIn('--manifest-path', calls[-1])
+        self.assertNotIn('--archive-file', calls[-1])
 
     def test_archive_failure_never_creates_manifest(self):
         def fail(args, **kwargs):
