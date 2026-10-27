@@ -1536,4 +1536,84 @@ mod unsupported_platform_tests {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
         assert!(Paths::at(&dir.path().join("../escape")).is_err());
     }
+    #[test]
+    fn unsupported_apply_and_recovery_reject_even_a_synthetic_private_ticket_without_writes() {
+        struct RecordingIo {
+            writes: usize,
+        }
+        impl FileIo for RecordingIo {
+            fn read(&mut self, path: &Path) -> Result<Option<Zeroizing<Vec<u8>>>, Failure> {
+                Files.read(path)
+            }
+            fn write(&mut self, _: &Path, _: &[u8]) -> Result<(), Failure> {
+                self.writes += 1;
+                Err(Failure::Io)
+            }
+            fn remove(&mut self, _: &Path) -> Result<(), Failure> {
+                self.writes += 1;
+                Err(Failure::Io)
+            }
+        }
+        // Synthetic owner adapter, not a protected production journal owner.
+        struct Owner {
+            state: owner_wire::State,
+            writes: usize,
+        }
+        impl JournalOwner for Owner {
+            fn load(&mut self) -> Result<(Stamp, Option<Journal>), Failure> {
+                Ok((self.state.stamp.clone(), self.state.journal.clone()))
+            }
+            fn persist(&mut self, expected: &Stamp, journal: &Journal) -> Result<Stamp, Failure> {
+                self.writes += 1;
+                self.state = self.state.next(expected, journal)?;
+                Ok(self.state.stamp.clone())
+            }
+        }
+        let dir = crate::secrets::testing::tempdir().unwrap();
+        let paths = Paths::at(dir.path()).unwrap();
+        std::fs::write(&paths.auth, b"synthetic-A").unwrap();
+        std::fs::write(&paths.marker, b"logged-out").unwrap();
+        let before = observe(&mut Files, &paths).unwrap();
+        let mut owner = Owner {
+            state: owner_wire::State::fixture(dir.path(), Phase::Prepared),
+            writes: 0,
+        };
+        let journal_before = owner.state.encode().unwrap();
+        let journal_path = dir.path().join("synthetic-owner-journal.json");
+        std::fs::write(&journal_path, &journal_before).unwrap();
+        let context = owner.state.journal.as_ref().unwrap().context.clone();
+        let stamp = owner.state.stamp.clone();
+        // Adversarial test-only construction: this file handle is NOT a valid
+        // directory admission pin. No production caller can construct this ticket.
+        // Both execution entrances must independently refuse unsupported pinning.
+        let ticket = Admission {
+            root: paths.root.clone(),
+            root_identity: owner.state.journal.as_ref().unwrap().root_identity.clone(),
+            _root_pin: std::fs::File::open(&paths.auth).unwrap(),
+            context: context.clone(),
+            stamp: stamp.clone(),
+            request: "synthetic-bypass".into(),
+            before: before.clone(),
+            target: Zeroizing::new(b"synthetic-B".to_vec()),
+        };
+        let mut io = RecordingIo { writes: 0 };
+        assert_eq!(
+            apply(&paths, &mut io, &mut owner, &mut || true, &context, &ticket),
+            Err(Failure::UnsafePath)
+        );
+        assert_eq!(
+            recover(&paths, &mut io, &mut owner, &mut || true, &stamp, &context),
+            Err(Failure::RecoveryRequired)
+        );
+        assert_eq!(io.writes, 0);
+        assert_eq!(owner.writes, 0);
+        assert!(owner.state.stamp == stamp);
+        assert!(owner.state.encode().unwrap() == journal_before);
+        assert_eq!(
+            std::fs::read(&journal_path).unwrap(),
+            journal_before.as_slice()
+        );
+        assert!(observe(&mut Files, &paths).unwrap() == before);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
+    }
 }
