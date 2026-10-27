@@ -333,94 +333,209 @@ fn stop_listener(reactor: &tokio::runtime::Runtime, runtime: &crate::store::AppS
     );
 }
 
+// Each case owns its fixture and runtime. Keep the entire recovery and stale-retry
+// sequence together, but expose independent cases to nextest sharding. The serial
+// guard remains necessary for in-process runs using TestHome and failpoints.
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]
-fn retained_checkpoint_recovers_original_attached_matrix() {
-    for app in [
+fn retained_checkpoint_recovers_original_attached_matrix_claude_enter_pending() {
+    check_original_attached_recovery(AppType::Claude, crate::mode::state::op::ENTER, "pending");
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn retained_checkpoint_recovers_original_attached_matrix_claude_enter_marked() {
+    check_original_attached_recovery(AppType::Claude, crate::mode::state::op::ENTER, "marked");
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn retained_checkpoint_recovers_original_attached_matrix_claude_enter_partial() {
+    check_original_attached_recovery(
         AppType::Claude,
-        AppType::Codex,
+        crate::mode::state::op::ENTER,
+        "published:0",
+    );
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn retained_checkpoint_recovers_original_attached_matrix_claude_enter_target() {
+    check_original_attached_recovery(AppType::Claude, crate::mode::state::op::ENTER, "target");
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn retained_checkpoint_recovers_original_attached_matrix_claude_attach_marked() {
+    check_original_attached_recovery(AppType::Claude, crate::mode::state::op::ATTACH, "marked");
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn retained_checkpoint_recovers_original_attached_matrix_codex_enter_pending() {
+    check_original_attached_recovery(AppType::Codex, crate::mode::state::op::ENTER, "pending");
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn retained_checkpoint_recovers_original_attached_matrix_codex_enter_marked() {
+    check_original_attached_recovery(AppType::Codex, crate::mode::state::op::ENTER, "marked");
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn retained_checkpoint_recovers_original_attached_matrix_codex_enter_partial() {
+    check_original_attached_recovery(AppType::Codex, crate::mode::state::op::ENTER, "published:1");
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn retained_checkpoint_recovers_original_attached_matrix_codex_enter_target() {
+    check_original_attached_recovery(AppType::Codex, crate::mode::state::op::ENTER, "target");
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn retained_checkpoint_recovers_original_attached_matrix_codex_attach_marked() {
+    check_original_attached_recovery(AppType::Codex, crate::mode::state::op::ATTACH, "marked");
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn retained_checkpoint_recovers_original_attached_matrix_gemini_enter_pending() {
+    check_original_attached_recovery(AppType::Gemini, crate::mode::state::op::ENTER, "pending");
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn retained_checkpoint_recovers_original_attached_matrix_gemini_enter_marked() {
+    check_original_attached_recovery(AppType::Gemini, crate::mode::state::op::ENTER, "marked");
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn retained_checkpoint_recovers_original_attached_matrix_gemini_enter_partial() {
+    check_original_attached_recovery(
         AppType::Gemini,
+        crate::mode::state::op::ENTER,
+        "published:0",
+    );
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn retained_checkpoint_recovers_original_attached_matrix_gemini_enter_target() {
+    check_original_attached_recovery(AppType::Gemini, crate::mode::state::op::ENTER, "target");
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn retained_checkpoint_recovers_original_attached_matrix_gemini_attach_marked() {
+    check_original_attached_recovery(AppType::Gemini, crate::mode::state::op::ATTACH, "marked");
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn retained_checkpoint_recovers_original_attached_matrix_grokbuild_enter_pending() {
+    check_original_attached_recovery(AppType::GrokBuild, crate::mode::state::op::ENTER, "pending");
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn retained_checkpoint_recovers_original_attached_matrix_grokbuild_enter_marked() {
+    check_original_attached_recovery(AppType::GrokBuild, crate::mode::state::op::ENTER, "marked");
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn retained_checkpoint_recovers_original_attached_matrix_grokbuild_enter_partial() {
+    check_original_attached_recovery(
         AppType::GrokBuild,
-    ] {
-        let partial = if app == AppType::Codex {
-            "published:1"
-        } else {
-            "published:0"
-        };
-        for (kind, point) in [
-            (crate::mode::state::op::ENTER, "pending"),
-            (crate::mode::state::op::ENTER, "marked"),
-            (crate::mode::state::op::ENTER, partial),
-            (crate::mode::state::op::ENTER, "target"),
-            (crate::mode::state::op::ATTACH, "marked"),
-        ] {
-            let f = Fixture::new();
-            let reactor = tokio::runtime::Runtime::new().unwrap();
-            let (inspected, review, token, runtime, port) =
-                interrupted(&f, &app, kind, point, &reactor);
-            let (reactor, runtime) = if point == partial {
-                // Abrupt runtime loss leaves the persisted enabled bit true.
-                // Recreate the actual service, rather than calling stop first.
-                let db = runtime.db.clone();
-                drop(reactor);
-                drop(runtime);
-                assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
-                let reactor = tokio::runtime::Runtime::new().unwrap();
-                assert!(
-                    reactor
-                        .block_on(db.get_global_proxy_config())
-                        .unwrap()
-                        .proxy_enabled
-                );
-                (reactor, crate::store::AppState::new(db).unwrap())
-            } else {
-                stop_listener(&reactor, &runtime, port);
-                let runtime = crate::store::AppState::new(runtime.db.clone()).unwrap();
-                (reactor, runtime)
-            };
-            let checkpoint = std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap();
-            let view = review.review_app(&inspected, &token, &app).unwrap();
-            let context = reactor.enter();
-            let result =
-                review.recover_app_with_state(&inspected, &token, &app, &view.revision, &runtime);
-            drop(context);
-            let running = reactor
-                .block_on(runtime.proxy_service.get_status())
+        crate::mode::state::op::ENTER,
+        "published:0",
+    );
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn retained_checkpoint_recovers_original_attached_matrix_grokbuild_enter_target() {
+    check_original_attached_recovery(AppType::GrokBuild, crate::mode::state::op::ENTER, "target");
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(test, serial_test::serial)]
+fn retained_checkpoint_recovers_original_attached_matrix_grokbuild_attach_marked() {
+    check_original_attached_recovery(AppType::GrokBuild, crate::mode::state::op::ATTACH, "marked");
+}
+
+fn check_original_attached_recovery(app: AppType, kind: &str, point: &str) {
+    let partial = if app == AppType::Codex {
+        "published:1"
+    } else {
+        "published:0"
+    };
+    let f = Fixture::new();
+    let reactor = tokio::runtime::Runtime::new().unwrap();
+    let (inspected, review, token, runtime, port) = interrupted(&f, &app, kind, point, &reactor);
+    let (reactor, runtime) = if point == partial {
+        // Abrupt runtime loss leaves the persisted enabled bit true.
+        // Recreate the actual service, rather than calling stop first.
+        let db = runtime.db.clone();
+        drop(reactor);
+        drop(runtime);
+        assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+        let reactor = tokio::runtime::Runtime::new().unwrap();
+        assert!(
+            reactor
+                .block_on(db.get_global_proxy_config())
                 .unwrap()
-                .running;
-            if running {
-                health(port);
-            }
-            stop_listener(&reactor, &runtime, port);
-            let recovered =
-                result.unwrap_or_else(|error| panic!("{app:?}/{kind}/{point}: {error}"));
-            assert_eq!(recovered.has_pending_operation, Some(false));
-            assert_eq!(
-                running,
-                point != "pending",
-                "{app:?}/{kind}/{point}: listener dependency"
-            );
-            let mode = crate::mode::state::mode_state(
-                &f.device,
-                &runtime.db.secret_session().read().unwrap(),
-                app.as_str(),
-            )
-            .unwrap();
-            assert_eq!(mode.attached, point != "pending");
-            assert_eq!(
-                std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap(),
-                checkpoint
-            );
-            let before = snapshot(f.home.path());
-            let context = reactor.enter();
-            assert!(review
-                .recover_app_with_state(&inspected, &token, &app, &view.revision, &runtime)
-                .is_err());
-            drop(context);
-            assert!(snapshot(f.home.path()) == before, "stale retry wrote");
-            println!("PASS attached matrix {app:?}/{kind}/{point}");
-        }
+                .proxy_enabled
+        );
+        (reactor, crate::store::AppState::new(db).unwrap())
+    } else {
+        stop_listener(&reactor, &runtime, port);
+        let runtime = crate::store::AppState::new(runtime.db.clone()).unwrap();
+        (reactor, runtime)
+    };
+    let checkpoint = std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap();
+    let view = review.review_app(&inspected, &token, &app).unwrap();
+    let context = reactor.enter();
+    let result = review.recover_app_with_state(&inspected, &token, &app, &view.revision, &runtime);
+    drop(context);
+    let running = reactor
+        .block_on(runtime.proxy_service.get_status())
+        .unwrap()
+        .running;
+    if running {
+        health(port);
     }
+    stop_listener(&reactor, &runtime, port);
+    let recovered = result.unwrap_or_else(|error| panic!("{app:?}/{kind}/{point}: {error}"));
+    assert_eq!(recovered.has_pending_operation, Some(false));
+    assert_eq!(
+        running,
+        point != "pending",
+        "{app:?}/{kind}/{point}: listener dependency"
+    );
+    let mode = crate::mode::state::mode_state(
+        &f.device,
+        &runtime.db.secret_session().read().unwrap(),
+        app.as_str(),
+    )
+    .unwrap();
+    assert_eq!(mode.attached, point != "pending");
+    assert_eq!(
+        std::fs::read(f.device.root().join(checkpoint::FILE)).unwrap(),
+        checkpoint
+    );
+    let before = snapshot(f.home.path());
+    let context = reactor.enter();
+    assert!(review
+        .recover_app_with_state(&inspected, &token, &app, &view.revision, &runtime)
+        .is_err());
+    drop(context);
+    assert!(snapshot(f.home.path()) == before, "stale retry wrote");
+    println!("PASS attached matrix {app:?}/{kind}/{point}");
 }
 
 #[cfg_attr(test, test)]
