@@ -2184,6 +2184,9 @@ impl Database {
 mod tests {
     fn retention_fixture(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>, AppError> {
         crate::config::ensure_private_directory(dir)?;
+        // These file-retention fixtures need the settings owner, not a live
+        // database: DB initialization can create its own safety backup.
+        assert_eq!(std::fs::read_dir(dir).unwrap().count(), 0);
         let mut paths = Vec::new();
         for (index, name) in ["oldest.db", "middle.db", "newest.db"].iter().enumerate() {
             let path = dir.join(name);
@@ -2198,6 +2201,7 @@ mod tests {
             .unwrap();
             paths.push(path);
         }
+        assert_eq!(std::fs::read_dir(dir).unwrap().count(), paths.len());
         Ok(paths)
     }
 
@@ -2207,7 +2211,7 @@ mod tests {
         // A zero setting is normalized by the production settings owner to one.
         for retain in [0, 1, 2, 3, 10] {
             let _home = TestHomeGuard::new();
-            let _db = crate::secrets::testing::initialize_database()?;
+            let _session = crate::secrets::testing::initialize_settings()?;
             let _settings = SettingsGuard::with_backup_retain_count(retain);
             let dir = crate::config::get_app_config_dir().join("backups");
             let paths = retention_fixture(&dir)?;
@@ -2236,7 +2240,7 @@ mod tests {
     #[cfg(unix)]
     fn retention_stops_when_the_primary_backup_cannot_be_removed() -> Result<(), AppError> {
         let _home = TestHomeGuard::new();
-        let _db = crate::secrets::testing::initialize_database()?;
+        let _session = crate::secrets::testing::initialize_settings()?;
         let _settings = SettingsGuard::with_backup_retain_count(2);
         let dir = crate::config::get_app_config_dir().join("backups");
         let paths = retention_fixture(&dir)?;
@@ -2257,7 +2261,7 @@ mod tests {
     fn retention_success_keeps_count_and_protected_snapshot() -> Result<(), AppError> {
         for retain in [0, 1, 2, 3, 10] {
             let _home = TestHomeGuard::new();
-            let _db = crate::secrets::testing::initialize_database()?;
+            let _session = crate::secrets::testing::initialize_settings()?;
             let _settings = SettingsGuard::with_backup_retain_count(retain);
             let dir = crate::config::get_app_config_dir().join("backups");
             let paths = retention_fixture(&dir)?;
@@ -2276,7 +2280,7 @@ mod tests {
     #[serial]
     fn manual_backup_failure_does_not_claim_orphans() -> Result<(), AppError> {
         let _home = TestHomeGuard::new();
-        let _db = crate::secrets::testing::initialize_database()?;
+        let _session = crate::secrets::testing::initialize_settings()?;
         let dir = crate::config::get_app_config_dir().join("backups");
         let paths = retention_fixture(&dir)?;
         let sidecar = dir.join("oldest.db-wal");
