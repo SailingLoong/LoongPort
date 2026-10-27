@@ -103,32 +103,32 @@ impl PromptService {
             return upsert_pi_prompt(state, id, prompt);
         }
 
-        // 只有停用最后一条启用中的提示词时才清空文件；新建、导入或重存
-        // 停用条目时，文件可能是用户自己写的，必须原样保留
-        let previous_prompts = state.db.get_prompts(app.as_str())?;
-        let clear_live = !prompt.enabled
-            && previous_prompts
-                .get(id)
-                .is_some_and(|previous| previous.enabled)
-            && !previous_prompts
-                .iter()
-                .any(|(key, prompt)| key != id && prompt.enabled);
+        // Capture settings/path locks before retaining the database owner. Keep
+        // resolver errors lazy: an inactive save may not need native I/O at all.
+        let target_path = prompt_file_path(&app);
+        state
+            .db
+            .save_prompt_with_native_update(&app, &prompt, |previous_prompts| {
+                // 只有停用最后一条启用中的提示词时才清空文件；新建、导入或重存
+                // 停用条目时，文件可能是用户自己写的，必须原样保留
+                let clear_live = !prompt.enabled
+                    && previous_prompts
+                        .get(id)
+                        .is_some_and(|previous| previous.enabled)
+                    && !previous_prompts
+                        .iter()
+                        .any(|(key, prompt)| key != id && prompt.enabled);
 
-        state.db.save_prompt(app.as_str(), &prompt)?;
-
-        if prompt.enabled {
-            // 启用提示词：写入内容到文件
-            let target_path = prompt_file_path(&app)?;
-            write_text_file(&target_path, &prompt.content)?;
-        } else if clear_live {
-            // 本次保存停用了最后一条启用中的提示词，清空文件
-            let target_path = prompt_file_path(&app)?;
-            if target_path.exists() {
-                write_text_file(&target_path, "")?;
-            }
-        }
-
-        Ok(())
+                if prompt.enabled {
+                    write_text_file(&target_path?, &prompt.content)?;
+                } else if clear_live {
+                    let target_path = target_path?;
+                    if target_path.exists() {
+                        write_text_file(&target_path, "")?;
+                    }
+                }
+                Ok(())
+            })
     }
 
     pub fn delete_prompt(state: &AppState, app: AppType, id: &str) -> Result<(), AppError> {
@@ -434,7 +434,6 @@ fn upsert_pi_prompt(state: &AppState, id: &str, prompt: Prompt) -> Result<(), Ap
     let snapshot = guard.read()?;
     let was_active =
         pi_active_prompt_id(&prompts, snapshot.content.as_deref()).as_deref() == Some(id);
-    let previous = prompts.get(id).cloned();
     let requested_active = prompt.enabled;
     let mut stored = prompt;
     stored.enabled = false;
@@ -445,38 +444,17 @@ fn upsert_pi_prompt(state: &AppState, id: &str, prompt: Prompt) -> Result<(), Ap
         ));
     }
 
-    persist_pi_prompt_with_native_update(state, id, &stored, previous.as_ref(), || {
-        if requested_active {
-            guard.replace(&snapshot.revision, &stored.content)
-        } else if was_active {
-            guard.delete(&snapshot.revision)
-        } else {
-            Ok(())
-        }
-    })
-}
-
-fn persist_pi_prompt_with_native_update(
-    state: &AppState,
-    id: &str,
-    stored: &Prompt,
-    previous: Option<&Prompt>,
-    update_native: impl FnOnce() -> Result<(), AppError>,
-) -> Result<(), AppError> {
-    state.db.save_prompt(AppType::Pi.as_str(), stored)?;
-    if let Err(native_error) = update_native() {
-        let rollback = match previous {
-            Some(previous) => state.db.save_prompt(AppType::Pi.as_str(), previous),
-            None => state.db.delete_prompt(AppType::Pi.as_str(), id),
-        };
-        if let Err(rollback_error) = rollback {
-            return Err(AppError::Message(format!(
-                "Pi prompt update failed ({native_error}); database rollback also failed: {rollback_error}"
-            )));
-        }
-        return Err(native_error);
-    }
-    Ok(())
+    state
+        .db
+        .save_prompt_with_native_update(&AppType::Pi, &stored, |_| {
+            if requested_active {
+                guard.replace(&snapshot.revision, &stored.content)
+            } else if was_active {
+                guard.delete(&snapshot.revision)
+            } else {
+                Ok(())
+            }
+        })
 }
 
 fn enable_pi_prompt(state: &AppState, id: &str) -> Result<(), AppError> {
@@ -766,13 +744,11 @@ mod pi_prompt_tests {
         let mut edited = previous.clone();
         edited.content = "edited content".to_string();
 
-        let result = persist_pi_prompt_with_native_update(
-            &state,
-            &edited.id,
-            &edited,
-            Some(&previous),
-            || Err(AppError::Message("native write failed".to_string())),
-        );
+        let result = state
+            .db
+            .save_prompt_with_native_update(&AppType::Pi, &edited, |_| {
+                Err(AppError::Message("native write failed".to_string()))
+            });
 
         assert!(result.is_err());
         let saved = state
@@ -793,5 +769,154 @@ mod pi_prompt_tests {
         prompts.insert(second.id.clone(), second);
 
         assert_eq!(unique_pi_backup_id(&prompts, 42), "backup-42-3");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod native_update_failure_tests {
+    use super::*;
+    use crate::database::Database;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+    use tempfile::tempdir;
+
+    fn prompt(content: &str) -> Prompt {
+        Prompt {
+            id: "active".into(),
+            name: content.into(),
+            content: content.into(),
+            description: None,
+            enabled: true,
+            created_at: Some(1),
+            updated_at: Some(2),
+        }
+    }
+
+    fn blocked_native_write(path: &Path, content: &str) -> Result<(), AppError> {
+        let parent = path.parent().unwrap();
+        let permissions = fs::metadata(parent).unwrap().permissions();
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o555)).unwrap();
+        let result = write_text_file(path, content);
+        fs::set_permissions(parent, permissions).unwrap();
+        result
+    }
+
+    #[test]
+    fn failed_native_update_does_not_overwrite_a_concurrent_successful_save() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("AGENTS.md");
+        let state = AppState::new(Arc::new(Database::memory().unwrap())).unwrap();
+        let previous = prompt("original");
+        let attempted = prompt("failed edit");
+        let newer = prompt("newer successful edit");
+        state.db.save_prompt("codex", &previous).unwrap();
+        fs::write(&path, "original").unwrap();
+        let (start_tx, start_rx) = mpsc::channel();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let mut owner_held = false;
+
+        let (failed, succeeded) = std::thread::scope(|scope| {
+            let (state, newer, path) = (&state, &newer, &path);
+            let writer = scope.spawn(move || {
+                start_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("A did not reach its native update");
+                started_tx.send(()).unwrap();
+                let result =
+                    state
+                        .db
+                        .save_prompt_with_native_update(&AppType::Codex, newer, |_| {
+                            write_text_file(path, &newer.content)
+                        });
+                finished_tx.send(()).unwrap();
+                result
+            });
+            let result =
+                state
+                    .db
+                    .save_prompt_with_native_update(&AppType::Codex, &attempted, |_| {
+                        // Probe before starting B, so only A can own this connection.
+                        // This avoids a sleep-only assertion about thread scheduling.
+                        owner_held = state.db.conn.try_lock().is_err();
+                        start_tx.send(()).unwrap();
+                        started_rx
+                            .recv_timeout(Duration::from_secs(5))
+                            .expect("concurrent writer did not start");
+                        if !owner_held {
+                            // The unprotected implementation permits B to complete
+                            // before A's failed native write and stale compensation.
+                            finished_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                        }
+                        blocked_native_write(path, &attempted.content)
+                    });
+            (result, writer.join().unwrap())
+        });
+
+        assert!(matches!(
+            failed,
+            Err(AppError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::PermissionDenied
+        ));
+        succeeded.unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "newer successful edit");
+        let saved = state.db.get_prompts("codex").unwrap();
+        assert_eq!(
+            serde_json::to_value(&saved["active"]).unwrap(),
+            serde_json::to_value(newer).unwrap()
+        );
+        assert!(
+            owner_held,
+            "A must retain the connection through compensation"
+        );
+    }
+
+    #[test]
+    fn native_and_compensation_failures_are_both_reported() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("AGENTS.md");
+        let state = AppState::new(Arc::new(Database::memory().unwrap())).unwrap();
+        let previous = prompt("original");
+        let attempted = prompt("failed edit");
+        state.db.save_prompt("codex", &previous).unwrap();
+        fs::write(&path, "original").unwrap();
+        state
+            .db
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_prompt_compensation BEFORE INSERT ON prompts
+                 WHEN NEW.app_type = 'codex' AND NEW.id = 'active' AND NEW.content = 'original'
+                 BEGIN SELECT RAISE(ABORT, 'fixture rejected compensation'); END;",
+            )
+            .unwrap();
+
+        let error = state
+            .db
+            .save_prompt_with_native_update(&AppType::Codex, &attempted, |_| {
+                blocked_native_write(&path, &attempted.content)
+            })
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("Permission denied"), "{error}");
+        assert!(error.contains("fixture rejected compensation"), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original");
+        assert_eq!(
+            state.db.get_prompts("codex").unwrap()["active"].content,
+            "failed edit"
+        );
+        // Even a double failure must release the connection, not poison the owner.
+        state
+            .db
+            .save_prompt("codex", &prompt("later edit"))
+            .unwrap();
+        assert_eq!(
+            state.db.get_prompts("codex").unwrap()["active"].content,
+            "later edit"
+        );
     }
 }
