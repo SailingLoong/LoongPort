@@ -73,16 +73,7 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
             Some(_) | None => continue,
         };
 
-        // Gemini content may be a plain string or an array of {text: ...} objects
-        let mut content = match msg.get("content") {
-            Some(Value::String(s)) => s.to_string(),
-            Some(Value::Array(items)) => items
-                .iter()
-                .filter_map(|item| item.get("text").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            _ => String::new(),
-        };
+        let mut content = content_text(msg.get("content"));
 
         // Append tool call names from the optional toolCalls array
         if let Some(Value::Array(calls)) = msg.get("toolCalls") {
@@ -137,6 +128,19 @@ pub fn delete_session(_root: &Path, path: &Path, session_id: &str) -> Result<boo
     Ok(true)
 }
 
+// Keep Gemini's native text shapes consistent between metadata and message bodies.
+fn content_text(content: Option<&Value>) -> String {
+    match content {
+        Some(Value::String(s)) => s.to_string(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|item| item.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
 fn parse_session(path: &Path) -> Option<SessionMeta> {
     let data = std::fs::read_to_string(path).ok()?;
     let value: Value = serde_json::from_str(&data).ok()?;
@@ -153,9 +157,9 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
         .and_then(|msgs| {
             msgs.iter()
                 .find(|m| m.get("type").and_then(Value::as_str) == Some("user"))
-                .and_then(|m| m.get("content").and_then(Value::as_str))
+                .map(|m| content_text(m.get("content")))
                 .filter(|s| !s.trim().is_empty())
-                .map(|s| truncate_summary(s, 160))
+                .map(|s| truncate_summary(&s, 160))
         });
 
     let source_path = path.to_string_lossy().to_string();
@@ -177,6 +181,82 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn session_with_content(content: Value) -> (tempfile::TempDir, std::path::PathBuf) {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("session.json");
+        let value = serde_json::json!({
+            "sessionId": "synthetic-session",
+            "messages": [{"type": "user", "content": content}]
+        });
+        std::fs::write(&path, value.to_string()).expect("write session");
+        (temp, path)
+    }
+
+    #[test]
+    fn metadata_and_messages_share_string_and_array_text() {
+        for (content, expected) in [
+            (serde_json::json!("hello"), "hello"),
+            (serde_json::json!([{"text": "hello"}]), "hello"),
+            (
+                serde_json::json!([{"text": "hello"}, {"text": "world"}]),
+                "hello\nworld",
+            ),
+            (
+                serde_json::json!([{"text": "hello"}, {"inlineData": {}}, {"text": 7}]),
+                "hello",
+            ),
+        ] {
+            let (_temp, path) = session_with_content(content);
+            let messages = load_messages(&path).expect("load");
+            assert_eq!(messages[0].content, expected);
+            let meta = parse_session(&path).expect("metadata");
+            assert_eq!(meta.title.as_deref(), Some(expected));
+            assert_eq!(meta.summary, meta.title);
+        }
+    }
+
+    #[test]
+    fn empty_and_non_text_content_does_not_create_title_or_message() {
+        for content in [
+            serde_json::json!(" "),
+            serde_json::json!([]),
+            serde_json::json!([{"text": " "}, {"inlineData": {}}]),
+            serde_json::json!([{"type": "tool_use", "name": "example"}]),
+            serde_json::json!({"text": "not an accepted shape"}),
+            Value::Null,
+        ] {
+            let (_temp, path) = session_with_content(content);
+            assert!(load_messages(&path).expect("load").is_empty());
+            let meta = parse_session(&path).expect("metadata");
+            assert_eq!(meta.title, None);
+            assert_eq!(meta.summary, None);
+        }
+    }
+
+    #[test]
+    fn metadata_truncates_array_text_but_messages_keep_full_text() {
+        let text = "界".repeat(161);
+        let (_temp, path) = session_with_content(serde_json::json!([{"text": text}]));
+        assert_eq!(load_messages(&path).expect("load")[0].content, text);
+        let meta = parse_session(&path).expect("metadata");
+        assert_eq!(meta.title, Some(format!("{}...", "界".repeat(160))));
+        assert_eq!(meta.summary, meta.title);
+    }
+
+    #[test]
+    fn empty_first_user_does_not_fall_through_to_later_message() {
+        let (_temp, path) = session_with_content(serde_json::json!([]));
+        let mut value: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        value["messages"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"type": "user", "content": "later"}));
+        std::fs::write(&path, value.to_string()).unwrap();
+        assert_eq!(parse_session(&path).expect("metadata").title, None);
+        assert_eq!(load_messages(&path).expect("load")[0].content, "later");
+    }
 
     #[test]
     fn delete_session_removes_json_file() {
