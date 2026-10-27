@@ -49,6 +49,80 @@ const backendBuildJobs = [
 ];
 
 describe("CI manual verification entry point", () => {
+  function minimaxStep() {
+    const match = job("backend").match(
+      /- name: MiniMax shared routing \(test-hooks\)\n        if: runner.os == 'Linux'\n        shell: bash\n        run: \|\n([\s\S]*?)(?=\n      #|\n      - name:)/,
+    );
+    expect(match).not.toBeNull();
+    return match![1]
+      .split("\n")
+      .map((line) => line.slice(10))
+      .join("\n");
+  }
+
+  it("runs the locked MiniMax GUI test-hooks target only on Linux without changing archive features", () => {
+    const script = minimaxStep();
+    expect(script).toContain("set -euo pipefail");
+    expect(script).toContain(
+      "--locked --manifest-path src-tauri/Cargo.toml --features gui,test-hooks --test minimax_shared_routing",
+    );
+    expect(script).toContain("-- --list --color never");
+    expect(script).toContain("-- --test-threads=1 --color never");
+    expect(script).not.toMatch(
+      /--no-default-features|--ignored|--exact|--skip/,
+    );
+    const backend = job("backend");
+    for (const setup of [
+      "Create frontend dist placeholder",
+      "Install Linux system deps",
+    ]) {
+      expect(backend.indexOf(setup)).toBeLessThan(
+        backend.indexOf("MiniMax shared routing (test-hooks)"),
+      );
+    }
+    expect(backend).not.toContain("continue-on-error");
+    for (const name of [...backendBuildJobs, ...backendTestJobs]) {
+      expect(job(name)).not.toContain("test-hooks");
+    }
+  });
+
+  it.each(["pass", "missing-list", "ignored", "missing-pass", "cargo-failure"])(
+    "checks MiniMax discovery and execution receipts: %s",
+    (scenario) => {
+      const script = minimaxStep();
+      const directory = mkdtempSync(resolve(tmpdir(), "minimax-ci-contract-"));
+      const fakeCargo = `cargo() {
+      local a=expired_native_access_in_ordered_group_never_calls_a_and_uses_b
+      local b=expired_native_access_manual_target_never_calls_a_or_switches_to_b
+      if [[ " $* " == *" --list "* ]]; then
+        echo "$a: test"
+        if [[ "$SCENARIO" != missing-list ]]; then echo "$b: test"; fi
+      else
+        echo "test $a ... ok"
+        case "$SCENARIO" in
+          ignored) echo "test $b ... ignored" ;;
+          missing-pass) : ;;
+          *) echo "test $b ... ok" ;;
+        esac
+        if [[ "$SCENARIO" == cargo-failure ]]; then return 7; fi
+      fi
+    }
+`;
+      try {
+        const result = spawnSync("bash", ["-c", fakeCargo + script], {
+          env: { ...process.env, RUNNER_TEMP: directory, SCENARIO: scenario },
+          encoding: "utf8",
+          timeout: 10000,
+        });
+        expect(result.error).toBeUndefined();
+        if (scenario === "pass") expect(result.status, result.stderr).toBe(0);
+        else expect(result.status, result.stdout).not.toBe(0);
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("uses standard macOS 15 while preserving the original three-platform test matrix", () => {
     expect(job("backend")).toContain(
       "os: [ubuntu-22.04, windows-latest, macos-15]",

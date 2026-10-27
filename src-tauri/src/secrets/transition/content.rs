@@ -8,6 +8,111 @@ use crate::secrets::{
 };
 use std::collections::BTreeMap;
 
+/// Closed authority from the original content owner. It admits a validated current
+/// operation, not ownership of an arbitrary old lock. No caller may mint this from
+/// PID/lock presence alone. Plaintext admission remains consistency-only.
+pub(crate) struct ContentSelectionPermit<'a> {
+    selection: &'a crate::app_store::isolated_scope::SelectionSnapshot,
+    verify: &'a dyn Fn() -> Result<(), AppError>,
+}
+impl ContentSelectionPermit<'_> {
+    pub(crate) fn verify_selection(
+        &self,
+        expected: &crate::app_store::isolated_scope::SelectionSnapshot,
+    ) -> Result<(), AppError> {
+        if self.selection != expected {
+            return Err(invalid());
+        }
+        (self.verify)()
+    }
+}
+#[cfg(test)]
+impl<'a> ContentSelectionPermit<'a> {
+    /// Lease-only fixture; never stands in for production DB/pending admission.
+    pub(crate) fn fixture(
+        selection: &'a crate::app_store::isolated_scope::SelectionSnapshot,
+        verify: &'a dyn Fn() -> Result<(), AppError>,
+    ) -> Self {
+        Self { selection, verify }
+    }
+}
+
+pub(super) fn verify_content_epoch(
+    session: &session::SecretSession,
+    expected: u64,
+) -> Result<(), AppError> {
+    if session.lifecycle_epoch() != expected {
+        return Err(AppError::Config("secret.source_changed".into()));
+    }
+    Ok(())
+}
+pub(super) fn block_content_session(
+    session: &session::SecretSession,
+    expected: u64,
+) -> Result<u64, AppError> {
+    verify_content_epoch(session, expected)?;
+    // Original set_blocked(true) invalidates leases exactly once. Do not adopt
+    // an arbitrary observed epoch: an extra concurrent invalidation must refuse.
+    let blocked = expected.checked_add(1).ok_or_else(invalid)?;
+    session.set_blocked(true);
+    verify_content_epoch(session, blocked)?;
+    Ok(blocked)
+}
+
+/// Borrowed original receiver context only; never source download authentication.
+pub(super) fn verify_native_content_admission(
+    root: &Path,
+    old_context: &StorageContext,
+    selected: &crate::app_store::isolated_scope::SelectedSourceGuard,
+) -> Result<(), AppError> {
+    if selected.source_data_root() != root {
+        return Err(invalid());
+    }
+    selected.verify_unchanged()?;
+    verify_native_clear(root, old_context)
+}
+fn verify_native_clear(root: &Path, old_context: &StorageContext) -> Result<(), AppError> {
+    use crate::workbuddy::native_owner::{inspect, Disposition};
+    match inspect(root, old_context) {
+        Ok(Disposition::Absent | Disposition::Clear) => Ok(()),
+        Ok(Disposition::Pending) | Err(_) => {
+            Err(AppError::Config("secret.recovery_required".into()))
+        }
+    }
+}
+
+/// Original owner gates, used BOTH before and after recovering a selector lease.
+/// The exact active intent is allowed only for its authenticated original owner.
+fn verify_content_owner_state(
+    root: &Path,
+    context: &StorageContext,
+    selection: &crate::app_store::isolated_scope::SelectionSnapshot,
+    device: &crate::live::engine::DeviceStore,
+    expected_intent: Option<&[u8]>,
+) -> Result<(), AppError> {
+    if selection.source_data_root() != root || selection.source_device_root() != device.root() {
+        return Err(invalid());
+    }
+    protection::validate_runtime_storage(root, context)?;
+    if pending_record(root)?.as_deref() != expected_intent
+        || super::super::reset::pending_record(root)?.is_some()
+        || super::super::bootstrap_restore::pending_record(root)?.is_some()
+        || super::super::rewrap::pending_record(root)?.is_some()
+        || crate::app_store::isolated_scope::inspect_pending_generation_at(selection)?.is_some()
+    {
+        return Err(AppError::Config("secret.recovery_required".into()));
+    }
+    let roots = Roots {
+        data: root,
+        device: device.root(),
+    };
+    roots.validate()?;
+    device::ensure_no_pending_mode_operation_with_storage(roots, context)?;
+    super::super::owned_file::ensure_no_pending_zcode_transaction(root)?;
+    super::super::upgrade::checkpoint::ensure_no_pending_checkpoint(device)?;
+    verify_native_clear(root, context)
+}
+
 const CONTENT_FORMAT: u32 = 3;
 const STORAGE_CONTENT_FORMAT: u32 = 4;
 const CONTENT_KIND: &str = "sameStorageContent";
@@ -398,8 +503,11 @@ fn finish(
     manifest: &ContentManifest,
     codec: &ContentCodec,
     active: Option<&mut Connection>,
+    admission: Option<&dyn Fn() -> Result<(), AppError>>,
     hook: &mut dyn FnMut(Checkpoint) -> Result<(), AppError>,
 ) -> Result<StorageContext, AppError> {
+    let recheck = || admission.map_or(Ok(()), |check| check());
+    recheck()?;
     let context = validate_metadata(root, manifest, codec)?;
     let target = staged_database(root, intent, manifest, codec, &context)?;
     validate_source_skills(root, intent, manifest)?;
@@ -423,6 +531,7 @@ fn finish(
         &captured.revision.primary_identity()?,
     )?;
     verify_database(conn, &context, manifest)?;
+    recheck()?;
     prepare_skills_install_with_codec(
         root,
         &intent.id,
@@ -432,6 +541,7 @@ fn finish(
     )?;
     validate_metadata(root, manifest, codec)?;
     validate_source_skills(root, intent, manifest)?;
+    recheck()?;
     if Database::content_digest(conn)? != manifest.target_database {
         conn.execute_batch("PRAGMA secure_delete=ON;")
             .map_err(db_error)?;
@@ -444,6 +554,7 @@ fn finish(
     }
     hook(Checkpoint::Database)?;
     validate_source_skills(root, intent, manifest)?;
+    recheck()?;
     commit_skills(root, &intent.id, &manifest.skills)?;
     // Reuses the original post-publication fault boundary; no metadata is written.
     hook(Checkpoint::Metadata)?;
@@ -456,7 +567,12 @@ fn finish(
         return Err(invalid());
     }
     crate::database::inspection::verify_unchanged(&main, &installed.revision)?;
+    recheck()?;
     remove_durable(&root.join(INTENT))?;
+    // A deterministic test-only process-exit boundary while the selector lease
+    // is still held. Production hooks and journal format are unchanged.
+    #[cfg(test)]
+    hook(Checkpoint::Keys)?;
     let _ = std::fs::remove_dir_all(skills_staging(root, &intent.id, &manifest.skills)?);
     let _ = std::fs::remove_dir_all(stage_root(root, &intent.id)?);
     Ok(context)
@@ -496,23 +612,48 @@ pub(super) fn install_storage_with_hook(
     let current = session.write()?;
     let root = session.root();
     protection::validate_runtime_storage(root, &current)?;
-    let codec = ContentCodec::for_install(root, source, &current)?;
-    if pending_record(root)?.is_some()
-        || super::super::reset::pending_record(root)?.is_some()
-        || super::super::bootstrap_restore::pending_record(root)?.is_some()
-        || super::super::rewrap::pending_record(root)?.is_some()
-    {
-        return Err(AppError::Config("secret.recovery_required".into()));
-    }
+    let selection = protection::generation::capture_current_selection()?;
     let device = crate::live::engine::DeviceStore::for_device();
-    let roots = Roots {
-        data: root,
-        device: device.root(),
+    if selection.source_data_root() != root || selection.source_device_root() != device.root() {
+        return Err(invalid());
+    }
+    // Reuse the original destination calculation, not a parallel path convention.
+    let skill_paths = SkillsTree {
+        location: skills.location,
+        directories: Vec::new(),
     };
-    roots.validate()?;
-    device::ensure_no_pending_mode_operation_with_storage(roots, &current)?;
-    super::super::owned_file::ensure_no_pending_zcode_transaction(root)?;
-    super::super::upgrade::checkpoint::ensure_no_pending_checkpoint(&device)?;
+    let skill_destination = skills_destination(root, &skill_paths);
+    verify_content_owner_state(root, &current, &selection, &device, None)?;
+    let epoch = session.lifecycle_epoch();
+    let main = root.join(crate::config::DB_FILE_NAME);
+    let captured = crate::database::inspection::capture(&main)?.ok_or_else(invalid)?;
+    crate::database::storage::check_identity(&captured.image, &current)?;
+    inventory::validate_storage_database(&captured.image, &current)?;
+    let source_skills = skill_image(&skill_destination)?;
+    let protection_before = protection::read_with_bytes(root)?.map(|(_, bytes)| bytes);
+    let vault_before = session::read_metadata_with_bytes(root)?.map(|(_, bytes)| bytes);
+    let verify_idle = || {
+        verify_content_owner_state(root, &current, &selection, &device, None)?;
+        if session.lifecycle_epoch() != epoch
+            || protection::read_with_bytes(root)?.map(|(_, bytes)| bytes) != protection_before
+            || session::read_metadata_with_bytes(root)?.map(|(_, bytes)| bytes) != vault_before
+            || skill_image(&skill_destination)? != source_skills
+        {
+            return Err(AppError::Config("secret.source_changed".into()));
+        }
+        crate::database::inspection::verify_unchanged(&main, &captured.revision)
+    };
+    let permit = ContentSelectionPermit {
+        selection: &selection,
+        verify: &verify_idle,
+    };
+    let selected = crate::app_store::isolated_scope::lock_admitted_content_source_at(
+        &selection,
+        &[&skill_destination],
+        &permit,
+    )?;
+    verify_native_content_admission(root, &current, &selected)?;
+    let codec = ContentCodec::for_install(root, source, &current)?;
     let mut conn = db.conn.lock().map_err(|_| invalid())?;
     let memory = db.prepare_sync_join_for_receiver(incoming, &conn, &current)?;
     memory
@@ -522,6 +663,13 @@ pub(super) fn install_storage_with_hook(
     let vault_bytes = session::read_metadata_with_bytes(root)?.map(|(_, bytes)| bytes);
     let id = uuid::Uuid::new_v4().to_string();
     let staging = stage_root(root, &id)?;
+    let skills_stage = skills_staging(root, &id, &skill_paths)?;
+    let admission = |expected_epoch| {
+        verify_content_epoch(session, expected_epoch)?;
+        verify_native_content_admission(root, &current, &selected)?;
+        selected.verify_replacement_directories(&[&staging, &skills_stage])
+    };
+    admission(epoch)?;
     // Ordinary creation does not reuse a competing pending transaction.
     std::fs::create_dir(&staging).map_err(|e| AppError::io(&staging, e))?;
     crate::config::ensure_private_directory(&staging)?;
@@ -568,6 +716,8 @@ pub(super) fn install_storage_with_hook(
         staged_database(root, &intent, &manifest, &codec, &current)?;
         validate_source_skills(root, &intent, &manifest)?;
         hook(Checkpoint::Staged)?;
+        verify_content_owner_state(root, &current, &selection, &device, None)?;
+        admission(epoch)?;
         if Database::content_digest(&conn)? != manifest.source_database {
             return Err(invalid());
         }
@@ -581,11 +731,26 @@ pub(super) fn install_storage_with_hook(
         }
     };
     let bytes = serde_json::to_vec(&intent).map_err(|_| invalid())?;
-    session.set_blocked(true);
+    verify_content_owner_state(root, &current, &selection, &device, None)?;
+    admission(epoch)?;
+    let blocked_epoch = block_content_session(session, epoch)?;
     write_durable(&root.join(INTENT), &bytes)?;
     hook(Checkpoint::Intent)?;
     db.invalidate_pricing_observations()?;
-    finish(root, &intent, &manifest, &codec, Some(&mut conn), hook)?;
+    let finish_admission = || {
+        admission(blocked_epoch)?;
+        verify_content_owner_state(root, &current, &selection, &device, Some(&bytes))
+    };
+    finish(
+        root,
+        &intent,
+        &manifest,
+        &codec,
+        Some(&mut conn),
+        Some(&finish_admission),
+        hook,
+    )?;
+    verify_content_epoch(session, blocked_epoch)?;
     session.set_blocked(false);
     Ok(())
 }
@@ -690,5 +855,41 @@ pub(super) fn recover(
     if pending_record(root)?.as_deref() != Some(bytes) {
         return Err(invalid());
     }
-    finish(root, &intent, &manifest, &codec, None, &mut |_| Ok(()))
+    let context = validate_metadata(root, &manifest, &codec)?;
+    let selection = protection::generation::capture_current_selection()?;
+    let device = crate::live::engine::DeviceStore::for_device();
+    let main = root.join(crate::config::DB_FILE_NAME);
+    let verify_active = || {
+        verify_content_owner_state(root, &context, &selection, &device, Some(bytes))?;
+        validate_metadata(root, &manifest, &codec)?;
+        staged_database(root, &intent, &manifest, &codec, &context)?;
+        validate_source_skills(root, &intent, &manifest)?;
+        let live = crate::database::inspection::capture(&main)?.ok_or_else(invalid)?;
+        verify_database(&live.image, &context, &manifest)?;
+        crate::database::inspection::verify_unchanged(&main, &live.revision)
+    };
+    let permit = ContentSelectionPermit {
+        selection: &selection,
+        verify: &verify_active,
+    };
+    let staging = stage_root(root, &intent.id)?;
+    let skills_stage = skills_staging(root, &intent.id, &manifest.skills)?;
+    let selected = crate::app_store::isolated_scope::lock_admitted_content_source_at(
+        &selection,
+        &[&manifest.skills_root, &staging, &skills_stage],
+        &permit,
+    )?;
+    let admission = || {
+        verify_native_content_admission(root, &context, &selected)?;
+        verify_active()
+    };
+    finish(
+        root,
+        &intent,
+        &manifest,
+        &codec,
+        None,
+        Some(&admission),
+        &mut |_| Ok(()),
+    )
 }

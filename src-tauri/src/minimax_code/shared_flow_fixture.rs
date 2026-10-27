@@ -32,6 +32,31 @@ fn projection(app: &AppType, account: &str, model: &str) -> Provider {
     crate::services::provider::managed_inference::validate(app, &provider).unwrap();
     provider
 }
+// Use the encrypted owner catalog, not synthetic routing expiry evidence.
+async fn set_native_access_expiry(state: &AppState, expires_at: i64) {
+    catalog::access(state.db.secret_session(), None, |doc, _| {
+        let account = doc
+            .accounts
+            .iter_mut()
+            .find(|a| a.id == "synthetic-native-a")
+            .unwrap();
+        let credentials = account.credentials.as_mut().unwrap();
+        credentials.kind = catalog::CredentialKind::NativeAccessOnly;
+        credentials.refresh_token = None;
+        credentials.native_source = Some(catalog::NativeSource {
+            format: catalog::NativeSourceFormat::PublicCliOAuthV1,
+            generation: 1,
+            fingerprint: "a".repeat(64),
+            rejected: false,
+        });
+        credentials.expires_at = expires_at;
+        catalog::validate_credentials(credentials).unwrap();
+        Ok(((), true))
+    })
+    .await
+    .unwrap();
+}
+
 pub(crate) async fn verify(state: &AppState, case: &str) {
     let owner = FixtureTransport::seed_accounts(
         state.db.secret_session(),
@@ -42,6 +67,10 @@ pub(crate) async fn verify(state: &AppState, case: &str) {
     )
     .await
     .unwrap();
+    let expiry_case = matches!(case, "expired_ordered" | "expired_manual");
+    if expiry_case {
+        set_native_access_expiry(state, i64::MAX).await;
+    }
     let members = [
         ("synthetic-native-a", "MiniMax-M2.7"),
         ("synthetic-native-b", "MiniMax-M2.5"),
@@ -135,7 +164,7 @@ pub(crate) async fn verify(state: &AppState, case: &str) {
                 let stream=futures::stream::once(async move {Ok::<_,std::io::Error>(prefix)}).chain(futures::stream::once(async {tokio::time::sleep(std::time::Duration::from_millis(80)).await;Err::<&str,_>(std::io::Error::other("synthetic interruption"))}));
                 return axum::http::Response::builder().status(200).header("content-type","text/event-stream").body(axum::body::Body::from_stream(stream)).unwrap();
             }
-            if auth=="Bearer synthetic-native-a-access" && case!="revoke" { return (StatusCode::SERVICE_UNAVAILABLE,axum::Json(json!({"error":{"type":"api_error","message":"synthetic retryable"}}))).into_response(); }
+            if auth=="Bearer synthetic-native-a-access" && !matches!(case.as_str(), "revoke" | "expired_ordered" | "expired_manual") { return (StatusCode::SERVICE_UNAVAILABLE,axum::Json(json!({"error":{"type":"api_error","message":"synthetic retryable"}}))).into_response(); }
             axum::Json(json!({"id":"synthetic-message","type":"message","role":"assistant","model":body["model"],"content":[{"type":"text","text":"native-fixture-ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}})).into_response()
         }
     }));
@@ -152,6 +181,16 @@ pub(crate) async fn verify(state: &AppState, case: &str) {
             && matches!(app, AppType::Codex)
         {
             continue;
+        }
+        if expiry_case {
+            // Each application prepares/applies while the same native capability
+            // is valid; expiry occurs only after that real consumer setup.
+            set_native_access_expiry(state, i64::MAX).await;
+            assert!(
+                catalog::snapshot(state.db.secret_session(), "synthetic-native-a")
+                    .await
+                    .is_ok()
+            );
         }
         let bootstrap = Provider::with_id(
             "synthetic-bootstrap".into(),
@@ -176,7 +215,7 @@ pub(crate) async fn verify(state: &AppState, case: &str) {
             .set_takeover_for_app(app.as_str(), true)
             .await
             .unwrap();
-        let target = if case == "manual" {
+        let target = if matches!(case, "manual" | "expired_manual") {
             groups::RouteTarget::Manual {
                 source_id: members[0].source_id.clone(),
                 model: members[0].model.clone(),
@@ -257,6 +296,45 @@ pub(crate) async fn verify(state: &AppState, case: &str) {
         if case == "stream" {
             body["stream"] = json!(true);
         }
+        if expiry_case {
+            // Positive control: the identical NativeAccessOnly capability really
+            // reaches A through this transport before expiry (for both apps).
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("content-type", "application/json")
+                        .header("authorization", "Bearer untrusted-client")
+                        .body(axum::body::Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            assert!(String::from_utf8_lossy(&bytes).contains("native-fixture-ok"));
+            assert_eq!(
+                calls.lock().unwrap().last().unwrap().1,
+                "Bearer synthetic-native-a-access"
+            );
+        }
+        if expiry_case {
+            set_native_access_expiry(state, 1).await;
+            assert!(matches!(
+                catalog::snapshot(state.db.secret_session(), "synthetic-native-a").await,
+                Err(catalog::Failure::NeedsLogin)
+            ));
+            assert!(
+                catalog::snapshot(state.db.secret_session(), "synthetic-native-b")
+                    .await
+                    .is_ok()
+            );
+        }
+        let calls_before_request = calls.lock().unwrap().len();
         let response = router
             .oneshot(
                 axum::http::Request::builder()
@@ -270,6 +348,16 @@ pub(crate) async fn verify(state: &AppState, case: &str) {
             .await
             .unwrap();
         let status = response.status();
+        if expiry_case {
+            let captured = calls.lock().unwrap();
+            let after_expiry = &captured[calls_before_request..];
+            if case == "expired_ordered" {
+                assert_eq!(after_expiry.len(), 1);
+                assert_eq!(after_expiry[0].1, "Bearer synthetic-native-b-access");
+            } else {
+                assert!(after_expiry.is_empty());
+            }
+        }
         if case == "revoke" {
             super::checkin::Engine {
                 session: state.db.secret_session(),
@@ -322,6 +410,21 @@ pub(crate) async fn verify(state: &AppState, case: &str) {
                 "must be captured owner identity rejection, not fixture capability denial: {}",
                 String::from_utf8_lossy(&body)
             );
+        } else if case == "expired_manual" {
+            assert!(
+                status == StatusCode::INTERNAL_SERVER_ERROR,
+                "expired manual target must fail at the original route-resolution fence: {status} {}",
+                String::from_utf8_lossy(&body)
+            );
+            // The original handler maps unresolved route references to
+            // DatabaseError/500; assert its stable machine reason, not any 500.
+            let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(error["error"]["type"], "proxy_error");
+            assert!(error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("routing_groups.unavailable"));
+            assert!(!String::from_utf8_lossy(&body).contains("native-fixture-ok"));
         } else if case == "manual" {
             assert!(
                 status.is_server_error(),
@@ -361,7 +464,9 @@ pub(crate) async fn verify(state: &AppState, case: &str) {
     );
     assert_eq!(
         *calls.lock().unwrap(),
-        if matches!(case, "replace" | "revoke" | "stream") {
+        if case == "expired_manual" {
+            vec![a.clone(), a]
+        } else if matches!(case, "replace" | "revoke" | "stream") {
             vec![a]
         } else if case == "manual" {
             vec![a.clone(), a]

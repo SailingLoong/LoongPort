@@ -31,7 +31,8 @@ mod device;
 #[cfg(feature = "test-hooks")]
 pub(crate) use codex_pending_tests::verify as verify_codex_pending;
 pub(crate) use content::{
-    install_sync_content, recovery_input_kind as content_recovery_input_kind, RecoveryInputKind,
+    install_sync_content, recovery_input_kind as content_recovery_input_kind,
+    ContentSelectionPermit, RecoveryInputKind,
 };
 use device::{RootBindings, Roots};
 

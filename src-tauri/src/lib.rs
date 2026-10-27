@@ -76,6 +76,14 @@ mod services;
 mod trae_accounts;
 #[cfg(any(feature = "gui", test))]
 mod workbuddy;
+// Headless protection/generation must inspect the same registered native journal.
+// Keep GUI account/HTTP/command modules excluded; these primitives expose no IPC.
+#[cfg(not(any(feature = "gui", test)))]
+mod workbuddy {
+    mod native;
+    pub(crate) mod native_owner;
+    mod native_transaction;
+}
 // Native account commands remain gated by the reviewed platform manifest.
 #[cfg(any(feature = "gui", test))]
 mod zcode_accounts;

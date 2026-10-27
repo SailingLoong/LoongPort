@@ -57,6 +57,17 @@ impl MetadataImage {
         Ok(())
     }
 }
+// Native journal phase is read with the original source context, never target keys.
+fn ensure_native_transaction_clear(root: &Path, context: &StorageContext) -> Result<(), AppError> {
+    use crate::workbuddy::native_owner::{inspect, Disposition};
+    match inspect(root, context) {
+        Ok(Disposition::Absent | Disposition::Clear) => Ok(()),
+        Ok(Disposition::Pending) | Err(_) => {
+            Err(AppError::Config("secret.recovery_required".into()))
+        }
+    }
+}
+
 /// The private constructor borrows the original session-write/connection guards.
 pub(crate) struct GenerationPreparationPermit<'a> {
     db: &'a crate::Database,
@@ -66,6 +77,8 @@ pub(crate) struct GenerationPreparationPermit<'a> {
     device: &'a Path,
     metadata: &'a MetadataImage,
     token: &'a str,
+    #[cfg(test)]
+    after_verify_test_hook: Option<&'a dyn Fn()>,
 }
 impl GenerationPreparationPermit<'_> {
     pub(crate) fn verify_selection(&self, s: &SelectionSnapshot) -> Result<(), AppError> {
@@ -77,7 +90,13 @@ impl GenerationPreparationPermit<'_> {
         }
         self.db.secret_session().ensure_available()?;
         self.metadata.verify(self.source_data_root())?;
-        storage::check_identity(self.conn, self.context)
+        storage::check_identity(self.conn, self.context)?;
+        ensure_native_transaction_clear(self.source_data_root(), self.context)?;
+        #[cfg(test)]
+        if let Some(hook) = self.after_verify_test_hook {
+            hook();
+        }
+        Ok(())
     }
     pub(crate) fn source_data_root(&self) -> &Path {
         self.db.secret_session().root()
@@ -456,6 +475,8 @@ fn convert_with_hook<'a>(
         device,
         metadata: &metadata,
         token: &token,
+        #[cfg(test)]
+        after_verify_test_hook: None,
     };
     permit.verify_selection(&selection)?;
     let (pending, target, text, resuming) =

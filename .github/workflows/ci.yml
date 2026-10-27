@@ -257,6 +257,27 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings
 
+      # These integration cases require test-hooks; default-feature nextest omits them.
+      # Keep GUI defaults and scope the opt-in to this test process, never release builds.
+      - name: MiniMax shared routing (test-hooks)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=(
+            expired_native_access_in_ordered_group_never_calls_a_and_uses_b
+            expired_native_access_manual_target_never_calls_a_or_switches_to_b
+          )
+          target=(--locked --manifest-path src-tauri/Cargo.toml --features gui,test-hooks --test minimax_shared_routing)
+          cargo test "${target[@]}" -- --list --color never | tee "$RUNNER_TEMP/minimax-discovery.log"
+          for name in "${expected[@]}"; do
+            grep -Fx "$name: test" "$RUNNER_TEMP/minimax-discovery.log"
+          done
+          cargo test "${target[@]}" -- --test-threads=1 --color never | tee "$RUNNER_TEMP/minimax-execution.log"
+          for name in "${expected[@]}"; do
+            grep -Fx "test $name ... ok" "$RUNNER_TEMP/minimax-execution.log"
+          done
+
       # loongport-cli（无桌面静态包）的纯净闸：GUI 关掉后库必须仍能编译。
       # 有人往共享模块里加了 tauri 引用就会在这里红——否则只有 release
       # 打 musl 包时才炸。警告不拦（no-gui 下大量 gui-only 代码成为死代码，
