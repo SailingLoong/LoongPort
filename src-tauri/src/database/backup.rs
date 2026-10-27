@@ -1439,6 +1439,9 @@ impl Database {
             .map_err(|e| AppError::Database(e.to_string()))?;
         Self::complete_backup(&backup, "创建数据库安全备份")?;
         drop(backup);
+        // A published snapshot is a standalone file. Do not inherit the live
+        // database's WAL header and create sidecars when it is opened read-only.
+        dest_conn.pragma_update(None, "journal_mode", "DELETE")?;
         Self::validate_sqlite_integrity(&dest_conn)?;
         dest_conn
             .close()
@@ -1572,10 +1575,27 @@ impl Database {
                 continue;
             }
 
-            if let Err(err) = fs::remove_file(&path) {
+            if let Err(err) = Self::remove_db_backup(&path) {
                 log::warn!("删除旧数据库备份失败 {}: {}", path.display(), err);
             } else {
                 removed += 1;
+            }
+        }
+        Ok(())
+    }
+
+    // Callers hold the backup-file operation guard; no backup connection is
+    // retained when its snapshot is discarded. Leave unrelated files alone.
+    fn remove_db_backup(path: &Path) -> Result<(), AppError> {
+        fs::remove_file(path).map_err(|error| AppError::io(path, error))?;
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            let sidecar = Path::new(&sidecar);
+            match fs::remove_file(sidecar) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(AppError::io(sidecar, error)),
             }
         }
         Ok(())
@@ -2150,7 +2170,7 @@ impl Database {
             )));
         }
 
-        fs::remove_file(&backup_path).map_err(|e| AppError::io(&backup_path, e))?;
+        Self::remove_db_backup(&backup_path)?;
         log::info!("Deleted backup: {filename}");
         Ok(())
     }
@@ -2158,6 +2178,75 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[serial]
+    fn removing_a_backup_removes_only_its_sqlite_file_set() -> Result<(), AppError> {
+        let _home = TestHomeGuard::new();
+        let _db = crate::secrets::testing::initialize_database()?;
+        let _settings = SettingsGuard::with_backup_retain_count(1);
+        let dir = crate::config::get_app_config_dir().join("backups");
+        crate::config::ensure_private_directory(&dir)?;
+        let retained = dir.join("retained.db");
+        std::fs::write(&retained, b"retained synthetic backup").unwrap();
+        for automatic in [false, true] {
+            let obsolete = dir.join("obsolete.db");
+            std::fs::write(&obsolete, b"obsolete synthetic backup").unwrap();
+            for suffix in ["-wal", "-shm", "-journal"] {
+                let mut sidecar = obsolete.as_os_str().to_os_string();
+                sidecar.push(suffix);
+                std::fs::write(sidecar, b"synthetic sidecar").unwrap();
+            }
+            if automatic {
+                Database::cleanup_db_backups(&dir, &[retained.as_path()])?;
+            } else {
+                Database::delete_backup("obsolete.db")?;
+            }
+            assert!(!obsolete.exists());
+            for suffix in ["-wal", "-shm", "-journal"] {
+                let mut sidecar = obsolete.as_os_str().to_os_string();
+                sidecar.push(suffix);
+                assert!(!std::path::Path::new(&sidecar).exists());
+            }
+            assert_eq!(
+                std::fs::read(&retained).unwrap(),
+                b"retained synthetic backup"
+            );
+        }
+        Ok(())
+    }
+    #[test]
+    #[serial]
+    fn routine_backup_is_standalone_when_the_live_database_uses_wal() -> Result<(), AppError> {
+        let _home = TestHomeGuard::new();
+        let db = crate::secrets::testing::initialize_database()?;
+        {
+            let conn = db.conn.lock()?;
+            conn.pragma_update(None, "journal_mode", "WAL")?;
+            conn.execute_batch("CREATE TABLE standalone_backup_canary(value TEXT); INSERT INTO standalone_backup_canary VALUES('synthetic snapshot');")?;
+        }
+        let backup = db.backup_database_file()?.unwrap();
+        let header = std::fs::read(&backup).map_err(|e| AppError::io(&backup, e))?;
+        assert_eq!(
+            &header[18..20],
+            &[1, 1],
+            "published snapshots must use rollback-journal format rather than inherit WAL"
+        );
+        let snapshot =
+            Connection::open_with_flags(&backup, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        assert_eq!(
+            snapshot.query_row("SELECT value FROM standalone_backup_canary", [], |row| {
+                row.get::<_, String>(0)
+            })?,
+            "synthetic snapshot"
+        );
+        drop(snapshot);
+        for suffix in ["-wal", "-shm"] {
+            let mut path = backup.as_os_str().to_os_string();
+            path.push(suffix);
+            assert!(!std::path::Path::new(&path).exists());
+        }
+        Ok(())
+    }
     include!("backup_qoder_tests.rs");
     include!("backup_qoder_http_auth_tests.rs");
     use super::{lock_backup_file_operations, Database};

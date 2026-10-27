@@ -370,6 +370,51 @@ fn pending_target(
     session::validate_completed_metadata(root, &target)?;
     Ok((target, text))
 }
+fn new_target(
+    current: &StorageContext,
+    mode: GenerationMode,
+) -> Result<(StorageContext, Option<Zeroizing<String>>), AppError> {
+    let identity = current.identity();
+    let revision = identity.revision().checked_add(1).ok_or_else(invalid)?;
+    match mode {
+        GenerationMode::Encrypted(text) => {
+            let target = VaultContext::create_generation_with_user_text(
+                identity.store_id().into(),
+                revision,
+                &text,
+            )
+            .map_err(crate::secrets::error::secret_error)?;
+            Ok((StorageContext::from(target), Some(text)))
+        }
+        GenerationMode::Plaintext => Ok((
+            StorageContext::Plaintext(PlaintextIdentity {
+                format_version: 1,
+                store_id: identity.store_id().into(),
+                generation_id: uuid::Uuid::new_v4().to_string(),
+                revision,
+            }),
+            None,
+        )),
+    }
+}
+// An original source-bound reservation contains no target data or key yet.
+// Any additional entry keeps the authenticated prepared-target resume path.
+fn reserved_target_stamp(root: &Path) -> Result<Option<FileStamp>, AppError> {
+    let entries = std::fs::read_dir(root)
+        .map_err(|error| AppError::io(root, error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| AppError::io(root, error))?;
+    if entries.len() != 1
+        || entries[0].file_name() != crate::app_store::ISOLATED_SCOPE_IDENTITY_FILE
+    {
+        return Ok(None);
+    }
+    stamp(
+        root,
+        Path::new(crate::app_store::ISOLATED_SCOPE_IDENTITY_FILE),
+    )
+    .map(Some)
+}
 fn convert_with_hook<'a>(
     db: &'a crate::Database,
     device: &Path,
@@ -415,75 +460,67 @@ fn convert_with_hook<'a>(
     permit.verify_selection(&selection)?;
     let (pending, target, text, resuming) =
         if let Some(binding) = isolated_scope::inspect_pending_generation_at(&selection)? {
-            let (target, text) = pending_target(binding.root(), mode)?;
-            let target_metadata = MetadataImage::capture(binding.root())?;
-            // A plaintext source's earlier prepared target already has an authenticated
-            // complete target image. Never refresh changed target bytes into that intent.
-            if context.is_plaintext() {
-                let record = super::read(binding.root())?.ok_or_else(invalid)?;
-                let intent = record
-                    .cleanup_manifest(target.encrypted()?)?
-                    .ok_or_else(invalid)?;
-                let manifest: CleanupManifest =
-                    serde_json::from_slice(&intent).map_err(|_| invalid())?;
-                if manifest.version != 1
-                    || manifest.binding != BindingRecord::from(&binding)
-                    || target_tree(binding.root())? != manifest.targets
-                {
-                    return Err(invalid());
-                }
-                for file in &manifest.files {
-                    allowed_cleanup(file)?;
-                    let source = match file.location {
-                        SourceRoot::Data => root,
-                        SourceRoot::Device => device,
-                    };
-                    // SQLite may legitimately checkpoint/reopen its physical image after a
-                    // dead process. Its complete logical equality is checked below; original
-                    // permission semantics still may not be recaptured from changed input.
-                    if matches!(file.kind, CleanupKind::Database | CleanupKind::Sidecar) {
-                        if source.join(&file.stamp.relative).exists()
-                            && stamp(source, &file.stamp.relative)?.mode != file.stamp.mode
-                        {
-                            return Err(invalid());
-                        }
-                    } else if stamp(source, &file.stamp.relative)? != file.stamp {
+            if let Some(marker) = reserved_target_stamp(binding.root())? {
+                let resume = GenerationResumePermit {
+                    source: permit,
+                    binding,
+                    target: GenerationResumeTarget::Reserved(marker),
+                };
+                let pending = isolated_scope::resume_generation_at(&selection, &resume)?;
+                let (target, text) = new_target(&context, mode)?;
+                (pending, target, text, false)
+            } else {
+                let (target, text) = pending_target(binding.root(), mode)?;
+                let target_metadata = MetadataImage::capture(binding.root())?;
+                // A plaintext source's earlier prepared target already has an authenticated
+                // complete target image. Never refresh changed target bytes into that intent.
+                if context.is_plaintext() {
+                    let record = super::read(binding.root())?.ok_or_else(invalid)?;
+                    let intent = record
+                        .cleanup_manifest(target.encrypted()?)?
+                        .ok_or_else(invalid)?;
+                    let manifest: CleanupManifest =
+                        serde_json::from_slice(&intent).map_err(|_| invalid())?;
+                    if manifest.version != 1
+                        || manifest.binding != BindingRecord::from(&binding)
+                        || target_tree(binding.root())? != manifest.targets
+                    {
                         return Err(invalid());
                     }
+                    for file in &manifest.files {
+                        allowed_cleanup(file)?;
+                        let source = match file.location {
+                            SourceRoot::Data => root,
+                            SourceRoot::Device => device,
+                        };
+                        // SQLite may legitimately checkpoint/reopen its physical image after a
+                        // dead process. Its complete logical equality is checked below; original
+                        // permission semantics still may not be recaptured from changed input.
+                        if matches!(file.kind, CleanupKind::Database | CleanupKind::Sidecar) {
+                            if source.join(&file.stamp.relative).exists()
+                                && stamp(source, &file.stamp.relative)?.mode != file.stamp.mode
+                            {
+                                return Err(invalid());
+                            }
+                        } else if stamp(source, &file.stamp.relative)? != file.stamp {
+                            return Err(invalid());
+                        }
+                    }
                 }
+                let resume = GenerationResumePermit {
+                    source: permit,
+                    binding,
+                    target: GenerationResumeTarget::Prepared {
+                        metadata: target_metadata,
+                        context: target.clone(),
+                    },
+                };
+                let pending = isolated_scope::resume_generation_at(&selection, &resume)?;
+                (pending, target, text, true)
             }
-            let resume = GenerationResumePermit {
-                source: permit,
-                binding,
-                target_metadata,
-                target: target.clone(),
-            };
-            let pending = isolated_scope::resume_generation_at(&selection, &resume)?;
-            (pending, target, text, true)
         } else {
             let pending = isolated_scope::prepare_generation_at(&selection, &permit)?;
-            let identity = context.identity();
-            let revision = identity.revision().checked_add(1).ok_or_else(invalid)?;
-            let (target, text) = match mode {
-                GenerationMode::Encrypted(text) => {
-                    let target = VaultContext::create_generation_with_user_text(
-                        identity.store_id().into(),
-                        revision,
-                        &text,
-                    )
-                    .map_err(crate::secrets::error::secret_error)?;
-                    (StorageContext::from(target), Some(text))
-                }
-                GenerationMode::Plaintext => (
-                    StorageContext::Plaintext(PlaintextIdentity {
-                        format_version: 1,
-                        store_id: identity.store_id().into(),
-                        generation_id: uuid::Uuid::new_v4().to_string(),
-                        revision,
-                    }),
-                    None,
-                ),
-            };
+            let (target, text) = new_target(&context, mode)?;
             (pending, target, text, false)
         };
     let binding = pending.binding().clone();
@@ -1112,8 +1149,14 @@ impl VerifiedSeparateConfiguration<'_> {
 pub(crate) struct GenerationResumePermit<'a> {
     source: GenerationPreparationPermit<'a>,
     binding: CandidateBinding,
-    target_metadata: MetadataImage,
-    target: StorageContext,
+    target: GenerationResumeTarget,
+}
+enum GenerationResumeTarget {
+    Reserved(FileStamp),
+    Prepared {
+        metadata: MetadataImage,
+        context: StorageContext,
+    },
 }
 impl GenerationResumePermit<'_> {
     pub(crate) fn binding(&self) -> &CandidateBinding {
@@ -1124,10 +1167,20 @@ impl GenerationResumePermit<'_> {
         if self.binding.inspection_token() != self.source.inspection_token() {
             return Err(invalid());
         }
-        self.target_metadata.verify(self.binding.root())?;
-        let record = super::read(self.binding.root())?.ok_or_else(invalid)?;
-        record.matches_context(&self.target)?;
-        record.verify_commitment(&self.target)
+        match &self.target {
+            GenerationResumeTarget::Reserved(marker) => {
+                if reserved_target_stamp(self.binding.root())?.as_ref() != Some(marker) {
+                    return Err(invalid());
+                }
+                Ok(())
+            }
+            GenerationResumeTarget::Prepared { metadata, context } => {
+                metadata.verify(self.binding.root())?;
+                let record = super::read(self.binding.root())?.ok_or_else(invalid)?;
+                record.matches_context(context)?;
+                record.verify_commitment(context)
+            }
+        }
     }
 }
 /// Constructed only after the selected record, target and cleanup intent authenticate.

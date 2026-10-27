@@ -6,6 +6,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { zcodeClaimApi, type ClaimState } from "@/lib/api/zcodeClaim";
 
 const emptyState: ClaimState = {
+  consentRevision: "",
   enabled: false,
   participants: [],
   records: {},
@@ -43,6 +44,8 @@ export function ZCodeClaimControls({
     values?: Record<string, string>,
   ) => t(`zcode.claim.${key}`, { defaultValue: fallback, ...values });
   const [state, setState] = useState<ClaimState>(emptyState);
+  const [draftRevision, setDraftRevision] = useState("");
+  const resetDraft = useRef(false);
   const [selected, setSelected] = useState<string[]>([]);
   const [auto, setAuto] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -61,6 +64,8 @@ export function ZCodeClaimControls({
     let reading = false;
     setState(emptyState);
     setSelected([]);
+    setDraftRevision("");
+    resetDraft.current = false;
     setAuto(false);
     setLoaded(false);
     setPending(false);
@@ -82,7 +87,9 @@ export function ZCodeClaimControls({
           backendBusy.current = next.busy;
           setLoaded(true);
           setError(false);
-          if (!initialized) {
+          if (!initialized || resetDraft.current) {
+            setDraftRevision(next.consentRevision);
+            resetDraft.current = false;
             setSelected(next.participants);
             setAuto(next.enabled);
             initialized = true;
@@ -122,7 +129,10 @@ export function ZCodeClaimControls({
   );
   const claimable = ids.filter((id) => state.records[id]?.canClaim === true);
   const blocked = disabled || pending || state.busy || !loaded;
-  async function perform(operation: () => Promise<ClaimState>) {
+  async function perform(
+    operation: () => Promise<ClaimState>,
+    consent = false,
+  ) {
     if (operationInFlight.current) return;
     const generation = epoch.current;
     operationInFlight.current = true;
@@ -135,6 +145,11 @@ export function ZCodeClaimControls({
         // Retire reads that started while the command was still pending.
         ++operationVersion.current;
         setState(next);
+        if (consent) {
+          setDraftRevision(next.consentRevision);
+          setSelected(next.participants);
+          setAuto(next.enabled);
+        }
         setError(false);
         backendBusy.current = next.busy;
         refresh.current?.();
@@ -142,6 +157,12 @@ export function ZCodeClaimControls({
     } catch {
       if (generation === epoch.current) {
         ++operationVersion.current;
+        if (consent) {
+          // A failed/uncertain write is never replayed with a newer revision.
+          setDraftRevision("");
+          resetDraft.current = true;
+          refresh.current?.();
+        }
         setError(true);
       }
     } finally {
@@ -209,9 +230,12 @@ export function ZCodeClaimControls({
         <Button
           variant="outline"
           size="sm"
-          disabled={blocked || (auto && ids.length === 0)}
+          disabled={blocked || !draftRevision || (auto && ids.length === 0)}
           onClick={() =>
-            void perform(() => zcodeClaimApi.setAuto(dataRoot, auto, ids))
+            void perform(
+              () => zcodeClaimApi.setAuto(dataRoot, auto, ids, draftRevision),
+              true,
+            )
           }
         >
           {copy("applyAuto", "Apply automatic participation")}

@@ -236,7 +236,9 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
       await addRepoMutation.mutateAsync(repo);
       try {
         // Await discovery so we can report the real count
-        const { data: freshSkills } = await refetchDiscoverable();
+        const { data: freshSkills } = await refetchDiscoverable({
+          throwOnError: true,
+        });
         const count =
           freshSkills?.filter(
             (s) =>
@@ -252,10 +254,16 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
           }),
           { closeButton: true },
         );
-      } catch (error) {
-        toast.error(t("common.error"), {
-          description: String(error),
-        });
+      } catch {
+        // Saving succeeded; only discovery failed. Do not report an old count
+        // or reject the save and invite the user to submit it again.
+        toast.warning(
+          t("skills.repo.savedRefreshFailed", {
+            owner: repo.owner,
+            name: repo.name,
+          }),
+          { closeButton: true },
+        );
       }
     };
 

@@ -8,6 +8,7 @@ import { LiteralKeyInput, type LiteralKeyInputHandle } from "./LiteralKeyInput";
 import { Label } from "@/components/ui/label";
 import { CredentialKeyRecoveryHelp } from "./CredentialKeyRecoveryHelp";
 import { Notice, NoticeSlot } from "@/components/ui/notice";
+import { settingsApi } from "@/lib/api/settings";
 import {
   credentialProtectionApi,
   credentialProtectionKey,
@@ -18,6 +19,13 @@ import {
 // Missing input is incomplete; supplied text has no format or strength rules.
 // Never trim, case-fold or normalize the user’s text before comparison or IPC.
 const hasKeyText = (value: string) => value.length > 0;
+const keyCacheUnavailable = "protection.key_cache_unavailable";
+const publicFailureCode = (value: unknown) =>
+  value === keyCacheUnavailable ||
+  value === "protection.generation_changed" ||
+  value === "protection.unclaimed_database_artifact"
+    ? value
+    : null;
 
 /** Local, voluntary controls: never a startup gate or an owner of runtime readiness. */
 export function CredentialProtectionPanel({
@@ -34,27 +42,35 @@ export function CredentialProtectionPanel({
     retry: false,
   });
   const [pending, setPending] = useState(false);
-  const [failed, setFailed] = useState(false);
+  const [failure, setFailure] = useState<{ code: string | null } | null>(null);
   const [saved, setSaved] = useState(false);
+  const restarting = useRef(false);
+  const [restartPending, setRestartPending] = useState(false);
+  const [restartFailed, setRestartFailed] = useState(false);
 
   // No useMutation here: its variables/error cache must never retain a user key.
   const perform = async (action: () => Promise<CredentialProtectionStatus>) => {
     setPending(true);
-    setFailed(false);
+    setFailure(null);
     setSaved(false);
     try {
       const result = await action();
       queryClient.setQueryData(credentialProtectionKey, result);
       setSaved(result.status === "available" && !result.restartRequired);
-      setFailed(result.status !== "available" && !result.restartRequired);
+      setFailure(
+        result.status !== "available" && !result.restartRequired
+          ? { code: publicFailureCode(result.errorCode) }
+          : null,
+      );
       // Only the runtime's exact authority may enable credential consumers.
       // A restart-required result does not imply a ready in-process runtime.
       await queryClient.invalidateQueries({
         queryKey: ["runtimeAvailability"],
       });
-    } catch {
-      // Native error text can contain user input. Never echo, log or cache it.
-      setFailed(true);
+    } catch (error: unknown) {
+      // Only exact public codes may be retained; arbitrary native errors can
+      // contain user input and must never be echoed, logged or cached.
+      setFailure({ code: publicFailureCode(error) });
       await queryClient.invalidateQueries({
         queryKey: credentialProtectionKey,
       });
@@ -62,6 +78,50 @@ export function CredentialProtectionPanel({
       setPending(false);
     }
   };
+
+  if (!protection.isError && protection.data?.restartRequired) {
+    const restart = async () => {
+      if (restarting.current) return;
+      restarting.current = true;
+      setRestartPending(true);
+      setRestartFailed(false);
+      try {
+        if (!(await settingsApi.restart())) throw new Error("restart failed");
+        // Keep the action disabled until the native restart replaces this window.
+      } catch {
+        setRestartFailed(true);
+        setRestartPending(false);
+        restarting.current = false;
+      }
+    };
+    return (
+      <section
+        className="space-y-4 rounded-lg border p-5"
+        aria-labelledby={headingId}
+      >
+        <h3 id={headingId} className="text-lg font-medium">
+          {t("storageProtection.restartTitle")}
+        </h3>
+        <p>{t("storageProtection.restartRequired")}</p>
+        <Button
+          disabled={restartPending}
+          aria-busy={restartPending}
+          onClick={() => void restart()}
+        >
+          {t(
+            restartPending
+              ? "storageProtection.restarting"
+              : "storageProtection.restart",
+          )}
+        </Button>
+        {restartFailed && (
+          <p role="alert" className="text-sm text-destructive">
+            {t("startupRecovery.restartFailed")}
+          </p>
+        )}
+      </section>
+    );
+  }
 
   return (
     <section
@@ -107,36 +167,35 @@ export function CredentialProtectionPanel({
             <CredentialKeyRecoveryHelp />
           )}
           {protection.data.status === "available" &&
-            protection.data.errorCode ===
-              "protection.key_cache_unavailable" && (
+            protection.data.errorCode === keyCacheUnavailable && (
               <Notice
                 tone="warning"
                 title={t("storageProtection.keyCacheUnavailable")}
               />
             )}
-          {protection.data.restartRequired ? (
-            <Notice
-              tone="neutral"
-              title={t("storageProtection.restartRequired")}
-            />
-          ) : (
-            <ProtectionActions
-              key={`${protection.data.mode}:${protection.data.status}:${protection.data.reviewToken}`}
-              status={protection.data}
-              pending={pending}
-              setupPrompt={setupPrompt}
-              perform={perform}
-            />
-          )}
+          <ProtectionActions
+            key={`${protection.data.mode}:${protection.data.status}:${protection.data.reviewToken}`}
+            status={protection.data}
+            pending={pending}
+            setupPrompt={setupPrompt}
+            perform={perform}
+          />
         </>
       ) : (
         <p role="status" className="text-sm text-muted-foreground">
           {t("common.loading")}
         </p>
       )}
-      {failed && (
+      {failure && (
         <p role="alert" className="text-sm text-destructive">
-          {t("storageProtection.actionFailed")}
+          {t(
+            failure.code === keyCacheUnavailable
+              ? "storageProtection.keyCacheFailed"
+              : "storageProtection.actionFailed",
+          )}
+          {failure.code && (
+            <span className="block font-mono text-xs">{failure.code}</span>
+          )}
         </p>
       )}
       <NoticeSlot>

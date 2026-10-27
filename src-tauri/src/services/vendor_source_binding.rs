@@ -802,20 +802,58 @@ mod tests {
                 vendor::creds::set_api_key(&conn, &vault, row_id, key).unwrap();
             }
             for plan in vendor::plans_for_account(vendor, Some(account)) {
-                let source = template(vendor, account, plan, &AppType::Codex).unwrap();
-                db.save_provider("codex", &source).unwrap();
                 if vendor::is_free_plan(vendor, plan.id_segment) {
-                    // Chat-only plans must not gain an unverified Messages binding.
-                    assert!(
-                        vendor::config_for(vendor, plan.id_segment, &AppType::Claude).is_none()
+                    // Free retains its native source and account identity, but cannot
+                    // acquire either external binding even with a valid owner/key.
+                    let mut bundle = vendor::provision::plan_rows_for(vendor, account, key)
+                        .into_iter()
+                        .find(|bundle| bundle.plan.id_segment == plan.id_segment)
+                        .unwrap();
+                    assert_eq!(bundle.rows.len(), 1);
+                    let (native_app, settings) = bundle.rows.remove(0);
+                    assert_eq!(native_app, AppType::OpenCode);
+                    assert_eq!(
+                        provider_config::extract_api_key(&settings, &native_app).as_deref(),
+                        Some(key)
                     );
-                    assert!(bind_vendor_source(&db, &source.id, &AppType::Claude).is_err());
-                    assert!(db
-                        .get_provider_by_id(&source.id, "claude")
-                        .unwrap()
-                        .is_none());
+                    let mut source = Provider::with_id(
+                        bundle.provider_id,
+                        plan.display_name.into(),
+                        settings.clone(),
+                        Some(vendor::site_origin(vendor).into()),
+                    );
+                    source.meta = Some(ProviderMeta {
+                        loongport_vendor_account: Some(account.into()),
+                        ..Default::default()
+                    });
+                    db.save_provider(native_app.as_str(), &source).unwrap();
+                    let (owner, owner_vendor, owner_account, owner_plan) =
+                        identity(&db.conn.lock().unwrap(), &source.id).unwrap();
+                    assert_eq!(
+                        (owner, owner_vendor, owner_account.as_str()),
+                        (row_id, vendor, account)
+                    );
+                    assert_eq!(owner_plan.id_segment, plan.id_segment);
+                    for app in [AppType::Claude, AppType::Codex] {
+                        assert!(vendor::config_for(vendor, plan.id_segment, &app).is_none());
+                        assert!(template(vendor, account, plan, &app).is_err());
+                        assert!(bind_vendor_source(&db, &source.id, &app).is_err());
+                        assert!(db
+                            .get_provider_by_id(&source.id, app.as_str())
+                            .unwrap()
+                            .is_none());
+                    }
+                    assert_eq!(
+                        db.get_provider_by_id(&source.id, native_app.as_str())
+                            .unwrap()
+                            .unwrap()
+                            .settings_config,
+                        settings
+                    );
                     continue;
                 }
+                let source = template(vendor, account, plan, &AppType::Codex).unwrap();
+                db.save_provider("codex", &source).unwrap();
                 assert!(bind_vendor_source(&db, &source.id, &AppType::Claude).unwrap());
                 let row = db
                     .get_provider_by_id(&source.id, "claude")

@@ -1204,6 +1204,61 @@ describe("WebdavSyncSection", () => {
       );
     });
   });
+  it.each(["paste", "change"] as const)(
+    "preserves earliest observed restore input after the real WebDAV preview flow: %s",
+    async (mode) => {
+      const raw =
+        mode === "paste" ? "\r\n中文🔑 aB\rline\n " : "synthetic early source";
+      settingsApiMock.webdavSyncDownload.mockRejectedValue(
+        "sync.vault_adoption_required",
+      );
+      settingsApiMock.webdavSyncRestore.mockRejectedValue(
+        new Error("sync.restore_unverified synthetic-private-detail"),
+      );
+      renderSection(baseConfig);
+      fireEvent.click(
+        screen.getByRole("button", { name: "settings.webdavSync.download" }),
+      );
+      const confirm = await screen.findByRole("button", {
+        name: "settings.webdavSync.confirmDownload.confirm",
+      });
+      let field: HTMLTextAreaElement | null = null;
+      const observer = new MutationObserver(() => {
+        field = document.querySelector<HTMLTextAreaElement>(
+          "#sync-restore-password",
+        );
+        if (!field) return;
+        observer.disconnect();
+        if (mode === "paste")
+          fireEvent.paste(field, { clipboardData: { getData: () => raw } });
+        else fireEvent.change(field, { target: { value: raw } });
+        fireEvent.click(
+          screen.getByRole("button", { name: "syncRestore.confirm" }),
+        );
+      });
+      observer.observe(document.body, { subtree: true, childList: true });
+      try {
+        fireEvent.click(confirm);
+        expect(await screen.findByRole("alert")).toHaveTextContent(
+          "syncRestore.failed",
+        );
+        expect(
+          settingsApiMock.webdavSyncRestore,
+        ).toHaveBeenCalledExactlyOnceWith(raw, "snapshot-1");
+        expect(settingsApiMock.webdavSyncDownload).toHaveBeenCalledOnce();
+        expect(field).toHaveValue("");
+        expect(
+          screen.getByRole("button", { name: "syncRestore.confirm" }),
+        ).toBeDisabled();
+        expect(toastSuccessMock).not.toHaveBeenCalled();
+        expect(document.body.textContent).not.toContain(
+          "synthetic-private-detail",
+        );
+      } finally {
+        observer.disconnect();
+      }
+    },
+  );
 });
 
 describe("independent upgrade sync confirmation", () => {

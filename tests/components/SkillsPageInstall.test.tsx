@@ -1,7 +1,14 @@
 import { toast } from "sonner";
 import { createRef } from "react";
-import { render, screen, waitFor, act } from "@testing-library/react";
+import {
+  render,
+  screen,
+  waitFor,
+  act,
+  fireEvent,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 import {
@@ -59,6 +66,7 @@ vi.mock("sonner", () => ({
     success: vi.fn(),
     error: vi.fn(),
     info: vi.fn(),
+    warning: vi.fn(),
   },
 }));
 
@@ -205,6 +213,213 @@ describe("SkillsPage - skills.sh install (regression)", () => {
     });
     expect(toast.success).toHaveBeenCalledTimes(1);
   });
+
+  const openRepoManager = () => {
+    const ref = createRef<SkillsPageHandle>();
+    render(<SkillsPage ref={ref} />);
+    act(() => {
+      getSkillsPageHeaderActions("skillssh")
+        .find((action) => action.key === "manage-repos")!
+        .execute(ref.current);
+    });
+    return {
+      url: screen.getByLabelText("skills.repo.url"),
+      branch: screen.getByLabelText("skills.repo.branch"),
+      add: screen.getByRole("button", { name: "skills.repo.add" }),
+    };
+  };
+
+  const deferredSave = () => {
+    let resolve!: () => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<void>((yes, no) => {
+      resolve = yes;
+      reject = no;
+    });
+    return { promise, resolve, reject };
+  };
+
+  it.each([false, true])(
+    "reports a saved repository with failed discovery without a stale count (cached=%s)",
+    async (cached) => {
+      const client = new QueryClient({
+        defaultOptions: { queries: { retry: false, gcTime: 0 } },
+      });
+      const observer = new QueryObserver<DiscoverableSkill[]>(client, {
+        queryKey: ["synthetic-discovery"],
+        enabled: false,
+        initialData: cached ? [makeDiscoverableSkill()] : undefined,
+        queryFn: async () => {
+          throw new Error("synthetic discovery unavailable");
+        },
+      });
+      // Run the installed QueryObserver's real refetch contract, not a mock
+      // that rejects regardless of whether production opts into throwOnError.
+      refetchDiscoverableMock.mockImplementation((options) =>
+        observer.refetch(options),
+      );
+      addRepoMutateAsyncMock.mockResolvedValue(undefined);
+      const { url, branch, add } = openRepoManager();
+      fireEvent.change(url, { target: { value: "owner-a/repo-a" } });
+      fireEvent.change(branch, { target: { value: "main" } });
+      fireEvent.click(add);
+      await waitFor(() => expect(url).toHaveValue(""));
+      expect(branch).toHaveValue("");
+      expect(addRepoMutateAsyncMock).toHaveBeenCalledTimes(1);
+      expect(toast.success).not.toHaveBeenCalled();
+      expect(toast.error).not.toHaveBeenCalled();
+      expect(toast.warning).toHaveBeenCalledWith(
+        "skills.repo.savedRefreshFailed",
+        expect.objectContaining({ closeButton: true }),
+      );
+      expect(refetchDiscoverableMock).toHaveBeenCalledWith({
+        throwOnError: true,
+      });
+      expect(
+        screen.queryByText("skills.repo.addFailed"),
+      ).not.toBeInTheDocument();
+      client.clear();
+    },
+  );
+
+  it("accepts a successful discovery with zero skills", async () => {
+    addRepoMutateAsyncMock.mockResolvedValue(undefined);
+    refetchDiscoverableMock.mockResolvedValue({ data: [] });
+    const { url, add } = openRepoManager();
+    fireEvent.change(url, { target: { value: "owner-a/empty-repo" } });
+    fireEvent.click(add);
+    await waitFor(() => expect(url).toHaveValue(""));
+    expect(toast.success).toHaveBeenCalledWith("skills.repo.addSuccess", {
+      closeButton: true,
+    });
+    expect(toast.warning).not.toHaveBeenCalled();
+  });
+
+  it("admits only one pending add even for repeated synchronous clicks", async () => {
+    const save = deferredSave();
+    addRepoMutateAsyncMock.mockReturnValue(save.promise);
+    refetchDiscoverableMock.mockResolvedValue({ data: [] });
+    const { url, add } = openRepoManager();
+    fireEvent.change(url, { target: { value: "owner-a/repo-a" } });
+    act(() => {
+      fireEvent.click(add);
+      fireEvent.click(add);
+    });
+    expect(addRepoMutateAsyncMock).toHaveBeenCalledTimes(1);
+    expect(add).toBeDisabled();
+    await act(async () => save.resolve());
+    await waitFor(() => expect(url).toHaveValue(""));
+    expect(add).not.toBeDisabled();
+  });
+
+  it.each(["success", "failure"])(
+    "does not let an earlier save %s overwrite a newer draft",
+    async (outcome) => {
+      const save = deferredSave();
+      addRepoMutateAsyncMock.mockReturnValueOnce(save.promise);
+      refetchDiscoverableMock.mockResolvedValue({ data: [] });
+      const { url, branch, add } = openRepoManager();
+      fireEvent.change(url, { target: { value: "owner-a/repo-a" } });
+      fireEvent.change(branch, { target: { value: "old-branch" } });
+      fireEvent.click(add);
+      fireEvent.change(url, { target: { value: "owner-b/repo-b" } });
+      fireEvent.change(branch, { target: { value: "new-branch" } });
+      await act(async () => {
+        if (outcome === "success") save.resolve();
+        else save.reject(new Error("old request failed"));
+      });
+      expect(url).toHaveValue("owner-b/repo-b");
+      expect(branch).toHaveValue("new-branch");
+      expect(screen.queryByText("old request failed")).not.toBeInTheDocument();
+      expect(add).not.toBeDisabled();
+      addRepoMutateAsyncMock.mockResolvedValueOnce(undefined);
+      fireEvent.click(add);
+      await waitFor(() => expect(url).toHaveValue(""));
+      expect(addRepoMutateAsyncMock).toHaveBeenLastCalledWith({
+        owner: "owner-b",
+        name: "repo-b",
+        branch: "new-branch",
+        enabled: true,
+      });
+    },
+  );
+
+  it("retains a draft edited away and back while its earlier save is pending", async () => {
+    const save = deferredSave();
+    addRepoMutateAsyncMock.mockReturnValueOnce(save.promise);
+    refetchDiscoverableMock.mockResolvedValue({ data: [] });
+    const { url, add } = openRepoManager();
+    fireEvent.change(url, { target: { value: "owner-a/repo-a" } });
+    fireEvent.click(add);
+    fireEvent.change(url, { target: { value: "owner-b/repo-b" } });
+    fireEvent.change(url, { target: { value: "owner-a/repo-a" } });
+    await act(async () => save.resolve());
+    expect(url).toHaveValue("owner-a/repo-a");
+  });
+
+  it.each([
+    ["panel reopen", "success"],
+    ["panel reopen", "failure"],
+    ["page remount", "success"],
+    ["page remount", "failure"],
+  ])(
+    "preserves the new draft after %s and an old save %s",
+    async (lifecycle, outcome) => {
+      const save = deferredSave();
+      addRepoMutateAsyncMock.mockReturnValueOnce(save.promise);
+      refetchDiscoverableMock.mockResolvedValue({ data: [] });
+      let ref = createRef<SkillsPageHandle>();
+      const view = render(<SkillsPage ref={ref} />);
+      const open = () =>
+        act(() => {
+          getSkillsPageHeaderActions("skillssh")
+            .find((action) => action.key === "manage-repos")!
+            .execute(ref.current);
+        });
+      open();
+      fireEvent.change(screen.getByLabelText("skills.repo.url"), {
+        target: { value: "owner-old/repo-old" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "skills.repo.add" }));
+      expect(addRepoMutateAsyncMock).toHaveBeenCalledTimes(1);
+      if (lifecycle === "panel reopen") {
+        fireEvent.keyDown(window, { key: "Escape" });
+      } else {
+        view.unmount();
+        ref = createRef<SkillsPageHandle>();
+        render(<SkillsPage ref={ref} />);
+      }
+      expect(
+        screen.queryByLabelText("skills.repo.url"),
+      ).not.toBeInTheDocument();
+      open();
+      const url = screen.getByLabelText("skills.repo.url");
+      const branch = screen.getByLabelText("skills.repo.branch");
+      const add = screen.getByRole("button", { name: "skills.repo.add" });
+      fireEvent.change(url, { target: { value: "owner-new/repo-new" } });
+      fireEvent.change(branch, { target: { value: "new-branch" } });
+      await act(async () => {
+        if (outcome === "success") save.resolve();
+        else save.reject(new Error("old instance save failed"));
+      });
+      expect(url).toHaveValue("owner-new/repo-new");
+      expect(branch).toHaveValue("new-branch");
+      expect(
+        screen.queryByText("old instance save failed"),
+      ).not.toBeInTheDocument();
+      expect(add).not.toBeDisabled();
+      // The admission guard belongs to one panel instance, not a global lock.
+      addRepoMutateAsyncMock.mockResolvedValueOnce(undefined);
+      fireEvent.click(add);
+      await waitFor(() => expect(url).toHaveValue(""));
+      expect(addRepoMutateAsyncMock).toHaveBeenLastCalledWith({
+        owner: "owner-new",
+        name: "repo-new",
+        branch: "new-branch",
+        enabled: true,
+      });
+    },
+  );
 
   it("installs the second skill when two results share the same directory", async () => {
     const first = makeSkillsShSkill({

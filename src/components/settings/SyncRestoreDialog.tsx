@@ -43,10 +43,15 @@ export function SyncRestoreDialog({
   const [failure, setFailure] = useState<string | null>(null);
   // Only explicit native no-input authority permits the empty original wire value.
   const requiresInput = sourceInputRequired !== false;
+  const previousRequiresInput = useRef(requiresInput);
   useEffect(() => {
+    // Mount (including StrictMode replay) already starts empty. Only a real
+    // authority change may discard input entered since the DOM was committed.
+    if (previousRequiresInput.current === requiresInput) return;
+    previousRequiresInput.current = requiresInput;
     if (password.current) password.current.value = "";
     setHasPassword(false);
-  }, [sourceInputRequired]);
+  }, [requiresInput]);
 
   const clearPassword = () => {
     if (password.current) password.current.value = "";

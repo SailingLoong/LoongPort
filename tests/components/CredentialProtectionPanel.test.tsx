@@ -20,13 +20,13 @@ const initialStatus: CredentialProtectionStatus = {
   errorCode: null,
 };
 let status: CredentialProtectionStatus;
-function mount() {
+function mount(setupPrompt = false) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   const view = render(
     <QueryClientProvider client={client}>
-      <CredentialProtectionPanel />
+      <CredentialProtectionPanel setupPrompt={setupPrompt} />
     </QueryClientProvider>,
   );
   return { client, ...view };
@@ -63,6 +63,80 @@ beforeEach(() => {
     return { ...status, status: "available" };
   });
 });
+
+it("identifies a system key storage failure in the available encrypted setup flow and permits an explicit retry", async () => {
+  status = { ...initialStatus, mode: "encrypted", status: "available" };
+  const { client } = mount(true);
+  const input = await screen.findByLabelText("storageProtection.keyLabel");
+  enterMatchingKey(input);
+  vi.mocked(invoke).mockRejectedValueOnce("protection.key_cache_unavailable");
+  const apply = screen.getByRole("button", {
+    name: "storageProtection.applyEncrypted",
+  });
+  fireEvent.click(apply);
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("storageProtection.keyCacheFailed");
+  expect(alert).toHaveTextContent("protection.key_cache_unavailable");
+  expect(input).toHaveValue("");
+  expect(screen.queryByText("storageProtection.saved")).not.toBeInTheDocument();
+  expect(screen.getByText("storageProtection.mode.encrypted")).toBeVisible();
+  expect(client.getMutationCache().getAll()).toEqual([]);
+
+  await waitFor(() => expect(apply).toBeDisabled());
+  enterMatchingKey(input);
+  fireEvent.click(apply);
+  fireEvent.click(apply);
+  await screen.findByText("storageProtection.saved");
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(writes()).toHaveLength(2);
+  expect(
+    writes().every(
+      ([command]) => command === "configure_credential_protection",
+    ),
+  ).toBe(true);
+});
+
+it.each([
+  "protection.key_cache_unavailable",
+  "protection.generation_changed",
+  "protection.unclaimed_database_artifact",
+])(
+  "retains public failure %s from an unsuccessful status response",
+  async (errorCode) => {
+    mount();
+    const input = await chooseEncryption();
+    enterMatchingKey(input);
+    vi.mocked(invoke).mockResolvedValueOnce({
+      ...initialStatus,
+      status: "blocked",
+      errorCode,
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "storageProtection.applyEncrypted" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(errorCode);
+  },
+);
+
+it.each([
+  `protection.key_cache_unavailable ${syntheticKey}`,
+  { message: "protection.key_cache_unavailable", keyText: syntheticKey },
+])(
+  "never treats arbitrary native error content as a public diagnostic",
+  async (error) => {
+    mount();
+    const input = await chooseEncryption();
+    enterMatchingKey(input);
+    vi.mocked(invoke).mockRejectedValueOnce(error);
+    fireEvent.click(
+      screen.getByRole("button", { name: "storageProtection.applyEncrypted" }),
+    );
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("storageProtection.actionFailed");
+    expect(alert).not.toHaveTextContent("protection.key_cache_unavailable");
+    expect(document.body.textContent).not.toContain(syntheticKey);
+  },
+);
 afterEach(() => vi.restoreAllMocks());
 
 describe("user-owned storage protection", () => {
@@ -462,6 +536,49 @@ it("explains restart-required results without claiming the current runtime is re
   expect(
     screen.queryByRole("button", { name: "storageProtection.applyEncrypted" }),
   ).not.toBeInTheDocument();
+});
+
+it("presents restart as the next action without credential-failure or key-entry controls", async () => {
+  status = {
+    ...initialStatus,
+    mode: "encrypted",
+    status: "blocked",
+    restartRequired: true,
+    canConfigure: false,
+    canSwitchToPlaintext: false,
+  };
+  mount();
+  await screen.findByRole("heading", {
+    name: "storageProtection.restartTitle",
+  });
+  expect(
+    screen.queryByText("storageProtection.status.blocked"),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByLabelText("storageProtection.keyLabel"),
+  ).not.toBeInTheDocument();
+  const restart = screen.getByRole("button", {
+    name: "storageProtection.restart",
+  });
+  expect(restart).toBeEnabled();
+  expect(writes()).toEqual([]);
+  vi.mocked(invoke).mockRejectedValueOnce(new Error(syntheticKey));
+  fireEvent.click(restart);
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "startupRecovery.restartFailed",
+  );
+  expect(document.body.textContent).not.toContain(syntheticKey);
+  expect(restart).toBeEnabled();
+  vi.mocked(invoke).mockResolvedValueOnce(true);
+  fireEvent.click(restart);
+  fireEvent.click(restart);
+  await waitFor(() => expect(restart).toBeDisabled());
+  expect(restart).toHaveTextContent("storageProtection.restarting");
+  expect(restart).toHaveAttribute("aria-busy", "true");
+  expect(writes().map(([command]) => command)).toEqual([
+    "restart_app",
+    "restart_app",
+  ]);
 });
 
 it("clears an unsubmitted key on cancellation before the form is opened again", async () => {
