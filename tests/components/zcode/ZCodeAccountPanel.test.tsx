@@ -2352,10 +2352,17 @@ describe("ZCode account command bindings", () => {
       secret: "canary-secret",
       profiles: catalog.profiles.map((profile) => ({
         ...profile,
+        deviceMid: "11111111-2222-4333-8444-555555555555",
         accessToken: "canary-secret",
       })),
     });
-    expect(await api.status(source, "ctx")).toEqual(catalog);
+    expect(await api.status(source, "ctx")).toEqual({
+      ...catalog,
+      profiles: catalog.profiles.map((profile) => ({
+        ...profile,
+        deviceMid: "11111111-2222-4333-8444-555555555555",
+      })),
+    });
     vi.mocked(invoke).mockRejectedValueOnce({
       code: "zcode.account.catalog_changed",
       remedy: "refreshContext",

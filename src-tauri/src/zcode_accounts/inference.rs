@@ -212,10 +212,6 @@ impl Lease {
         let device_mid = super::device_settings::current(&db, &context)
             .map_err(|_| Failure::StorageUnavailable)?;
         let version = super::native_context::library_app_version(context.data_root());
-        let source_headers =
-            super::source_context::SourceContext::observe(Some(context.data_root()))
-                .with_device_mid(device_mid.as_deref())
-                .headers(version.as_deref());
         let session = db.secrets.clone();
         let vault = session.read().map_err(|_| Failure::StorageUnavailable)?;
         let native = context.cipher().map_err(|_| Failure::UnsupportedContext)?;
@@ -234,7 +230,13 @@ impl Lease {
             .profiles()
             .find(|s| s.identity().opaque_id() == account_id)
             .ok_or(Failure::StaleIdentity)?;
-        let evidence = catalog.details(snapshot, &native).evidence;
+        let details = catalog.details(snapshot, &native);
+        let device_mid = details.device_mid.or(device_mid);
+        let source_headers =
+            super::source_context::SourceContext::observe(Some(context.data_root()))
+                .with_device_mid(device_mid.as_deref())
+                .headers(version.as_deref());
+        let evidence = details.evidence;
         if evidence
             .as_ref()
             .is_some_and(SessionCheckReport::start_needs_login)

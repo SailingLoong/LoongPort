@@ -436,10 +436,40 @@ fn request_context_is_owned_by_the_selected_flow_and_cleared_on_cancellation() {
     let root = input.context.data_root().to_path_buf();
     let now = Instant::now();
     let flow = store.begin_saved(binding(), input, now).unwrap();
-    let (context, version) = store.request_context(&flow.flow_id).unwrap().unwrap();
+    let (context, version, _) = store.request_context(&flow.flow_id).unwrap().unwrap();
     assert_eq!(context.data_root(), root);
     assert_eq!(version.as_deref(), Some("99.1.2"));
     assert!(store.request_context("unrelated-flow").is_err());
     store.cancel(&flow.flow_id, now).unwrap();
     assert!(store.request_context(&flow.flow_id).unwrap().is_none());
+}
+
+#[test]
+fn authorization_flow_keeps_its_selected_device_through_recovery() {
+    let store = LoginFlowStore::default();
+    let now = Instant::now();
+    let id = store
+        .begin(
+            binding(),
+            OAuthFamily::Zai,
+            PollToken::new("synthetic-token").unwrap(),
+            now,
+        )
+        .unwrap();
+    let device = "11111111-2222-4333-8444-555555555555";
+    store
+        .bind_device(&id, Some(device.into()), true, true)
+        .unwrap();
+    let lease = store.acquire(&id, WorkKind::Init, now).unwrap();
+    let context = saved_input().context;
+    lease
+        .update(|draft, _| draft.context = Some(context))
+        .unwrap();
+    let (_, _, recovered_device) = store.request_context(&id).unwrap().unwrap();
+    assert_eq!(recovered_device.as_deref(), Some(device));
+    assert!(lease.draft().unwrap().1.device_unique);
+    assert_eq!(
+        store.bind_device(&id, None, false, false),
+        Err(FlowError::WrongStage)
+    );
 }

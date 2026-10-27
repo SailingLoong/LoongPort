@@ -171,6 +171,9 @@ pub(crate) struct LoginDraft {
     pub poll_deadline: Option<Instant>,
     pub app_version: Option<String>,
     pub evidence: Option<super::session_checks::SessionCheckReport>,
+    pub device_mid: Option<String>,
+    pub device_unique: bool,
+    pub device_explicit: bool,
 }
 impl LoginDraft {
     /// Local operation binding only. Official project access is established by
@@ -333,6 +336,9 @@ impl LoginFlowStore {
             poll_deadline: None,
             app_version,
             evidence: target.details.evidence.clone(),
+            device_mid: target.details.device_mid.clone(),
+            device_unique: false,
+            device_explicit: false,
             completion: Some(target.clone()),
         };
         let mut flows = self.0.lock().map_err(|_| FlowError::Poisoned)?;
@@ -467,6 +473,9 @@ impl LoginFlowStore {
                     poll_deadline: None,
                     app_version: None,
                     evidence: None,
+                    device_mid: None,
+                    device_unique: false,
+                    device_explicit: false,
                 }),
                 stage: FlowStage::Initializing,
                 expires: now + FLOW_LIFETIME,
@@ -492,6 +501,24 @@ impl LoginFlowStore {
             return Err(FlowError::StaleWork);
         }
         flow.context_id = Some(context_id.to_owned());
+        Ok(())
+    }
+    pub(crate) fn bind_device(
+        &self,
+        id: &str,
+        device_mid: Option<String>,
+        unique: bool,
+        explicit: bool,
+    ) -> Result<(), FlowError> {
+        let mut flows = self.0.lock().map_err(|_| FlowError::Poisoned)?;
+        let flow = flows.get_mut(id).ok_or(FlowError::Missing)?;
+        if flow.stage != FlowStage::Initializing || flow.in_flight.is_some() {
+            return Err(FlowError::WrongStage);
+        }
+        let draft = flow.draft.as_mut().ok_or(FlowError::WrongStage)?;
+        draft.device_mid = device_mid;
+        draft.device_unique = unique;
+        draft.device_explicit = explicit;
         Ok(())
     }
     pub(crate) fn latest(
@@ -597,14 +624,14 @@ impl LoginFlowStore {
     pub(crate) fn request_context(
         &self,
         id: &str,
-    ) -> Result<Option<(LibraryContext, Option<String>)>, FlowError> {
+    ) -> Result<Option<(LibraryContext, Option<String>, Option<String>)>, FlowError> {
         let flows = self.0.lock().map_err(|_| FlowError::Poisoned)?;
         let flow = flows.get(id).ok_or(FlowError::Missing)?;
         Ok(flow.draft.as_ref().and_then(|draft| {
             draft
                 .context
                 .clone()
-                .map(|context| (context, draft.app_version.clone()))
+                .map(|context| (context, draft.app_version.clone(), draft.device_mid.clone()))
         }))
     }
     pub(crate) fn progress(&self, id: &str, now: Instant) -> Result<LoginProgress, FlowError> {

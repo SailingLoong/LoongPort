@@ -141,6 +141,9 @@ fn fixture(case: &'static str) -> (Arc<Script>, Vec<String>) {
                         evidence: None,
                         update_duplicate: false,
                         completion: None,
+                        device_mid: None,
+                        device_unique: false,
+                        device_explicit: false,
                     },
                 )
                 .unwrap();

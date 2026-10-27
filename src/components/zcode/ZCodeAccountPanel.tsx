@@ -1345,6 +1345,9 @@ export function ZCodeAccountPanel({
         onImportLocal={() => setLocalImportOpen(true)}
         libraryDataRoot={libraryRoot}
         savedAccount={codingAccount}
+        boundDeviceMids={(shownCatalog?.profiles ?? []).flatMap((profile) =>
+          profile.deviceMid ? [profile.deviceMid] : [],
+        )}
       />
       {library.data && (
         <ZCodeBackupDialog
@@ -1485,6 +1488,13 @@ export function ZCodeAccountPanel({
                           <p className="break-all text-xs text-muted-foreground">
                             {profile.id}
                           </p>
+                          {profile.deviceMid && (
+                            <p className="break-all text-xs text-muted-foreground">
+                              {copy("deviceIdentity", "Device ID: {{device}}", {
+                                device: profile.deviceMid,
+                              })}
+                            </p>
+                          )}
                           {profile.officialLabel &&
                             profile.officialLabel !== profile.label && (
                               <p className="text-xs text-muted-foreground">

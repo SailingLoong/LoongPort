@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ZCodeOAuthAdd } from "@/components/zcode/ZCodeOAuthAdd";
 import { zcodeLoginApi, type LoginProgress } from "@/lib/api/zcodeLogin";
 import { settingsApi } from "@/lib/api/settings";
+import { zcodeDeviceApi } from "@/lib/api/zcodeDevices";
 
 vi.mock("@/lib/api/zcodeLogin", () => ({
   zcodeLoginApi: {
@@ -24,6 +25,9 @@ vi.mock("@/lib/api/zcodeLogin", () => ({
 }));
 vi.mock("@/lib/api/settings", () => ({
   settingsApi: { openExternal: vi.fn() },
+}));
+vi.mock("@/lib/api/zcodeDevices", () => ({
+  zcodeDeviceApi: { state: vi.fn() },
 }));
 
 function result(
@@ -115,6 +119,13 @@ async function query(next: LoginProgress) {
 
 describe("ZCode official login dialog", () => {
   beforeEach(() => {
+    vi.mocked(zcodeDeviceApi.state).mockReset().mockResolvedValue({
+      devices: [],
+      selectedDeviceMid: null,
+      effectiveDeviceMid: null,
+      restartRequired: false,
+      revision: 0,
+    });
     vi.mocked(zcodeLoginApi.lastProgress).mockReset().mockResolvedValue(null);
     vi.mocked(zcodeLoginApi.beginSavedCoding)
       .mockReset()
@@ -144,6 +155,53 @@ describe("ZCode official login dialog", () => {
     vi.mocked(settingsApi.openExternal)
       .mockReset()
       .mockResolvedValue(undefined);
+  });
+
+  it("starts authorization with the device selected for this account", async () => {
+    const device = "11111111-2222-4333-8444-555555555555";
+    vi.mocked(zcodeDeviceApi.state).mockResolvedValue({
+      devices: [device],
+      selectedDeviceMid: null,
+      effectiveDeviceMid: null,
+      restartRequired: false,
+      revision: 1,
+    });
+    mount();
+    const selector = await screen.findByRole("combobox", {
+      name: "Account device ID",
+    });
+    fireEvent.keyDown(selector, { key: "ArrowDown" });
+    fireEvent.click(await screen.findByRole("option", { name: device }));
+    await begin();
+    expect(zcodeLoginApi.begin).toHaveBeenCalledExactlyOnceWith(
+      "bigmodel",
+      undefined,
+      device,
+    );
+  });
+
+  it("does not start with an unreviewed default when device IDs cannot load", async () => {
+    vi.mocked(zcodeDeviceApi.state).mockRejectedValueOnce("unavailable");
+    mount();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Unable to load device IDs",
+    );
+    expect(
+      screen.getByRole("button", { name: "Continue official sign-in" }),
+    ).toBeDisabled();
+    vi.mocked(zcodeDeviceApi.state).mockResolvedValue({
+      devices: [],
+      selectedDeviceMid: null,
+      effectiveDeviceMid: null,
+      restartRequired: false,
+      revision: 0,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Continue official sign-in" }),
+      ).toBeEnabled(),
+    );
   });
 
   it("explains the official browser flow and opens the returned authorization once", async () => {

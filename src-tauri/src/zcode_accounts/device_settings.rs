@@ -33,7 +33,7 @@ pub(crate) struct View {
     restart_required: bool,
     revision: u64,
 }
-fn normalize_id(value: &str) -> Result<String, &'static str> {
+pub(super) fn normalize_id(value: &str) -> Result<String, &'static str> {
     let value = value.trim();
     let id = uuid::Uuid::parse_str(value).map_err(|_| "invalid")?;
     let canonical = id.hyphenated().to_string();
@@ -171,6 +171,35 @@ pub(super) fn current(
         .current(db, context.context_id(), Some(context.data_root()))?
         .effective)
 }
+pub(super) fn login_device(
+    db: &Database,
+    context: &super::library_context::LibraryContext,
+    requested: Option<&str>,
+) -> Result<(Option<String>, bool), &'static str> {
+    let Some(requested) = requested else {
+        let device = current(db, context)?
+            .map(|id| normalize_id(&id))
+            .transpose()?;
+        let saved = load(db)?;
+        let unique = device.as_ref().is_some_and(|id| {
+            saved
+                .scopes
+                .get(context.context_id())
+                .is_some_and(|scope| scope.devices.contains(id))
+        });
+        return Ok((device, unique));
+    };
+    let id = normalize_id(requested)?;
+    let saved = load(db)?;
+    if !saved
+        .scopes
+        .get(context.context_id())
+        .is_some_and(|scope| scope.devices.contains(&id))
+    {
+        return Err("invalid");
+    }
+    Ok((Some(id), true))
+}
 fn view(
     db: &Database,
     scope: &str,
@@ -296,6 +325,37 @@ mod tests {
     #[test]
     fn device_selection_protection_is_registered() {
         assert!(crate::secrets::inventory::is_protected_setting(SETTING));
+    }
+    #[test]
+    fn default_login_device_is_normalized_before_occupancy_check_and_requests() {
+        let db = Database::memory().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("zcode");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("telemetry-state.json"),
+            serde_json::json!({"deviceMid": B.to_uppercase()}).to_string(),
+        )
+        .unwrap();
+        let ctx = super::super::library_context::LibraryContext::from_os_identity(
+            home.path().to_str().unwrap(),
+            "synthetic-user",
+            &root,
+        )
+        .unwrap();
+        update(
+            &db,
+            ctx.context_id(),
+            0,
+            Some(B),
+            None,
+            &SessionSelections::default(),
+            Some(&root),
+        )
+        .unwrap();
+        let (device, unique) = login_device(&db, &ctx, None).unwrap();
+        assert_eq!(device.as_deref(), Some(B));
+        assert!(unique);
     }
     #[test]
     fn local_identity_including_absence_is_frozen_until_restart() {

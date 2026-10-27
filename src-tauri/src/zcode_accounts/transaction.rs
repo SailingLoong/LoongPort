@@ -105,6 +105,7 @@ pub(crate) struct SavedAccount {
     pub source_verified: bool,
     pub identity_source: super::checkpoint::IdentitySource,
     pub official_label: Option<String>,
+    pub device_mid: Option<String>,
     pub capabilities: Option<super::session_checks::SessionCheckDisplay>,
     pub can_activate: bool,
     pub activation_blocked_reason: Option<AccountActionError>,
@@ -122,6 +123,9 @@ pub(crate) struct LoginProfileSave<'a> {
     pub evidence: Option<super::session_checks::SessionCheckReport>,
     pub update_duplicate: bool,
     pub completion: Option<&'a super::oauth::SavedCodingTarget>,
+    pub device_mid: Option<&'a str>,
+    pub device_unique: bool,
+    pub device_explicit: bool,
 }
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -186,6 +190,7 @@ fn saved_account(
             OAuthFamily::BigModel => "bigmodel",
         },
         label: details.label.or_else(|| official_label.clone()),
+        device_mid: details.device_mid.clone(),
         official_label,
         source_verified: catalog.source_verified(snapshot.identity()),
         identity_source: details.identity_source,
@@ -669,6 +674,9 @@ impl<'a> VaultAccountStore<'a> {
                 evidence,
                 update_duplicate,
                 completion: None,
+                device_mid: None,
+                device_unique: false,
+                device_explicit: false,
             },
         )
     }
@@ -684,6 +692,9 @@ impl<'a> VaultAccountStore<'a> {
             evidence,
             update_duplicate,
             completion,
+            device_mid,
+            device_unique,
+            device_explicit,
         } = request;
         if let Some(target) = completion {
             if revision != target.revision {
@@ -698,16 +709,26 @@ impl<'a> VaultAccountStore<'a> {
         let before = self.read(Role::Profiles)?;
         let current_revision = catalog_revision(before.as_deref());
         let mut catalog = self.import_catalog(native, &current_revision)?;
-        let candidate_revision: String = Sha256::digest(
+        let mut candidate_hash = Sha256::new();
+        candidate_hash.update(
             snapshot
                 .scoped_document()
                 .to_bytes()
                 .map_err(CheckpointError::Core)?,
-        )
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+        );
+        if let Some(device) = device_mid {
+            candidate_hash.update(b"\0zcode-device-binding:v1\0");
+            candidate_hash.update(device.as_bytes());
+            candidate_hash.update([u8::from(device_unique)]);
+            candidate_hash.update([u8::from(device_explicit)]);
+        }
+        let candidate_revision: String = candidate_hash
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
         let account_id = snapshot.identity().opaque_id();
+        let identity = snapshot.identity().clone();
         if let Some(receipt) = catalog.login_receipt(request_id) {
             if receipt.account_id != account_id || receipt.candidate_revision != candidate_revision
             {
@@ -724,6 +745,18 @@ impl<'a> VaultAccountStore<'a> {
             return Err(TransactionError::RecoveryRequired);
         }
         let duplicate = catalog.get(snapshot.identity()).is_some();
+        if duplicate && update_duplicate && completion.is_none() && !device_explicit {
+            let old = catalog
+                .get(snapshot.identity())
+                .ok_or(TransactionError::MissingTarget)?;
+            let old_device = catalog.details(old, native).device_mid;
+            if old_device
+                .as_deref()
+                .is_some_and(|old| Some(old) != device_mid)
+            {
+                return Err(CheckpointError::DeviceMismatch.into());
+            }
+        }
         let outcome = if let Some(target) = completion {
             if !duplicate {
                 return Err(TransactionError::MissingTarget);
@@ -751,6 +784,9 @@ impl<'a> VaultAccountStore<'a> {
                 CaptureCommitOutcome::Kept
             }
         };
+        if completion.is_none() && outcome != CaptureCommitOutcome::Kept {
+            catalog.set_device_mid(&identity, native, device_mid, device_unique)?;
+        }
         catalog.record_login(super::checkpoint::LoginReceipt {
             request_id: request_id.into(),
             account_id,

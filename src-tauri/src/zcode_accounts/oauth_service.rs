@@ -15,6 +15,8 @@ pub(crate) enum StoreFailure {
     Unavailable,
     Unknown,
     Capacity,
+    DeviceTaken,
+    DeviceMismatch,
 }
 pub(crate) type StoreFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, StoreFailure>> + Send + 'a>>;
@@ -31,6 +33,9 @@ pub(crate) struct SaveInput<'a> {
     pub evidence: Option<&'a super::session_checks::SessionCheckReport>,
     pub update_duplicate: bool,
     pub completion: Option<&'a SavedCodingTarget>,
+    pub device_mid: Option<&'a str>,
+    pub device_unique: bool,
+    pub device_explicit: bool,
 }
 pub(crate) trait LoginPersistence: Send + Sync {
     fn check(&self, binding: &VaultBinding) -> Result<(), StoreFailure>;
@@ -791,6 +796,9 @@ impl<T: OfficialTransport, P: LoginPersistence> LoginService<T, P> {
                 evidence: draft.evidence.as_ref(),
                 update_duplicate,
                 completion: draft.completion.as_ref(),
+                device_mid: draft.device_mid.as_deref(),
+                device_unique: draft.device_unique,
+                device_explicit: draft.device_explicit,
             })
             .await
         {
@@ -804,6 +812,30 @@ impl<T: OfficialTransport, P: LoginPersistence> LoginService<T, P> {
                         FlowStage::Review,
                         "zcode.account.resource_limit",
                         "reviewSavedData",
+                    )
+                } else {
+                    Ok(())
+                }
+            }
+            Err(StoreFailure::DeviceTaken) => {
+                if lease.save_not_committed()? {
+                    self.error(
+                        &lease,
+                        FlowStage::Failed,
+                        "zcode.account.device_taken",
+                        "queryOriginal",
+                    )
+                } else {
+                    Ok(())
+                }
+            }
+            Err(StoreFailure::DeviceMismatch) => {
+                if lease.save_not_committed()? {
+                    self.error(
+                        &lease,
+                        FlowStage::Failed,
+                        "zcode.account.device_mismatch",
+                        "queryOriginal",
                     )
                 } else {
                     Ok(())
