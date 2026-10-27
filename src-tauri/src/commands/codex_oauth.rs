@@ -5,7 +5,7 @@
 //! 大部分认证命令通过通用 `auth_*` 命令（参见 `commands::auth`）暴露给前端，
 //! 此处定义 State wrapper 以及 Codex OAuth 专属的订阅额度和模型列表查询命令。
 
-use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
+use crate::proxy::providers::codex_oauth_auth::{CodexOAuthError, CodexOAuthManager};
 use crate::services::model_fetch::FetchedModel;
 use crate::services::subscription::{query_codex_quota, CredentialStatus, SubscriptionQuota};
 use std::sync::Arc;
@@ -43,13 +43,7 @@ pub async fn get_codex_oauth_quota(
     // 获取（必要时自动刷新）access_token
     let token = match manager.get_valid_token_for_account(&id).await {
         Ok(t) => t,
-        Err(e) => {
-            return Ok(SubscriptionQuota::error(
-                "codex_oauth",
-                CredentialStatus::Expired,
-                format!("Codex OAuth token unavailable: {e}"),
-            ));
-        }
+        Err(e) => return quota_from_token_error(e),
     };
 
     // 瞬时传输失败以 Err 传播（前端 reject → retry + 保留上次成功值）。
@@ -60,6 +54,20 @@ pub async fn get_codex_oauth_quota(
         "Codex OAuth access token expired or rejected. Please re-login via cc-switch.",
     )
     .await
+}
+
+fn quota_from_token_error(e: CodexOAuthError) -> Result<SubscriptionQuota, String> {
+    match e {
+        e @ CodexOAuthError::RefreshTokenInvalid => Ok(SubscriptionQuota::error(
+            "codex_oauth",
+            CredentialStatus::Expired,
+            format!("Codex OAuth token unavailable: {e}"),
+        )),
+        CodexOAuthError::AccountNotFound(_) => Ok(SubscriptionQuota::not_found("codex_oauth")),
+        // 网络、存储或恢复未完成并不证明凭据失效。保留 Err，让查询层
+        // 重试并保留上次成功的额度，而不是覆盖成需要重新登录。
+        e => Err(format!("Codex OAuth token unavailable: {e}")),
+    }
 }
 
 /// 获取 Codex OAuth (ChatGPT Plus/Pro) 可用模型列表
@@ -91,4 +99,42 @@ pub async fn get_codex_oauth_models(
         .map_err(|e| format!("Codex OAuth token unavailable: {e}"))?;
 
     crate::services::codex_oauth_models::fetch_models_with_token(&token, &id).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quota_token_error_preserves_definitive_states() {
+        let expired = quota_from_token_error(CodexOAuthError::RefreshTokenInvalid).unwrap();
+        assert!(matches!(
+            expired.credential_status,
+            CredentialStatus::Expired
+        ));
+        let missing =
+            quota_from_token_error(CodexOAuthError::AccountNotFound("synthetic".into())).unwrap();
+        assert!(matches!(
+            missing.credential_status,
+            CredentialStatus::NotFound
+        ));
+    }
+
+    #[test]
+    fn quota_token_error_rejects_non_definitive_failures() {
+        for error in [
+            CodexOAuthError::NetworkError("synthetic offline".into()),
+            CodexOAuthError::IoError("synthetic disk error".into()),
+            CodexOAuthError::ParseError("synthetic malformed response".into()),
+            CodexOAuthError::TokenFetchFailed("403 forbidden".into()),
+            CodexOAuthError::TokenFetchFailed("429 rate limit".into()),
+            CodexOAuthError::TokenFetchFailed("503 unavailable".into()),
+            CodexOAuthError::ProtectedStorage(crate::error::AppError::Config(
+                "mode.verification_required".into(),
+            )),
+        ] {
+            let expected = format!("Codex OAuth token unavailable: {error}");
+            assert_eq!(quota_from_token_error(error).unwrap_err(), expected);
+        }
+    }
 }

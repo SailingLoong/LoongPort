@@ -759,23 +759,7 @@ impl CodexOAuthManager {
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
-            let refresh_error_code = extract_refresh_error_code(&text);
-            if status == reqwest::StatusCode::UNAUTHORIZED
-                || status == reqwest::StatusCode::FORBIDDEN
-                || matches!(
-                    refresh_error_code.as_deref(),
-                    Some(
-                        "refresh_token_expired"
-                            | "refresh_token_reused"
-                            | "refresh_token_invalidated"
-                    )
-                )
-            {
-                return Err(CodexOAuthError::RefreshTokenInvalid);
-            }
-            return Err(CodexOAuthError::TokenFetchFailed(format!(
-                "Refresh 失败: {status} - {text}"
-            )));
+            return Err(classify_refresh_http_failure(status, &text));
         }
 
         response
@@ -1870,6 +1854,19 @@ fn compute_expires_at_ms(expires_in: Option<i64>) -> i64 {
     now_ms + secs * 1000
 }
 
+fn classify_refresh_http_failure(status: reqwest::StatusCode, text: &str) -> CodexOAuthError {
+    let refresh_error_code = extract_refresh_error_code(text);
+    if status == reqwest::StatusCode::UNAUTHORIZED
+        || matches!(
+            refresh_error_code.as_deref(),
+            Some("refresh_token_expired" | "refresh_token_reused" | "refresh_token_invalidated")
+        )
+    {
+        return CodexOAuthError::RefreshTokenInvalid;
+    }
+    CodexOAuthError::TokenFetchFailed(format!("Refresh 失败: {status} - {text}"))
+}
+
 fn extract_refresh_error_code(body: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
     value
@@ -2556,6 +2553,49 @@ mod tests {
 
         assert!(matches!(result, Err(CodexOAuthError::ExpiredToken)));
         assert!(manager.pending_device_codes.read().await.is_empty());
+    }
+
+    #[test]
+    fn refresh_http_failure_only_marks_definitive_rejection_invalid() {
+        for status in [400, 403, 429, 500, 502, 503] {
+            assert!(
+                matches!(
+                    classify_refresh_http_failure(
+                        reqwest::StatusCode::from_u16(status).unwrap(),
+                        "{}"
+                    ),
+                    CodexOAuthError::TokenFetchFailed(_)
+                ),
+                "HTTP {status} is not proof of invalid refresh credentials"
+            );
+        }
+        assert!(matches!(
+            classify_refresh_http_failure(reqwest::StatusCode::UNAUTHORIZED, "{}"),
+            CodexOAuthError::RefreshTokenInvalid
+        ));
+    }
+
+    #[test]
+    fn refresh_http_failure_preserves_explicit_invalid_codes() {
+        for code in [
+            "refresh_token_expired",
+            "refresh_token_reused",
+            "refresh_token_invalidated",
+        ] {
+            for body in [
+                format!(r#"{{"error":{{"code":"{code}"}}}}"#),
+                format!(r#"{{"error":"{code}"}}"#),
+                format!(r#"{{"code":"{}"}}"#, code.to_uppercase()),
+            ] {
+                assert!(
+                    matches!(
+                        classify_refresh_http_failure(reqwest::StatusCode::FORBIDDEN, &body),
+                        CodexOAuthError::RefreshTokenInvalid
+                    ),
+                    "explicit invalid code must remain definitive: {body}"
+                );
+            }
+        }
     }
 
     #[test]
