@@ -202,20 +202,20 @@ pub(crate) fn refresh_model_catalog(vendor: Vendor, settings: &mut Value, defaul
 mod tests {
     use super::*;
     #[test]
-    fn opencode_free_shared_plan_uses_one_account_key_and_only_documented_chat_models() {
+    fn opencode_free_native_only_plan_keeps_account_key_and_documented_chat_models() {
         let bundles = plan_rows_for(Vendor::OpenCode, "synthetic-workspace", "synthetic-one-key");
         let free = bundles
             .iter()
             .find(|bundle| bundle.plan.id_segment == "opencode-free")
-            .expect("existing OpenCode account must expose the shared free plan");
+            .expect("existing OpenCode account retains native direct Free configuration");
         assert_ne!(free.provider_id, bundles[0].provider_id);
         assert_eq!(
             free.rows.len(),
-            4,
-            "only documented Chat Completions clients"
+            1,
+            "free chat must not be provisioned for external clients"
         );
         for (app, settings) in &free.rows {
-            assert!(!matches!(app, AppType::Claude | AppType::ClaudeDesktop));
+            assert_eq!(*app, AppType::OpenCode);
             assert_eq!(settings["freeOnly"], true);
             let text = serde_json::to_string(settings).unwrap();
             assert!(text.contains("synthetic-one-key"));
@@ -223,12 +223,6 @@ mod tests {
             assert!(text.contains("glm-5.3-flash-free"));
             for row in settings["modelCatalog"]["models"].as_array().unwrap() {
                 assert!(row["model"].as_str().unwrap().ends_with("-free"));
-            }
-            if *app == AppType::Codex {
-                assert!(settings["config"]
-                    .as_str()
-                    .unwrap()
-                    .contains("wire_api = \"chat\""));
             }
         }
         assert_eq!(bundles[0].plan.id_segment, "opencode");

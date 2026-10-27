@@ -3634,7 +3634,8 @@
       "loginFailed": "登录失败：{{reason}}",
       "openKeyPage": "管理 API 密钥",
       "userEditedHint": "此服务商账号在当前平台的接入配置包含手动修改。重新应用密钥配置时只会更新 API 密钥，不会覆盖其他内容。点击可恢复默认配置。",
-      "editConfirmMessage": "保存后，LoongPort 将不再覆盖此服务商账号在当前平台的手动修改；后续重新应用密钥配置时只会更新 API 密钥。\n\n如需撤销修改，请选择“恢复默认配置”。API 密钥会保留。"
+      "editConfirmMessage": "保存后，LoongPort 将不再覆盖此服务商账号在当前平台的手动修改；后续重新应用密钥配置时只会更新 API 密钥。\n\n如需撤销修改，请选择“恢复默认配置”。API 密钥会保留。",
+      "opencodeFreeExternalUnavailable": "免费聊天外部请求已暂停；原配置保留，可直接使用官方 OpenCode。付费 API / Go 不受此暂停影响。"
     },
     "imageTab": {
       "companionNotice": "本页可直接生图，也可在 CLI 对话中生图",

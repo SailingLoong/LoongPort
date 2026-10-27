@@ -236,6 +236,62 @@ impl Fixture {
 }
 
 pub(crate) async fn verify(case: &str) {
+    if case == "free_config" {
+        for app in [
+            AppType::Claude,
+            AppType::Codex,
+            AppType::Hermes,
+            AppType::OpenClaw,
+        ] {
+            assert!(
+                crate::vendor::opencode::Plan::Free
+                    .config_for(&app)
+                    .is_none(),
+                "do not provision external free-model routes"
+            );
+        }
+        let bundles = crate::vendor::provision::plan_rows_for(
+            crate::vendor::Vendor::OpenCode,
+            "synthetic-workspace",
+            "synthetic-one-key",
+        );
+        let free = bundles
+            .iter()
+            .find(|bundle| bundle.plan.id_segment == "opencode-free")
+            .unwrap();
+        assert_eq!(free.rows.len(), 1);
+        assert_eq!(free.rows[0].0, AppType::OpenCode);
+        assert_eq!(free.rows[0].1["freeOnly"], true);
+        assert_eq!(
+            free.rows[0].1["modelCatalog"]["models"]
+                .as_array()
+                .unwrap()
+                .len(),
+            crate::vendor::opencode::FREE_CHAT_MODELS.len()
+        );
+        assert_eq!(
+            crate::relay::provider_config::extract_api_key(&free.rows[0].1, &AppType::OpenCode)
+                .as_deref(),
+            Some("synthetic-one-key")
+        );
+        assert!(
+            crate::vendor::opencode::Plan::Free
+                .config_for(&AppType::OpenCode)
+                .is_some(),
+            "native official OpenCode direct configuration is not proxy eligibility"
+        );
+        for plan in [
+            crate::vendor::opencode::Plan::Zen,
+            crate::vendor::opencode::Plan::Go,
+        ] {
+            assert!(plan.config_for(&AppType::Codex).is_some());
+        }
+        return;
+    }
+    if case.starts_with("policy_") {
+        super::free_models::verify_external_policy(case);
+        return;
+    }
     let personal = case.starts_with("personal");
     let fail_first = case.ends_with("ordered")
         || case.ends_with("manual_failure")
@@ -265,6 +321,136 @@ pub(crate) async fn verify(case: &str) {
     )
     .await;
     let state = f.owner.state();
+    if matches!(
+        case,
+        "runtime_free_fallback"
+            | "runtime_unknown_override"
+            | "personal_runtime_free_fallback"
+            | "personal_runtime_beam_go"
+    ) {
+        let app = AppType::Codex;
+        let mut provider = state
+            .db
+            .get_provider_by_id(&f.owner.ids()[0], "codex")
+            .unwrap()
+            .unwrap();
+        provider
+            .meta
+            .as_mut()
+            .unwrap()
+            .local_proxy_request_overrides = Some(crate::provider::LocalProxyRequestOverrides {
+            headers: Default::default(),
+            body: Some(if case == "personal_runtime_beam_go" {
+                json!({"model":"beam-free"})
+            } else if case == "runtime_unknown_override" {
+                json!({"model":"synthetic-unclassified-model"})
+            } else {
+                json!({"models":["glm-5.3-flash-free"]})
+            }),
+        });
+        state.db.save_provider("codex", &provider).unwrap();
+        f.connect(&app, 0).await;
+        let before = serde_json::to_value(state.db.get_all_providers("codex").unwrap()).unwrap();
+        let (status, text) = f.request(&app, true).await;
+        if case == "personal_runtime_beam_go" {
+            assert_eq!(status, StatusCode::OK, "{text}");
+            let calls = f.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].body["model"], "beam-free");
+            assert_eq!(calls[0].path, "/inference/go/openai/v1/chat/completions");
+            assert_eq!(
+                calls[0].headers["authorization"],
+                format!("Bearer {}", f.owner.synthetic_key(0))
+            );
+            assert_eq!(
+                calls[0].headers["x-opencode-session"],
+                "ses_shared_original_123456"
+            );
+        } else {
+            assert!(
+                f.calls.lock().unwrap().is_empty(),
+                "final external policy must reject before any synthetic vendor POST"
+            );
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+            assert!(text.contains("opencode.external_"));
+        }
+        assert_eq!(
+            serde_json::to_value(state.db.get_all_providers("codex").unwrap()).unwrap(),
+            before,
+            "classification must not rewrite models, providers or priorities"
+        );
+        assert!(groups::binding(&state.db.conn.lock().unwrap(), "codex")
+            .unwrap()
+            .is_none());
+        state.proxy_service.stop().await.unwrap();
+        return;
+    }
+    if case == "free_legacy_inventory" {
+        let provider_id = crate::vendor::provision::provider_id_for(
+            "opencode-free",
+            "synthetic-opencode-workspace-a",
+        );
+        // Authentic pre-contraction Free shape, not a call to the now-disabled generator.
+        let settings = crate::relay::provider_config::settings_config_with_roles_and_models(
+            &AppType::Codex,
+            f.owner.synthetic_key(0),
+            "Existing Free",
+            crate::vendor::opencode::FREE_API_ORIGIN,
+            crate::vendor::opencode::FREE_CHAT_MODELS[0],
+            None,
+            None,
+            crate::vendor::opencode::Plan::Free.style(),
+        )
+        .unwrap();
+        let mut row = crate::provider::Provider::with_id(
+            provider_id.clone(),
+            "Existing Free".into(),
+            settings,
+            None,
+        );
+        row.meta = Some(crate::provider::ProviderMeta {
+            loongport_vendor_account: Some("synthetic-opencode-workspace-a".into()),
+            ..Default::default()
+        });
+        state.db.save_provider("codex", &row).unwrap();
+        let before = serde_json::to_value(state.db.get_all_providers("codex").unwrap()).unwrap();
+        let accounts = crate::commands::list_vendor_accounts(state, &AppType::Codex).unwrap();
+        let plan = accounts
+            .accounts
+            .iter()
+            .find(|row| row.id == 701)
+            .unwrap()
+            .plans
+            .iter()
+            .find(|plan| plan.plan_id == "opencode-free")
+            .unwrap();
+        assert!(
+            !plan.can_switch,
+            "existing external Free config must not remain selectable"
+        );
+        assert_eq!(
+            serde_json::to_value(plan).unwrap()["switchBlockedReason"],
+            "opencodeFreeExternalUnavailable"
+        );
+        assert!(
+            plan.can_edit_config,
+            "saved configuration remains editable rather than deleted"
+        );
+        let overview = crate::commands::application_overview(state, &AppType::Codex).unwrap();
+        assert!(
+            !overview
+                .configurations
+                .iter()
+                .find(|row| row.provider_id == provider_id)
+                .unwrap()
+                .can_select
+        );
+        assert_eq!(
+            serde_json::to_value(state.db.get_all_providers("codex").unwrap()).unwrap(),
+            before
+        );
+        return;
+    }
     if case == "workspace_legacy" {
         f.connect(&AppType::Codex, 0).await;
         assert!(groups::binding(&state.db.conn.lock().unwrap(), "codex")
@@ -407,6 +593,48 @@ pub(crate) async fn verify(case: &str) {
         usize::from(case == "personal_all_empty"),
     )
     .await;
+    if matches!(
+        case,
+        "personal_policy_group_free" | "personal_policy_group_unknown"
+    ) {
+        let mut provider = state
+            .db
+            .get_provider_by_id(&f.owner.ids()[0], "codex")
+            .unwrap()
+            .unwrap();
+        provider
+            .meta
+            .as_mut()
+            .unwrap()
+            .local_proxy_request_overrides = Some(crate::provider::LocalProxyRequestOverrides {
+            headers: Default::default(),
+            body: Some(
+                json!({"models":[if case.ends_with("_free") { "glm-5.3-flash-free" } else { "synthetic-unclassified-model" }]}),
+            ),
+        });
+        state.db.save_provider("codex", &provider).unwrap();
+        let saved = serde_json::to_value(state.db.get_all_providers("codex").unwrap()).unwrap();
+        let (status, text) = f.request(&AppType::Codex, true).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+        assert!(text.contains("opencode.external_"));
+        assert!(
+            f.calls.lock().unwrap().is_empty(),
+            "policy refusal must not send to A or fall through to healthy paid B"
+        );
+        assert_eq!(
+            serde_json::to_value(state.db.get_all_providers("codex").unwrap()).unwrap(),
+            saved
+        );
+        assert_eq!(
+            groups::binding(&state.db.conn.lock().unwrap(), "codex")
+                .unwrap()
+                .unwrap()
+                .target,
+            target
+        );
+        state.proxy_service.stop().await.unwrap();
+        return;
+    }
     if case == "personal_snapshot_reseal" {
         let (old_status, _) = f.request(&AppType::Codex, true).await;
         let old_calls = f.calls.lock().unwrap().len();

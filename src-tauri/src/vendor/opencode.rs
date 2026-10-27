@@ -46,6 +46,8 @@
 //! Go（订阅制精选开源模型，`/zen/go` 下）。账号层（登录窗、cookie、key 认领）
 //! 另有只选官方免费变体的 Free plan；账号层沿用同一套，差异只在配置展开层。
 
+pub(crate) mod external;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
@@ -640,10 +642,8 @@ impl Plan {
     ) -> Option<(&'static str, &'static str)> {
         match self {
             Plan::Free => match app {
-                crate::app_config::AppType::Codex
-                | crate::app_config::AppType::Hermes
-                | crate::app_config::AppType::OpenClaw
-                | crate::app_config::AppType::OpenCode => {
+                // Official OpenCode direct config only; never external proxy eligibility.
+                crate::app_config::AppType::OpenCode => {
                     Some((FREE_API_ORIGIN, FREE_CHAT_MODELS[0]))
                 }
                 _ => None,
