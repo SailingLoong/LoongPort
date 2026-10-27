@@ -718,6 +718,9 @@ pub(crate) async fn switch_route_locked_with_catalog(
     route: Provider,
     catalog: Option<codex_direct::CatalogDecision>,
 ) -> Result<(), String> {
+    if crate::proxy::managed_accounts::uses_workbuddy_model_route(&route) {
+        return Err("workbuddy.inference_paused".into());
+    }
     crate::services::shared_routing::ensure_legacy_selection_allowed(service.database(), app)
         .map_err(err)?;
     if catalog.is_some() && *app != AppType::Codex {
@@ -861,6 +864,9 @@ pub(crate) fn select_locked_with_catalog(
     mut target: PendingTarget,
     catalog: Option<&codex_direct::CatalogDecision>,
 ) -> Result<bool, AppError> {
+    if crate::proxy::managed_accounts::uses_workbuddy_model_route(provider) {
+        return Err(AppError::Config("workbuddy.inference_paused".into()));
+    }
     crate::services::shared_routing::ensure_legacy_selection_allowed(service.database(), app)?;
     if catalog.is_some() && *app != AppType::Codex {
         return Err(invalid());

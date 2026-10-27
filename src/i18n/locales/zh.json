@@ -4986,7 +4986,8 @@
         "needsAuthorization": "尚未允许推理；已有完整登录可直接启用",
         "ready": "推理授权已保存（实际消费尚未验收）",
         "refreshRequired": "推理授权需要刷新",
-        "expired": "登录凭据已过期，请补充授权"
+        "expired": "登录凭据已过期，请补充授权",
+        "paused": "WorkBuddy 模型请求已暂停；账号管理和国内签到仍可用"
       }
     }
   },

@@ -4986,7 +4986,8 @@
         "needsAuthorization": "Inference is not enabled; a complete login can be reused",
         "ready": "Inference authorization saved (actual consumption is not verified)",
         "refreshRequired": "Inference authorization needs refresh",
-        "expired": "Inference authorization expired (authorize inference again)"
+        "expired": "Inference authorization expired (authorize inference again)",
+        "paused": "WorkBuddy model requests are paused; account management and domestic check-in remain available"
       }
     }
   },

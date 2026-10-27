@@ -1,4 +1,7 @@
-//! Synthetic encrypted-owner/transport tests. These are NOT original ProxyServer tests.
+//! Private protocol/security regression tests, using synthetic encrypted owners only.
+//! These deliberately exercise the retained private wire/CAS/stream primitive, NOT
+//! public model availability. Public acquire/discovery/dispatch/authorization are
+//! unconditionally paused and separately tested by workbuddy_shared_authorization.
 use super::super::model::Account;
 use super::*;
 use std::collections::VecDeque;
@@ -56,7 +59,7 @@ impl Fixture {
         store::save(&self.session, &b, rows).unwrap();
     }
     async fn lease(&self, index: usize) -> Lease {
-        Lease::acquire(self.session.clone(), &self.ids[index])
+        Lease::acquire_with_expected(self.session.clone(), &self.ids[index], true, None)
             .await
             .unwrap()
     }
@@ -134,14 +137,14 @@ fn signin_replies(uid: &str, domain: &str) -> Vec<ProxyResponse> {
     ]
 }
 
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn two_selected_accounts_keep_distinct_new_grants_and_preserve_body() {
     let f = Fixture::new(true);
     let t = Fake::with(vec![success(), success()]);
     for n in 0..2 {
         f.lease(n)
             .await
-            .dispatch_with(body(), Duration::from_secs(3), &t, 1000)
+            .dispatch_protocol_with(body(), Duration::from_secs(3), &t, 1000)
             .await
             .unwrap()
             .response
@@ -166,10 +169,14 @@ async fn two_selected_accounts_keep_distinct_new_grants_and_preserve_body() {
         assert!(!String::from_utf8_lossy(&calls[n].body).contains("old-checkin"));
     }
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn legacy_rows_are_not_inference_authorized_and_keep_existing_ui_dto() {
     let f = Fixture::new(false);
-    assert!(Lease::acquire(f.session.clone(), &f.ids[0]).await.is_err());
+    assert!(
+        Lease::acquire_with_expected(f.session.clone(), &f.ids[0], true, None)
+            .await
+            .is_err()
+    );
     let b = store::binding(&f.session).unwrap();
     let rows = store::load(&f.session, &b).unwrap();
     let encoded = serde_json::to_value(&rows[0]).unwrap();
@@ -180,15 +187,16 @@ async fn legacy_rows_are_not_inference_authorized_and_keep_existing_ui_dto() {
     assert!(!ui.contains("token"));
     assert!(!ui.contains("inference"));
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn explicit_new_grant_binds_only_matching_original_row_and_keeps_checkin() {
     let f = Fixture::new(false);
     let t = Fake::with(signin_replies("synthetic-a", "www.workbuddy.cn"));
-    let mut pending = PendingAuthorization::begin_with(f.session.clone(), &f.ids[0], &t, 1000)
-        .await
-        .unwrap();
+    let mut pending =
+        PendingAuthorization::begin_protocol_with(f.session.clone(), &f.ids[0], &t, 1000)
+            .await
+            .unwrap();
     assert!(matches!(
-        pending.poll_with(&t, 2000).await.unwrap(),
+        pending.poll_protocol_with(&t, 2000).await.unwrap(),
         AuthorizationProgress::Saved
     ));
     let b = store::binding(&f.session).unwrap();
@@ -216,7 +224,7 @@ async fn explicit_new_grant_binds_only_matching_original_row_and_keeps_checkin()
             .contains("new-authorized")
     );
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn wrong_uid_or_domain_or_platform_never_binds_or_migrates() {
     for (uid, domain) in [
         ("different-user", "www.workbuddy.cn"),
@@ -225,11 +233,16 @@ async fn wrong_uid_or_domain_or_platform_never_binds_or_migrates() {
     ] {
         let f = Fixture::new(false);
         let t = Fake::with(signin_replies(uid, domain));
-        let mut p = PendingAuthorization::begin_with(f.session.clone(), &f.ids[0], &t, 1000)
-            .await
-            .unwrap();
-        assert!(p.poll_with(&t, 2000).await.is_err());
-        assert!(Lease::acquire(f.session.clone(), &f.ids[0]).await.is_err());
+        let mut p =
+            PendingAuthorization::begin_protocol_with(f.session.clone(), &f.ids[0], &t, 1000)
+                .await
+                .unwrap();
+        assert!(p.poll_protocol_with(&t, 2000).await.is_err());
+        assert!(
+            Lease::acquire_with_expected(f.session.clone(), &f.ids[0], true, None)
+                .await
+                .is_err()
+        );
     }
     let f = Fixture::new(false);
     let b = store::binding(&f.session).unwrap();
@@ -244,11 +257,11 @@ async fn wrong_uid_or_domain_or_platform_never_binds_or_migrates() {
     )
     .is_err());
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn stale_login_flow_cannot_replace_a_newer_grant() {
     let f = Fixture::new(false);
     let t = Fake::with(signin_replies("synthetic-a", "www.workbuddy.cn"));
-    let mut p = PendingAuthorization::begin_with(f.session.clone(), &f.ids[0], &t, 1000)
+    let mut p = PendingAuthorization::begin_protocol_with(f.session.clone(), &f.ids[0], &t, 1000)
         .await
         .unwrap();
     f.change(|rows| {
@@ -264,10 +277,10 @@ async fn stale_login_flow_cannot_replace_a_newer_grant() {
             refresh_expires_ms: None,
         })
     });
-    assert!(p.poll_with(&t, 2000).await.is_err());
+    assert!(p.poll_protocol_with(&t, 2000).await.is_err());
     assert_eq!(t.count(), 1);
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn unsafe_authorization_urls_are_rejected_without_following() {
     for url in [
         "https://evil.invalid/?state=s",
@@ -282,21 +295,26 @@ async fn unsafe_authorization_urls_are_rejected_without_following() {
             json!({"code":0,"data":{"state":"s","authUrl":url}}),
         )]);
         assert!(
-            PendingAuthorization::begin_with(f.session.clone(), &f.ids[0], &t, 1000)
+            PendingAuthorization::begin_protocol_with(f.session.clone(), &f.ids[0], &t, 1000)
                 .await
                 .is_err()
         );
         assert_eq!(t.count(), 1);
     }
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn models_use_only_live_cli_ids_without_static_fallback_or_pricing() {
     let f = Fixture::new(true);
     let t = Fake::with(vec![json_reply(
         200,
         json!({"code":0,"data":{"agents":[{"name":"other","models":["foreign"]},{"name":"cli","models":["live","renamed","live"]}],"models":[{"id":"live","name":"Label","price":999}]}}),
     )]);
-    let models = f.lease(0).await.models_with(&t, 1000).await.unwrap();
+    let models = f
+        .lease(0)
+        .await
+        .models_protocol_with(&t, 1000)
+        .await
+        .unwrap();
     assert_eq!(
         models,
         vec![
@@ -312,7 +330,7 @@ async fn models_use_only_live_cli_ids_without_static_fallback_or_pricing() {
     );
     assert!(!serde_json::to_string(&models).unwrap().contains("price"));
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn explicit_401_refreshes_same_grant_once_and_never_sends_old_checkin_token() {
     let f = Fixture::new(true);
     let t = Fake::with(vec![
@@ -322,7 +340,7 @@ async fn explicit_401_refreshes_same_grant_once_and_never_sends_old_checkin_toke
     ]);
     f.lease(0)
         .await
-        .dispatch_with(body(), Duration::from_secs(3), &t, 1000)
+        .dispatch_protocol_with(body(), Duration::from_secs(3), &t, 1000)
         .await
         .unwrap()
         .response
@@ -336,7 +354,7 @@ async fn explicit_401_refreshes_same_grant_once_and_never_sends_old_checkin_toke
     assert!(calls[1].headers["x-refresh-token"].is_sensitive());
     assert_eq!(calls[2].headers["authorization"], "Bearer new-rotated");
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn expiry_refresh_uses_the_only_replay_budget_and_preserves_second_401() {
     let f = Fixture::new(true);
     f.change(|r| r[0].inference.as_mut().unwrap().expires_ms = 1001);
@@ -347,7 +365,7 @@ async fn expiry_refresh_uses_the_only_replay_budget_and_preserves_second_401() {
     let r = f
         .lease(0)
         .await
-        .dispatch_with(body(), Duration::from_secs(3), &t, 1000)
+        .dispatch_protocol_with(body(), Duration::from_secs(3), &t, 1000)
         .await
         .unwrap();
     assert_eq!(r.response.status(), http::StatusCode::UNAUTHORIZED);
@@ -355,7 +373,7 @@ async fn expiry_refresh_uses_the_only_replay_budget_and_preserves_second_401() {
     let bytes = r.response.bytes_with_limit(4096).await.unwrap();
     assert!(!String::from_utf8_lossy(&bytes).contains("new-rotated"));
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn concurrent_refreshes_spend_a_refresh_token_once() {
     let f = Fixture::new(true);
     let mut a = f.lease(0).await;
@@ -368,7 +386,7 @@ async fn concurrent_refreshes_spend_a_refresh_token_once() {
     assert_eq!(a.grant.credential_version, 2);
     assert_eq!(b.grant.access, "new-rotated");
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn refresh_identity_mismatch_is_rejected_without_overwriting() {
     let f = Fixture::new(true);
     let mut a = f.lease(0).await;
@@ -379,7 +397,7 @@ async fn refresh_identity_mismatch_is_rejected_without_overwriting() {
     assert!(a.refresh(&t, 1000).await.is_err());
     assert_eq!(f.lease(0).await.grant.access, "new-inference-a");
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn refusals_are_terminal_structured_and_never_rewrite_replay_or_rotate() {
     for (status, code) in [(403, 11004), (403, 11140), (200, 11004), (200, 11140)] {
         let f = Fixture::new(true);
@@ -390,7 +408,7 @@ async fn refusals_are_terminal_structured_and_never_rewrite_replay_or_rotate() {
         let out = f
             .lease(0)
             .await
-            .dispatch_with(body(), Duration::from_secs(3), &t, 1000)
+            .dispatch_protocol_with(body(), Duration::from_secs(3), &t, 1000)
             .await
             .unwrap();
         assert_eq!(out.response.status().as_u16(), 403);
@@ -403,7 +421,7 @@ async fn refusals_are_terminal_structured_and_never_rewrite_replay_or_rotate() {
         assert!(!value.to_string().contains("new-inference"));
     }
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn status_429_and_retry_after_are_preserved_but_secret_headers_are_removed() {
     let f = Fixture::new(true);
     let mut h = http::HeaderMap::new();
@@ -417,7 +435,7 @@ async fn status_429_and_retry_after_are_preserved_but_secret_headers_are_removed
     let out = f
         .lease(0)
         .await
-        .dispatch_with(body(), Duration::from_secs(3), &t, 1000)
+        .dispatch_protocol_with(body(), Duration::from_secs(3), &t, 1000)
         .await
         .unwrap();
     assert_eq!(out.response.status().as_u16(), 429);
@@ -425,7 +443,7 @@ async fn status_429_and_retry_after_are_preserved_but_secret_headers_are_removed
     assert!(!out.response.headers().contains_key("x-echo-token"));
     assert_eq!(t.count(), 1);
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn success_headers_are_allowlisted_and_sse_bytes_unchanged() {
     let f = Fixture::new(true);
     let bytes = Bytes::from_static(
@@ -442,20 +460,20 @@ async fn success_headers_are_allowlisted_and_sse_bytes_unchanged() {
     let out = f
         .lease(0)
         .await
-        .dispatch_with(body(), Duration::from_secs(3), &t, 1000)
+        .dispatch_protocol_with(body(), Duration::from_secs(3), &t, 1000)
         .await
         .unwrap();
     assert_eq!(out.response.headers().len(), 1);
     assert_eq!(out.response.bytes_with_limit(4096).await.unwrap(), bytes);
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn final_fence_rejects_previously_primed_or_buffered_bytes_after_retirement() {
     let f = Fixture::new(true);
     let t = Fake::with(vec![success()]);
     let out = f
         .lease(0)
         .await
-        .dispatch_with(body(), Duration::from_secs(3), &t, 1000)
+        .dispatch_protocol_with(body(), Duration::from_secs(3), &t, 1000)
         .await
         .unwrap();
     let bytes = out.response.bytes_with_limit(4096).await.unwrap();
@@ -467,7 +485,7 @@ async fn final_fence_rejects_previously_primed_or_buffered_bytes_after_retiremen
     assert!(final_body.next().await.unwrap().is_err());
     assert!(final_body.next().await.is_none());
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn blocked_then_unblocked_session_never_revives_old_lease() {
     let f = Fixture::new(true);
     let lease = f.lease(0).await;
@@ -475,12 +493,12 @@ async fn blocked_then_unblocked_session_never_revives_old_lease() {
     f.session.set_blocked(false);
     let t = Fake::with(vec![success()]);
     assert!(lease
-        .dispatch_with(body(), Duration::from_secs(3), &t, 1000)
+        .dispatch_protocol_with(body(), Duration::from_secs(3), &t, 1000)
         .await
         .is_err());
     assert_eq!(t.count(), 0);
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn post_output_stream_failure_is_sanitized_and_never_replayed() {
     let f = Fixture::new(true);
     let t = Fake::with(vec![ProxyResponse::streamed(
@@ -496,7 +514,7 @@ async fn post_output_stream_failure_is_sanitized_and_never_replayed() {
     let out = f
         .lease(0)
         .await
-        .dispatch_with(body(), Duration::from_secs(3), &t, 1000)
+        .dispatch_protocol_with(body(), Duration::from_secs(3), &t, 1000)
         .await
         .unwrap();
     let mut stream = Box::pin(out.response.bytes_stream());
@@ -506,7 +524,7 @@ async fn post_output_stream_failure_is_sanitized_and_never_replayed() {
     assert!(stream.next().await.is_none());
     assert_eq!(t.count(), 1);
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn nonstream_request_is_rejected_before_network_instead_of_silently_rewritten() {
     let f = Fixture::new(true);
     let t = Fake::default();
@@ -515,13 +533,13 @@ async fn nonstream_request_is_rejected_before_network_instead_of_silently_rewrit
     assert!(f
         .lease(0)
         .await
-        .dispatch_with(request, Duration::from_secs(3), &t, 1000)
+        .dispatch_protocol_with(request, Duration::from_secs(3), &t, 1000)
         .await
         .is_err());
     assert_eq!(t.count(), 0);
 }
 
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn response_echo_across_chunks_is_withheld_then_terminated_without_replay() {
     let f = Fixture::new(true);
     let chunks = vec![
@@ -536,7 +554,7 @@ async fn response_echo_across_chunks_is_withheld_then_terminated_without_replay(
     let out = f
         .lease(0)
         .await
-        .dispatch_with(body(), Duration::from_secs(3), &t, 1000)
+        .dispatch_protocol_with(body(), Duration::from_secs(3), &t, 1000)
         .await
         .unwrap();
     let mut stream = Box::pin(out.response.bytes_stream());
@@ -552,7 +570,7 @@ async fn response_echo_across_chunks_is_withheld_then_terminated_without_replay(
     assert!(!String::from_utf8_lossy(&received).contains("new-infer"));
     assert_eq!(t.count(), 1);
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn declared_compression_is_rejected_and_requests_ask_identity() {
     let f = Fixture::new(true);
     let mut headers = safe_headers(&http::HeaderMap::new(), true);
@@ -565,7 +583,7 @@ async fn declared_compression_is_rejected_and_requests_ask_identity() {
     assert_eq!(
         f.lease(0)
             .await
-            .dispatch_with(body(), Duration::from_secs(3), &t, 1000)
+            .dispatch_protocol_with(body(), Duration::from_secs(3), &t, 1000)
             .await
             .unwrap()
             .response
@@ -577,7 +595,7 @@ async fn declared_compression_is_rejected_and_requests_ask_identity() {
         "identity"
     );
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn fixture_origin_and_owner_mismatch_never_fall_back_to_production() {
     let f = Fixture::new(true);
     for origin in [
@@ -614,7 +632,7 @@ async fn fixture_origin_and_owner_mismatch_never_fall_back_to_production() {
     );
 }
 
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn every_documented_denial_envelope_blocks_401_refresh_and_preserves_exact_codes() {
     for status in [401, 403, 200] {
         for value in [
@@ -628,7 +646,7 @@ async fn every_documented_denial_envelope_blocks_401_refresh_and_preserves_exact
             let out = f
                 .lease(0)
                 .await
-                .dispatch_with(body(), Duration::from_secs(3), &t, 1000)
+                .dispatch_protocol_with(body(), Duration::from_secs(3), &t, 1000)
                 .await
                 .unwrap();
             assert_eq!(t.count(), 1);
@@ -683,7 +701,7 @@ impl Transport for DelayedResponse {
         })
     }
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn pending_refresh_is_single_flight_and_second_lease_reads_persisted_rotation() {
     let f = Fixture::new(true);
     let mut first = f.lease(0).await;
@@ -716,7 +734,7 @@ async fn pending_refresh_is_single_flight_and_second_lease_reads_persisted_rotat
     assert_eq!(results.1.unwrap().unwrap(), 2);
     assert_eq!(t.count(), 1);
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn late_refresh_response_cannot_revive_retired_original_grant() {
     let f = Fixture::new(true);
     let mut lease = f.lease(0).await;
@@ -730,28 +748,38 @@ async fn late_refresh_response_cannot_revive_retired_original_grant() {
     }
     t.release.notify_one();
     assert!(task.await.unwrap().is_err());
-    assert!(Lease::acquire(f.session.clone(), &f.ids[0]).await.is_err());
+    assert!(
+        Lease::acquire_with_expected(f.session.clone(), &f.ids[0], true, None)
+            .await
+            .is_err()
+    );
     assert_eq!(t.count(), 1);
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn waiting_token_response_after_session_epoch_change_is_not_published() {
     let f = Fixture::new(false);
     let begin = Fake::with(signin_replies("synthetic-a", "www.workbuddy.cn"));
-    let mut pending = PendingAuthorization::begin_with(f.session.clone(), &f.ids[0], &begin, 1000)
-        .await
-        .unwrap();
+    let mut pending =
+        PendingAuthorization::begin_protocol_with(f.session.clone(), &f.ids[0], &begin, 1000)
+            .await
+            .unwrap();
     let t = DelayedResponse::new(json_reply(200, json!({"code":11217})));
     let transport = t.clone();
-    let task = tokio::spawn(async move { pending.poll_with(transport.as_ref(), 2000).await });
+    let task =
+        tokio::spawn(async move { pending.poll_protocol_with(transport.as_ref(), 2000).await });
     t.entered.notified().await;
     f.session.set_blocked(true);
     f.session.set_blocked(false);
     t.release.notify_one();
     assert!(task.await.unwrap().is_err());
-    assert!(Lease::acquire(f.session.clone(), &f.ids[0]).await.is_err());
+    assert!(
+        Lease::acquire_with_expected(f.session.clone(), &f.ids[0], true, None)
+            .await
+            .is_err()
+    );
 }
 
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn incomplete_error_body_has_a_bounded_terminal_deadline_without_refresh() {
     let f = Fixture::new(true);
     let response = ProxyResponse::streamed(
@@ -764,7 +792,7 @@ async fn incomplete_error_body_has_a_bounded_terminal_deadline_without_refresh()
     assert_eq!(lease.base_url(), "https://copilot.tencent.com");
     let result = tokio::time::timeout(
         Duration::from_secs(1),
-        lease.dispatch_with(body(), Duration::from_millis(10), &t, 1000),
+        lease.dispatch_protocol_with(body(), Duration::from_millis(10), &t, 1000),
     )
     .await
     .unwrap();
@@ -798,17 +826,18 @@ fn delayed_signin(uid: &str) -> DelayedProfile {
         delayed: DelayedResponse::new(profile),
     }
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn cancelled_pending_profile_late_response_cannot_publish_grant() {
     let f = Fixture::new(false);
     let t = Arc::new(delayed_signin("synthetic-a"));
     let mut pending =
-        PendingAuthorization::begin_with(f.session.clone(), &f.ids[0], t.as_ref(), 1000)
+        PendingAuthorization::begin_protocol_with(f.session.clone(), &f.ids[0], t.as_ref(), 1000)
             .await
             .unwrap();
     let cancellation = pending.cancel_handle();
     let transport = t.clone();
-    let task = tokio::spawn(async move { pending.poll_with(transport.as_ref(), 2000).await });
+    let task =
+        tokio::spawn(async move { pending.poll_protocol_with(transport.as_ref(), 2000).await });
     t.delayed.entered.notified().await;
     tokio::time::timeout(Duration::from_secs(1), cancellation.cancel())
         .await
@@ -818,51 +847,67 @@ async fn cancelled_pending_profile_late_response_cannot_publish_grant() {
         task.await.unwrap(),
         Err(Failure::ExpiredAuthorization)
     ));
-    assert!(Lease::acquire(f.session.clone(), &f.ids[0]).await.is_err());
-    assert!(Lease::acquire(f.session.clone(), &f.ids[1]).await.is_err());
+    assert!(
+        Lease::acquire_with_expected(f.session.clone(), &f.ids[0], true, None)
+            .await
+            .is_err()
+    );
+    assert!(
+        Lease::acquire_with_expected(f.session.clone(), &f.ids[1], true, None)
+            .await
+            .is_err()
+    );
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn closing_old_flow_cannot_cancel_reopened_flow_or_other_original_account() {
     let f = Fixture::new(false);
     let t = Fake::with(signin_replies("synthetic-a", "www.workbuddy.cn"));
-    let mut old = PendingAuthorization::begin_with(f.session.clone(), &f.ids[0], &t, 1000)
+    let mut old = PendingAuthorization::begin_protocol_with(f.session.clone(), &f.ids[0], &t, 1000)
         .await
         .unwrap();
     let old_cancel = old.cancel_handle();
     old_cancel.cancel().await;
     assert!(matches!(
-        old.poll_with(&t, 2000).await,
+        old.poll_protocol_with(&t, 2000).await,
         Err(Failure::ExpiredAuthorization)
     ));
     assert_eq!(t.count(), 1);
     for (index, uid) in [(0, "synthetic-a"), (1, "synthetic-b")] {
         let t = Fake::with(signin_replies(uid, "www.workbuddy.cn"));
-        let mut new = PendingAuthorization::begin_with(f.session.clone(), &f.ids[index], &t, 2000)
-            .await
-            .unwrap();
+        let mut new =
+            PendingAuthorization::begin_protocol_with(f.session.clone(), &f.ids[index], &t, 2000)
+                .await
+                .unwrap();
         old_cancel.cancel().await;
         assert!(matches!(
-            new.poll_with(&t, 3000).await,
+            new.poll_protocol_with(&t, 3000).await,
             Ok(AuthorizationProgress::Saved)
         ));
-        assert!(Lease::acquire(f.session.clone(), &f.ids[index])
-            .await
-            .is_ok());
+        assert!(
+            Lease::acquire_with_expected(f.session.clone(), &f.ids[index], true, None)
+                .await
+                .is_ok()
+        );
     }
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn cancel_publish_race_linearizes_and_cancel_never_revokes_published_grant() {
     // Cover both lock orders, and the contended boundary rather than timing sleeps.
     for cancel_first in [true, false] {
         let f = Fixture::new(false);
         let t = Arc::new(delayed_signin("synthetic-a"));
-        let mut pending =
-            PendingAuthorization::begin_with(f.session.clone(), &f.ids[0], t.as_ref(), 1000)
-                .await
-                .unwrap();
+        let mut pending = PendingAuthorization::begin_protocol_with(
+            f.session.clone(),
+            &f.ids[0],
+            t.as_ref(),
+            1000,
+        )
+        .await
+        .unwrap();
         let handle = pending.cancel_handle();
         let transport = t.clone();
-        let task = tokio::spawn(async move { pending.poll_with(transport.as_ref(), 2000).await });
+        let task =
+            tokio::spawn(async move { pending.poll_protocol_with(transport.as_ref(), 2000).await });
         t.delayed.entered.notified().await;
         if cancel_first {
             let lock = crate::services::sync_protocol::sync_mutex().lock().await;
@@ -875,7 +920,11 @@ async fn cancel_publish_race_linearizes_and_cancel_never_revokes_published_grant
                 task.await.unwrap(),
                 Err(Failure::ExpiredAuthorization)
             ));
-            assert!(Lease::acquire(f.session.clone(), &f.ids[0]).await.is_err());
+            assert!(
+                Lease::acquire_with_expected(f.session.clone(), &f.ids[0], true, None)
+                    .await
+                    .is_err()
+            );
         } else {
             t.delayed.release.notify_one();
             assert!(matches!(
@@ -883,25 +932,27 @@ async fn cancel_publish_race_linearizes_and_cancel_never_revokes_published_grant
                 Ok(AuthorizationProgress::Saved)
             ));
             handle.cancel().await;
-            assert!(Lease::acquire(f.session.clone(), &f.ids[0]).await.is_ok());
+            assert!(
+                Lease::acquire_with_expected(f.session.clone(), &f.ids[0], true, None)
+                    .await
+                    .is_ok()
+            );
         }
     }
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn inference_status_uses_only_original_private_grant_and_safe_dto() {
     let f = Fixture::new(false);
     let states = list_inference_accounts(&f.session).await.unwrap();
-    assert!(states
-        .iter()
-        .all(|row| row.state == InferenceState::NeedsAuthorization));
+    assert!(states.iter().all(|row| row.state == InferenceState::Paused));
     let f = Fixture::new(true);
     f.change(|rows| {
         rows[0].inference.as_mut().unwrap().expires_ms = now_ms() + 120_000;
         rows[1].inference.as_mut().unwrap().refresh_expires_ms = Some(now_ms() - 1);
     });
     let states = list_inference_accounts(&f.session).await.unwrap();
-    assert_eq!(states[0].state, InferenceState::Ready);
-    assert_eq!(states[1].state, InferenceState::Expired);
+    assert_eq!(states[0].state, InferenceState::Paused);
+    assert_eq!(states[1].state, InferenceState::Paused);
     let json = serde_json::to_value(&states).unwrap();
     assert_eq!(json[0].as_object().unwrap().len(), 2);
     assert_eq!(json[0]["id"], f.ids[0]);
@@ -913,15 +964,15 @@ async fn inference_status_uses_only_original_private_grant_and_safe_dto() {
     f.change(|rows| rows[0].inference.as_mut().unwrap().refresh_expires_ms = None);
     assert_eq!(
         list_inference_accounts(&f.session).await.unwrap()[0].state,
-        InferenceState::RefreshRequired
+        InferenceState::Paused
     );
     f.change(|rows| rows[0].inference.as_mut().unwrap().platform = "workbuddy-ai".into());
     assert_eq!(
         list_inference_accounts(&f.session).await.unwrap()[0].state,
-        InferenceState::NeedsAuthorization
+        InferenceState::Paused
     );
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn discovery_rejects_secret_echo_in_decoded_model_id_or_label_and_nonidentity() {
     for (id, name) in [
         ("new-inference-a", "Normal"),
@@ -932,7 +983,12 @@ async fn discovery_rejects_secret_echo_in_decoded_model_id_or_label_and_nonident
             200,
             json!({"code":0,"data":{"agents":[{"name":"cli","models":[id]}],"models":[{"id":id,"name":name}]}}),
         )]);
-        assert!(f.lease(0).await.models_with(&t, 1000).await.is_err());
+        assert!(f
+            .lease(0)
+            .await
+            .models_protocol_with(&t, 1000)
+            .await
+            .is_err());
         assert_eq!(t.count(), 1);
     }
     let f = Fixture::new(true);
@@ -943,7 +999,12 @@ async fn discovery_rejects_secret_echo_in_decoded_model_id_or_label_and_nonident
         h,
         Bytes::from_static(b"{\"code\":0,\"data\":{\"agents\":[]}}"),
     )]);
-    assert!(f.lease(0).await.models_with(&t, 1000).await.is_err());
+    assert!(f
+        .lease(0)
+        .await
+        .models_protocol_with(&t, 1000)
+        .await
+        .is_err());
 }
 
 fn event(value: Value) -> Bytes {
@@ -965,7 +1026,7 @@ async fn semantic_case(chunks: Vec<Bytes>, blocked: bool) -> Vec<u8> {
     let out = f
         .lease(0)
         .await
-        .dispatch_with(body(), Duration::from_secs(3), &t, 1000)
+        .dispatch_protocol_with(body(), Duration::from_secs(3), &t, 1000)
         .await
         .unwrap();
     let mut stream = Box::pin(out.response.bytes_stream());
@@ -985,7 +1046,7 @@ async fn semantic_case(chunks: Vec<Bytes>, blocked: bool) -> Vec<u8> {
     assert_eq!(t.count(), 1);
     output
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn decoded_unicode_first_event_sets_terminal_opaque_fence_without_output() {
     let encoded = br#"data: {"choices":[{"delta":{"content":"\u006e\u0065\u0077\u002d\u0069\u006e\u0066\u0065\u0072\u0065\u006e\u0063\u0065\u002d\u0061"}}]}
 
@@ -996,7 +1057,7 @@ async fn decoded_unicode_first_event_sets_terminal_opaque_fence_without_output()
             .is_empty()
     );
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn decoded_secret_split_across_delta_events_holds_original_prefix() {
     let bytes = [
         delta(json!({"content":"new-infer"})),
@@ -1016,7 +1077,7 @@ async fn decoded_secret_split_across_delta_events_holds_original_prefix() {
         .is_empty());
     }
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn reasoning_aliases_and_original_trimmed_tool_reasoning_are_screened() {
     for chunks in [
         vec![
@@ -1049,7 +1110,7 @@ async fn reasoning_aliases_and_original_trimmed_tool_reasoning_are_screened() {
         semantic_case(chunks, true).await;
     }
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn nested_unicode_tool_arguments_are_held_until_complete_and_screened() {
     let args = r#"{"input":"\u006e\u0065\u0077-inference-a"}"#;
     let middle = args.len() / 2;
@@ -1062,7 +1123,7 @@ async fn nested_unicode_tool_arguments_are_held_until_complete_and_screened() {
         .await
         .is_empty());
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn independent_tools_and_content_fields_never_join_into_false_secret() {
     let chunks = vec![
         delta(json!({"content":"new-infer"})),
@@ -1076,7 +1137,7 @@ async fn independent_tools_and_content_fields_never_join_into_false_secret() {
     let expected = chunks.concat();
     assert_eq!(semantic_case(chunks, false).await, expected);
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn semantic_screen_preserves_normal_multibyte_and_line_endings_byte_for_byte() {
     let raw = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"你好，正常结果\"}}]}\r\n\n:data heartbeat\n\ndata: [DONE]\r\n\r\n".as_bytes().to_vec();
     for split in [1, 60, 62, raw.len() - 2] {
@@ -1093,7 +1154,7 @@ async fn semantic_screen_preserves_normal_multibyte_and_line_endings_byte_for_by
         );
     }
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn single_choice_capability_rejects_n_before_network_and_other_choice_on_response() {
     for n in [json!(0), json!(2), json!("1")] {
         let f = Fixture::new(true);
@@ -1103,7 +1164,7 @@ async fn single_choice_capability_rejects_n_before_network_and_other_choice_on_r
         assert!(matches!(
             f.lease(0)
                 .await
-                .dispatch_with(request, Duration::from_secs(3), &t, 1000)
+                .dispatch_protocol_with(request, Duration::from_secs(3), &t, 1000)
                 .await,
             Err(ProxyError::InvalidRequest(_))
         ));
@@ -1120,7 +1181,7 @@ async fn single_choice_capability_rejects_n_before_network_and_other_choice_on_r
         );
     }
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn event_and_total_holdback_limits_fail_closed_with_terminal_fence() {
     semantic_case(
         vec![Bytes::from(format!("data: {}\n\n", "x".repeat(256 * 1024)))],
@@ -1131,7 +1192,7 @@ async fn event_and_total_holdback_limits_fail_closed_with_terminal_fence() {
     held.extend((0..20).map(|_| Bytes::from(format!(":{}\n\n", " ".repeat(64 * 1024)))));
     assert!(semantic_case(held, true).await.is_empty());
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn malformed_sse_or_incomplete_tool_json_never_becomes_successful_eof() {
     for chunks in [
         vec![Bytes::from_static(b"data: {broken}\n\n")],
@@ -1147,7 +1208,7 @@ async fn malformed_sse_or_incomplete_tool_json_never_becomes_successful_eof() {
     }
 }
 
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn clean_eof_without_a_terminal_signal_is_not_success() {
     for chunks in [
         vec![],
@@ -1165,7 +1226,7 @@ async fn clean_eof_without_a_terminal_signal_is_not_success() {
     }
 }
 
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn explicit_terminal_signals_preserve_clean_eof_wire_bytes() {
     for terminal in [
         done(),
@@ -1178,7 +1239,7 @@ async fn explicit_terminal_signals_preserve_clean_eof_wire_bytes() {
     }
 }
 
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn finish_reason_only_keeps_usage_tail_and_completed_tools() {
     for chunks in [
         vec![
@@ -1198,7 +1259,7 @@ async fn finish_reason_only_keeps_usage_tail_and_completed_tools() {
     }
 }
 
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn split_leading_think_and_reasoning_alias_follow_original_late_parse_order() {
     let blocked = vec![
         delta(json!({"reasoning_content":"new-infer"})),
@@ -1218,7 +1279,7 @@ async fn split_leading_think_and_reasoning_alias_follow_original_late_parse_orde
     let expected = safe.concat();
     assert_eq!(semantic_case(safe, false).await, expected);
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn completed_tool_rejects_late_argument_fragments_without_reinterpretation() {
     semantic_case(vec![
         delta(json!({"tool_calls":[{"index":0,"id":"call_0","function":{"name":"lookup","arguments":"{}"}}]})),
@@ -1227,7 +1288,7 @@ async fn completed_tool_rejects_late_argument_fragments_without_reinterpretation
     ], true).await;
 }
 
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn structured_sse_denials_preserve_safe_terminal_meaning_before_and_after_output() {
     for code in [11004, 11140] {
         for envelope in [
@@ -1256,7 +1317,7 @@ async fn structured_sse_denials_preserve_safe_terminal_meaning_before_and_after_
                 let result = f
                     .lease(0)
                     .await
-                    .dispatch_with(body(), Duration::from_secs(3), &t, 1000)
+                    .dispatch_protocol_with(body(), Duration::from_secs(3), &t, 1000)
                     .await
                     .unwrap();
                 let mut stream = result.response.bytes_stream();
@@ -1302,7 +1363,7 @@ async fn structured_sse_denials_preserve_safe_terminal_meaning_before_and_after_
     }
 }
 
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn structured_sse_denial_detection_never_matches_messages_or_code_prefixes() {
     let chunks = vec![
         event(json!({"code":111400,"msg":"11140 unapproved channel"})),
@@ -1313,14 +1374,14 @@ async fn structured_sse_denial_detection_never_matches_messages_or_code_prefixes
     assert_eq!(semantic_case(chunks, false).await, expected);
 }
 
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn structured_sse_typed_fence_keeps_retirement_terminal_not_auth_retry() {
     let f = Fixture::new(true);
     let t = Fake::with(vec![success()]);
     let result = f
         .lease(0)
         .await
-        .dispatch_with(body(), Duration::from_secs(3), &t, 1000)
+        .dispatch_protocol_with(body(), Duration::from_secs(3), &t, 1000)
         .await
         .unwrap();
     f.session.set_blocked(true);
@@ -1333,7 +1394,7 @@ async fn structured_sse_typed_fence_keeps_retirement_terminal_not_auth_retry() {
     assert_eq!(t.count(), 1);
 }
 
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn workbuddy_finish_reason_rejects_late_content_reasoning_role_or_new_tool() {
     let first = delta(json!({"content":"visible partial output"}));
     let finish = event(json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}));
@@ -1349,7 +1410,7 @@ async fn workbuddy_finish_reason_rejects_late_content_reasoning_role_or_new_tool
         assert_eq!(emitted, first);
     }
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn workbuddy_finish_reason_rejects_general_error_frames() {
     let finish = event(json!({"choices":[{"delta":{},"finish_reason":"stop"}]}));
     for error in [
@@ -1362,7 +1423,7 @@ async fn workbuddy_finish_reason_rejects_general_error_frames() {
             .is_empty());
     }
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn workbuddy_done_is_withheld_until_the_following_tail_is_checked() {
     let first = delta(json!({"content":"visible partial output"}));
     let emitted = semantic_case(
@@ -1379,7 +1440,7 @@ async fn workbuddy_done_is_withheld_until_the_following_tail_is_checked() {
         "DONE must not escape before the native EOF is validated"
     );
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn workbuddy_finished_tools_usage_and_done_keep_their_original_wire_order() {
     for (first, reason) in [
         (delta(json!({"content":"complete answer"})), "stop"),
@@ -1408,7 +1469,7 @@ async fn workbuddy_finished_tools_usage_and_done_keep_their_original_wire_order(
     }
 }
 
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn expiry_owner_model_discovery_and_meter_join_require_same_credential_generation() {
     use crate::relay::entitlement_expiry::*;
     let f = Fixture::new(true);
@@ -1418,7 +1479,11 @@ async fn expiry_owner_model_discovery_and_meter_join_require_same_credential_gen
         "agents":[{"name":"cli","models":["m","free"]}],
         "models":[{"id":"m","credits":"x0.03"},{"id":"free","credits":"0"}],"modelPromotions":[]}}),
     )]);
-    f.lease(0).await.models_with(&t, 1000).await.unwrap();
+    f.lease(0)
+        .await
+        .models_protocol_with(&t, 1000)
+        .await
+        .unwrap();
     f.change(|rows| {
         let empty=json!({"code":0,"data":{"Accounts":[],"TotalCount":0}});
         let summary=json!({"code":0,"data":{"Packages":[{"PackageCode":"p","CapacityUnit":"credits"}]}});
@@ -1506,7 +1571,11 @@ async fn expiry_review_snapshot_case(future: bool) {
         json!({"code":0,"data":{
         "agents":[{"name":"cli","models":["m"]}],"models":[{"id":"m","credits":"x0.03"}],"modelPromotions":[]}}),
     )]);
-    f.lease(0).await.models_with(&t, 1000).await.unwrap();
+    f.lease(0)
+        .await
+        .models_protocol_with(&t, 1000)
+        .await
+        .unwrap();
     f.change(|rows| {
         rows[0].credits=super::super::credits::normalize(
             &json!({"code":0,"data":{"Packages":[{"PackageCode":"p","CapacityUnit":"credits"}]}}),
@@ -1529,11 +1598,185 @@ async fn expiry_review_snapshot_case(future: bool) {
         .iter()
         .all(|c| matches!(c.priority, Priority::Unknown(_))));
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn expiry_review_future_model_observation_cannot_hide_behind_older_credits() {
     expiry_review_snapshot_case(true).await;
 }
-#[tokio::test]
+#[cfg_attr(test, tokio::test)]
 async fn expiry_review_new_meter_generation_does_not_relabel_old_model_snapshot() {
     expiry_review_snapshot_case(false).await;
+}
+
+// Only the external small target calls this; cfg(test) still registers every
+// original tokio test unchanged, without nested test-runtime invocation.
+#[cfg(all(feature = "test-hooks", not(test)))]
+pub(crate) async fn verify_private_protocol(case: &str) {
+    match case {
+        "two_selected_accounts_keep_distinct_new_grants_and_preserve_body" => {
+            two_selected_accounts_keep_distinct_new_grants_and_preserve_body().await
+        }
+        "legacy_rows_are_not_inference_authorized_and_keep_existing_ui_dto" => {
+            legacy_rows_are_not_inference_authorized_and_keep_existing_ui_dto().await
+        }
+        "explicit_new_grant_binds_only_matching_original_row_and_keeps_checkin" => {
+            explicit_new_grant_binds_only_matching_original_row_and_keeps_checkin().await
+        }
+        "wrong_uid_or_domain_or_platform_never_binds_or_migrates" => {
+            wrong_uid_or_domain_or_platform_never_binds_or_migrates().await
+        }
+        "stale_login_flow_cannot_replace_a_newer_grant" => {
+            stale_login_flow_cannot_replace_a_newer_grant().await
+        }
+        "unsafe_authorization_urls_are_rejected_without_following" => {
+            unsafe_authorization_urls_are_rejected_without_following().await
+        }
+        "models_use_only_live_cli_ids_without_static_fallback_or_pricing" => {
+            models_use_only_live_cli_ids_without_static_fallback_or_pricing().await
+        }
+        "explicit_401_refreshes_same_grant_once_and_never_sends_old_checkin_token" => {
+            explicit_401_refreshes_same_grant_once_and_never_sends_old_checkin_token().await
+        }
+        "expiry_refresh_uses_the_only_replay_budget_and_preserves_second_401" => {
+            expiry_refresh_uses_the_only_replay_budget_and_preserves_second_401().await
+        }
+        "concurrent_refreshes_spend_a_refresh_token_once" => {
+            concurrent_refreshes_spend_a_refresh_token_once().await
+        }
+        "refresh_identity_mismatch_is_rejected_without_overwriting" => {
+            refresh_identity_mismatch_is_rejected_without_overwriting().await
+        }
+        "refusals_are_terminal_structured_and_never_rewrite_replay_or_rotate" => {
+            refusals_are_terminal_structured_and_never_rewrite_replay_or_rotate().await
+        }
+        "status_429_and_retry_after_are_preserved_but_secret_headers_are_removed" => {
+            status_429_and_retry_after_are_preserved_but_secret_headers_are_removed().await
+        }
+        "success_headers_are_allowlisted_and_sse_bytes_unchanged" => {
+            success_headers_are_allowlisted_and_sse_bytes_unchanged().await
+        }
+        "final_fence_rejects_previously_primed_or_buffered_bytes_after_retirement" => {
+            final_fence_rejects_previously_primed_or_buffered_bytes_after_retirement().await
+        }
+        "blocked_then_unblocked_session_never_revives_old_lease" => {
+            blocked_then_unblocked_session_never_revives_old_lease().await
+        }
+        "post_output_stream_failure_is_sanitized_and_never_replayed" => {
+            post_output_stream_failure_is_sanitized_and_never_replayed().await
+        }
+        "nonstream_request_is_rejected_before_network_instead_of_silently_rewritten" => {
+            nonstream_request_is_rejected_before_network_instead_of_silently_rewritten().await
+        }
+        "response_echo_across_chunks_is_withheld_then_terminated_without_replay" => {
+            response_echo_across_chunks_is_withheld_then_terminated_without_replay().await
+        }
+        "declared_compression_is_rejected_and_requests_ask_identity" => {
+            declared_compression_is_rejected_and_requests_ask_identity().await
+        }
+        "fixture_origin_and_owner_mismatch_never_fall_back_to_production" => {
+            fixture_origin_and_owner_mismatch_never_fall_back_to_production().await
+        }
+        "every_documented_denial_envelope_blocks_401_refresh_and_preserves_exact_codes" => {
+            every_documented_denial_envelope_blocks_401_refresh_and_preserves_exact_codes().await
+        }
+        "pending_refresh_is_single_flight_and_second_lease_reads_persisted_rotation" => {
+            pending_refresh_is_single_flight_and_second_lease_reads_persisted_rotation().await
+        }
+        "late_refresh_response_cannot_revive_retired_original_grant" => {
+            late_refresh_response_cannot_revive_retired_original_grant().await
+        }
+        "waiting_token_response_after_session_epoch_change_is_not_published" => {
+            waiting_token_response_after_session_epoch_change_is_not_published().await
+        }
+        "incomplete_error_body_has_a_bounded_terminal_deadline_without_refresh" => {
+            incomplete_error_body_has_a_bounded_terminal_deadline_without_refresh().await
+        }
+        "cancelled_pending_profile_late_response_cannot_publish_grant" => {
+            cancelled_pending_profile_late_response_cannot_publish_grant().await
+        }
+        "closing_old_flow_cannot_cancel_reopened_flow_or_other_original_account" => {
+            closing_old_flow_cannot_cancel_reopened_flow_or_other_original_account().await
+        }
+        "cancel_publish_race_linearizes_and_cancel_never_revokes_published_grant" => {
+            cancel_publish_race_linearizes_and_cancel_never_revokes_published_grant().await
+        }
+        "inference_status_uses_only_original_private_grant_and_safe_dto" => {
+            inference_status_uses_only_original_private_grant_and_safe_dto().await
+        }
+        "discovery_rejects_secret_echo_in_decoded_model_id_or_label_and_nonidentity" => {
+            discovery_rejects_secret_echo_in_decoded_model_id_or_label_and_nonidentity().await
+        }
+        "decoded_unicode_first_event_sets_terminal_opaque_fence_without_output" => {
+            decoded_unicode_first_event_sets_terminal_opaque_fence_without_output().await
+        }
+        "decoded_secret_split_across_delta_events_holds_original_prefix" => {
+            decoded_secret_split_across_delta_events_holds_original_prefix().await
+        }
+        "reasoning_aliases_and_original_trimmed_tool_reasoning_are_screened" => {
+            reasoning_aliases_and_original_trimmed_tool_reasoning_are_screened().await
+        }
+        "nested_unicode_tool_arguments_are_held_until_complete_and_screened" => {
+            nested_unicode_tool_arguments_are_held_until_complete_and_screened().await
+        }
+        "independent_tools_and_content_fields_never_join_into_false_secret" => {
+            independent_tools_and_content_fields_never_join_into_false_secret().await
+        }
+        "semantic_screen_preserves_normal_multibyte_and_line_endings_byte_for_byte" => {
+            semantic_screen_preserves_normal_multibyte_and_line_endings_byte_for_byte().await
+        }
+        "single_choice_capability_rejects_n_before_network_and_other_choice_on_response" => {
+            single_choice_capability_rejects_n_before_network_and_other_choice_on_response().await
+        }
+        "event_and_total_holdback_limits_fail_closed_with_terminal_fence" => {
+            event_and_total_holdback_limits_fail_closed_with_terminal_fence().await
+        }
+        "malformed_sse_or_incomplete_tool_json_never_becomes_successful_eof" => {
+            malformed_sse_or_incomplete_tool_json_never_becomes_successful_eof().await
+        }
+        "clean_eof_without_a_terminal_signal_is_not_success" => {
+            clean_eof_without_a_terminal_signal_is_not_success().await
+        }
+        "explicit_terminal_signals_preserve_clean_eof_wire_bytes" => {
+            explicit_terminal_signals_preserve_clean_eof_wire_bytes().await
+        }
+        "finish_reason_only_keeps_usage_tail_and_completed_tools" => {
+            finish_reason_only_keeps_usage_tail_and_completed_tools().await
+        }
+        "split_leading_think_and_reasoning_alias_follow_original_late_parse_order" => {
+            split_leading_think_and_reasoning_alias_follow_original_late_parse_order().await
+        }
+        "completed_tool_rejects_late_argument_fragments_without_reinterpretation" => {
+            completed_tool_rejects_late_argument_fragments_without_reinterpretation().await
+        }
+        "structured_sse_denials_preserve_safe_terminal_meaning_before_and_after_output" => {
+            structured_sse_denials_preserve_safe_terminal_meaning_before_and_after_output().await
+        }
+        "structured_sse_denial_detection_never_matches_messages_or_code_prefixes" => {
+            structured_sse_denial_detection_never_matches_messages_or_code_prefixes().await
+        }
+        "structured_sse_typed_fence_keeps_retirement_terminal_not_auth_retry" => {
+            structured_sse_typed_fence_keeps_retirement_terminal_not_auth_retry().await
+        }
+        "workbuddy_finish_reason_rejects_late_content_reasoning_role_or_new_tool" => {
+            workbuddy_finish_reason_rejects_late_content_reasoning_role_or_new_tool().await
+        }
+        "workbuddy_finish_reason_rejects_general_error_frames" => {
+            workbuddy_finish_reason_rejects_general_error_frames().await
+        }
+        "workbuddy_done_is_withheld_until_the_following_tail_is_checked" => {
+            workbuddy_done_is_withheld_until_the_following_tail_is_checked().await
+        }
+        "workbuddy_finished_tools_usage_and_done_keep_their_original_wire_order" => {
+            workbuddy_finished_tools_usage_and_done_keep_their_original_wire_order().await
+        }
+        "expiry_owner_model_discovery_and_meter_join_require_same_credential_generation" => {
+            expiry_owner_model_discovery_and_meter_join_require_same_credential_generation().await
+        }
+        "expiry_review_future_model_observation_cannot_hide_behind_older_credits" => {
+            expiry_review_future_model_observation_cannot_hide_behind_older_credits().await
+        }
+        "expiry_review_new_meter_generation_does_not_relabel_old_model_snapshot" => {
+            expiry_review_new_meter_generation_does_not_relabel_old_model_snapshot().await
+        }
+        _ => panic!("unknown private protocol regression"),
+    }
 }

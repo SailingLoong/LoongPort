@@ -792,3 +792,18 @@ it("disables mutations in the preserved advanced child while retaining read-only
     screen.getByRole("button", { name: "applications.use Premium" }),
   ).toBeDisabled();
 });
+
+it("keeps the old paused WorkBuddy row visible without enabling or reordering it", () => {
+  state.data.configurations[0].canSelect = false;
+  state.data.configurations[0].presentation.switchBlockedReason =
+    "workbuddyInferencePaused";
+  const before = JSON.stringify(state.data.configurations);
+  render(<ApplicationWorkspace {...props} />);
+  expect(screen.getByText("workbuddy.inference.state.paused")).toBeVisible();
+  expect(
+    screen.getByRole("button", { name: /applications.use Standard/ }),
+  ).toBeDisabled();
+  expect(JSON.stringify(state.data.configurations)).toBe(before);
+  expect(state.select).not.toHaveBeenCalled();
+  expect(state.setOrder).not.toHaveBeenCalled();
+});

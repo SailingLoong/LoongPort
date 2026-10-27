@@ -12,6 +12,20 @@ pub(crate) enum AccountKind {
     Trae,
 }
 
+/// Fixed capability withdrawal for both login realms sharing the WorkBuddy
+/// model transport. Account login, refresh and daily claim do not call this.
+pub(crate) fn workbuddy_model_admission() -> Result<(), ProxyError> {
+    Err(ProxyError::InvalidRequest(
+        "workbuddy.inference_paused".into(),
+    ))
+}
+
+pub(crate) fn uses_workbuddy_model_route(provider: &Provider) -> bool {
+    !super::qoder_http::enabled(provider)
+        && (matches!(selected(provider), Some((AccountKind::WorkBuddy, _)))
+            || super::providers::workbuddy_acp::enabled(provider))
+}
+
 pub(crate) fn selected(provider: &Provider) -> Option<(AccountKind, String)> {
     let meta = provider.meta.as_ref()?;
     [
@@ -172,6 +186,8 @@ impl PreparedAccount {
                 .map_err(|_| ProxyError::Internal("trae.account_unavailable".into()))?,
             ),
             AccountKind::WorkBuddy => {
+                crate::workbuddy::inference::require_model_requests()
+                    .map_err(crate::workbuddy::inference::owner_error)?;
                 let lease = if let Some(
                     crate::services::service_source_identity::NativeStamp::WorkBuddy(expected),
                 ) =

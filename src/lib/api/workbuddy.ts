@@ -42,13 +42,14 @@ export type WorkBuddyFailure =
   | "unsupportedContext"
   | "storageUnavailable"
   | "busy"
-  | "expiredAuthorization";
+  | "expiredAuthorization"
+  | "inferencePaused";
 export interface WorkBuddyClaimResult {
   account: WorkBuddyAccount;
   error: WorkBuddyFailure | null;
 }
 export type WorkBuddyInferenceState =
-  "needsAuthorization" | "ready" | "refreshRequired" | "expired";
+  "needsAuthorization" | "ready" | "refreshRequired" | "expired" | "paused";
 export interface WorkBuddyInferenceAccount {
   id: string;
   state: WorkBuddyInferenceState;

@@ -93,6 +93,7 @@ impl std::fmt::Debug for NativeStamp {
 /// Only original local-owner facts, never an upstream error classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LocalNativeUnavailable {
+    PolicyPaused,
     UserRevoked,
     AuthorizationAbsent,
     CredentialsExpired,

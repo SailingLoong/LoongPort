@@ -114,11 +114,14 @@ impl protocol::Transport for LoginTransport {
     }
 }
 async fn setup() -> (Arc<SecretSession>, String) {
+    setup_domain(Domain::CodeBuddy).await
+}
+async fn setup_domain(domain: Domain) -> (Arc<SecretSession>, String) {
     let session = SecretSession::ephemeral().unwrap();
     let t=LoginTransport(Mutex::new(vec![
       (protocol::Endpoint::AuthState,json!({"code":0,"data":{"state":"synthetic","authUrl":"https://copilot.tencent.com/login?state=synthetic"}})),
-      (protocol::Endpoint::AuthToken,json!({"code":0,"data":{"accessToken":"synthetic-access","refreshToken":"synthetic-refresh","expiresIn":3600,"domain":"www.codebuddy.cn"}})),
-      (protocol::Endpoint::Profile,json!({"code":0,"data":{"uid":"synthetic-account","domain":"www.codebuddy.cn"}})),
+      (protocol::Endpoint::AuthToken,json!({"code":0,"data":{"accessToken":"synthetic-access","refreshToken":"synthetic-refresh","expiresIn":3600,"domain":domain.host()}})),
+      (protocol::Endpoint::Profile,json!({"code":0,"data":{"uid":"synthetic-account","domain":domain.host()}})),
     ].into()));
     let login = authorization::begin(&session, &t, NOW).await.unwrap();
     authorization::finish(&session, &t, &login.flow_id, NOW)
@@ -152,7 +155,183 @@ fn reads(status: bool) -> Vec<(Endpoint, u16, Value)> {
         ),
     ]
 }
+async fn verify_paused(case: &str, domain: Domain) {
+    if case == "paused_acp" {
+        crate::proxy::providers::workbuddy_acp::pause_fixture::verify().await;
+        return;
+    }
+    let (session, id) = setup_domain(domain).await;
+    let binding = store::binding(&session).unwrap();
+    // An existing, explicitly enabled pre-pause account, not a newly granted permission.
+    if case != "paused_claim" && case != "paused_refresh" {
+        let mut rows = store::load(&session, &binding).unwrap();
+        rows[0].inference_consent = Some(true);
+        store::save(&session, &binding, rows).unwrap();
+    }
+    let owned = crate::secrets::owned_file::OwnedFile::registered(store::FILE).unwrap();
+    let before = std::fs::read(owned.path(&session)).unwrap();
+    match case {
+        "paused_lease" => {
+            let result = Lease::acquire(session.clone(), &id).await;
+            assert_eq!(
+                serde_json::to_value(result.err()).unwrap(),
+                json!("inferencePaused")
+            );
+        }
+        "paused_consent" => {
+            let result = set_inference_consent(&session, &id, true).await;
+            assert_eq!(
+                serde_json::to_value(result.err()).unwrap(),
+                json!("inferencePaused")
+            );
+        }
+        "paused_login" => {
+            let network = Upstream::new(vec![(
+                Endpoint::State,
+                200,
+                json!({"code":0,"data":{"state":"synthetic","authUrl":"https://copilot.tencent.com/login?state=synthetic"}}),
+            )]);
+            let result =
+                PendingAuthorization::begin_with(session.clone(), &id, &network, NOW).await;
+            assert!(
+                network.calls.lock().unwrap().is_empty(),
+                "paused inference login must not contact upstream"
+            );
+            assert_eq!(
+                serde_json::to_value(result.err()).unwrap(),
+                json!("inferencePaused")
+            );
+        }
+        "paused_state" => {
+            let rows = list_inference_accounts(&session).await.unwrap();
+            assert_eq!(rows[0].id, id);
+            assert_eq!(
+                serde_json::to_value(rows[0].state).unwrap(),
+                json!("paused")
+            );
+        }
+        "paused_final_dispatch" => {
+            // Account-purpose grant may refresh/check in, but is never a model capability.
+            let lease = Lease::acquire_for_purpose(session.clone(), &id, false)
+                .await
+                .unwrap();
+            let network = Upstream::new(vec![(Endpoint::Chat, 200, json!({}))]);
+            let result = lease.dispatch_with(json!({"model":"synthetic-model","stream":true,"messages":[{"role":"user","content":"synthetic"}]}), Duration::from_secs(1), &network, NOW).await;
+            assert!(
+                network.calls.lock().unwrap().is_empty(),
+                "paused final dispatch must create no model request"
+            );
+            assert!(result.is_err());
+        }
+        "paused_models_before_refresh" => {
+            let mut lease = Lease::acquire_for_purpose(session.clone(), &id, false)
+                .await
+                .unwrap();
+            let network = Upstream::new(vec![
+                (
+                    Endpoint::Refresh,
+                    200,
+                    json!({"code":0,"data":{"accessToken":"synthetic-rotated","refreshToken":"synthetic-refresh-2","expiresIn":3600}}),
+                ),
+                (
+                    Endpoint::Models,
+                    200,
+                    json!({"code":0,"data":{"models":[]}}),
+                ),
+            ]);
+            let result = lease.models_with(&network, NOW + 3_600_000).await;
+            assert!(
+                network.calls.lock().unwrap().is_empty(),
+                "paused model discovery must not refresh or query upstream"
+            );
+            assert!(result.is_err());
+        }
+        "paused_refresh" => {
+            let mut replies = vec![(
+                Endpoint::Refresh,
+                200,
+                json!({"code":0,"data":{"accessToken":"synthetic-rotated","refreshToken":"synthetic-refresh-2","expiresIn":3600}}),
+            )];
+            replies.extend(reads(false));
+            let network = Upstream::new(replies);
+            let clock = Fixed(NOW + 3_600_000);
+            let view = Engine {
+                session: &session,
+                transport: &network,
+                clock: &clock,
+            }
+            .refresh(&id)
+            .await
+            .unwrap();
+            assert_eq!(view.credits.total_remaining, Some(10.0));
+            let calls = network.calls.lock().unwrap();
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|(e, _)| *e == Endpoint::Refresh)
+                    .count(),
+                1
+            );
+            assert!(calls
+                .iter()
+                .all(|(e, _)| matches!(e, Endpoint::Refresh | Endpoint::Account(_))));
+            assert!(network.replies.lock().unwrap().is_empty());
+            return;
+        }
+        "paused_claim" => {
+            let mut replies = vec![reads(false).pop().unwrap()];
+            replies.extend(reads(false).into_iter().take(3));
+            replies.push((
+                Endpoint::Account(protocol::Endpoint::Claim),
+                200,
+                json!({"code":0,"credit":7}),
+            ));
+            replies.push(reads(true).pop().unwrap());
+            replies.extend(reads(true).into_iter().take(3));
+            replies.push(reads(true).pop().unwrap());
+            replies.extend(reads(true).into_iter().take(3));
+            let network = Upstream::new(replies);
+            let clock = Fixed(NOW);
+            let engine = Engine {
+                session: &session,
+                transport: &network,
+                clock: &clock,
+            };
+            engine.claim(&id).await.unwrap();
+            engine.claim(&id).await.unwrap();
+            let saved = store::load(&session, &binding).unwrap().remove(0);
+            assert_eq!(saved.attempted_day, Some(today(NOW)));
+            assert!(!saved.inference_allowed());
+            let calls = network.calls.lock().unwrap();
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|(e, _)| *e == Endpoint::Account(protocol::Endpoint::Claim))
+                    .count(),
+                1
+            );
+            assert!(calls.iter().all(|(e, _)| matches!(e, Endpoint::Account(_))));
+            assert!(network.replies.lock().unwrap().is_empty());
+            return;
+        }
+        _ => panic!("unknown pause case"),
+    }
+    assert_eq!(
+        std::fs::read(owned.path(&session)).unwrap(),
+        before,
+        "pause must not rewrite account data"
+    );
+}
+
 pub(crate) async fn verify(case: &str) {
+    if let Some(case) = case.strip_prefix("codebuddy_") {
+        verify_paused(case, Domain::CodeBuddy).await;
+        return;
+    }
+    if case.starts_with("paused_") {
+        verify_paused(case, Domain::WorkBuddy).await;
+        return;
+    }
     assert!(matches!(
         case,
         "consent"
@@ -304,10 +483,11 @@ pub(crate) async fn verify(case: &str) {
                 ),
             ]),
         };
-        let mut pending = PendingAuthorization::begin_with(session.clone(), &id, &network, NOW)
-            .await
-            .unwrap();
-        assert!(pending.poll_with(&network, NOW + 1).await.is_err());
+        let mut pending =
+            PendingAuthorization::begin_protocol_with(session.clone(), &id, &network, NOW)
+                .await
+                .unwrap();
+        assert!(pending.poll_protocol_with(&network, NOW + 1).await.is_err());
         let after = store::load(&session, &binding).unwrap().remove(0);
         assert!(!after.inference_allowed());
         assert_eq!(
@@ -323,15 +503,27 @@ pub(crate) async fn verify(case: &str) {
         rows[0].inference = None;
         rows[0].account.token = "synthetic-legacy-access".into();
         store::save(&session, &binding, rows).unwrap();
-        assert!(!set_inference_consent(&session, &id, true).await.unwrap());
+        assert_eq!(
+            set_inference_consent(&session, &id, true).await,
+            Err(Failure::InferencePaused)
+        );
         let rows = store::load(&session, &binding).unwrap();
         assert!(!rows[0].shared_authorization);
         assert_eq!(rows[0].account.token, "synthetic-legacy-access");
         return;
     }
     if case == "consent" {
-        assert!(set_inference_consent(&session, &id, true).await.unwrap());
-        let lease = Lease::acquire(session.clone(), &id).await.unwrap();
+        // Historical enabled consent, not a new model grant through public API.
+        let mut rows = store::load(&session, &binding).unwrap();
+        rows[0].inference_consent = Some(true);
+        store::save(&session, &binding, rows).unwrap();
+        assert_eq!(
+            set_inference_consent(&session, &id, true).await,
+            Err(Failure::InferencePaused)
+        );
+        let lease = Lease::acquire_with_expected(session.clone(), &id, true, None)
+            .await
+            .unwrap();
         let network = Upstream::new(reads(false));
         let clock = Fixed(NOW);
         let engine = Engine {
@@ -369,8 +561,9 @@ pub(crate) async fn verify(case: &str) {
         return;
     }
     if case == "refresh" {
-        assert!(set_inference_consent(&session, &id, true).await.unwrap());
-        let mut lease = Lease::acquire(session.clone(), &id).await.unwrap();
+        let mut lease = Lease::acquire_for_purpose(session.clone(), &id, false)
+            .await
+            .unwrap();
         let mut account_lease = Lease::acquire_for_purpose(session.clone(), &id, false)
             .await
             .unwrap();
@@ -380,17 +573,16 @@ pub(crate) async fn verify(case: &str) {
             json!({"code":0,"data":{"accessToken":"synthetic-rotated","refreshToken":"synthetic-refresh-2","expiresIn":3600}}),
         )];
         replies.extend(reads(false));
-        replies.push((Endpoint::Chat, 200, json!({})));
         let network = Upstream::new(replies);
         let clock = Fixed(NOW + 3_600_000);
         // Both consumers capture the old credential. The upstream yields so the
         // second consumer waits on the real owner gate, not a synthetic counter.
-        let (account_result, inference_result) = tokio::join!(
+        let (account_result, second_account_result) = tokio::join!(
             account_lease.refresh(&network, clock.now_ms()),
             lease.refresh(&network, clock.now_ms())
         );
         account_result.unwrap();
-        inference_result.unwrap();
+        second_account_result.unwrap();
         Engine {
             session: &session,
             transport: &network,
@@ -400,9 +592,16 @@ pub(crate) async fn verify(case: &str) {
         .await
         .unwrap();
         assert_eq!(lease.grant.access, "synthetic-rotated");
-        let dispatched = lease.dispatch_with(json!({"model":"synthetic-model","stream":true,"messages":[{"role":"user","content":"synthetic"}]}), Duration::from_secs(1), &network, clock.now_ms()).await.unwrap();
-        assert!(dispatched.response.status().is_success());
-        dispatched.response.bytes_with_limit(4096).await.unwrap();
+        let dispatched = lease.dispatch_with(json!({"model":"synthetic-model","stream":true,"messages":[{"role":"user","content":"synthetic"}]}), Duration::from_secs(1), &network, clock.now_ms()).await;
+        assert!(
+            matches!(dispatched, Err(ProxyError::InvalidRequest(reason)) if reason == "workbuddy.inference_paused")
+        );
+        assert!(network
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(e, _)| *e != Endpoint::Chat));
         assert_eq!(
             network
                 .calls
@@ -476,7 +675,10 @@ pub(crate) async fn verify(case: &str) {
         });
         rows[0].attempted_day = Some(today(NOW));
         store::save(&session, &binding, rows).unwrap();
-        assert!(set_inference_consent(&session, &id, true).await.unwrap());
+        assert_eq!(
+            set_inference_consent(&session, &id, true).await,
+            Err(Failure::InferencePaused)
+        );
         let mut replies = vec![reads(false).pop().unwrap()];
         replies.extend(reads(false).into_iter().take(3));
         let network = Upstream::new(replies);

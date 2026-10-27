@@ -1,3 +1,4 @@
+//! Retained private ACP protocol/parser regression; public forward is paused.
 use super::*;
 use axum::{extract::State, response::IntoResponse, routing::get, Json};
 use futures::StreamExt;
@@ -138,7 +139,7 @@ pub(crate) async fn server(stop: &'static str) -> (Provider, Mock, tokio::task::
 #[tokio::test]
 async fn workbuddy_acp_text_actual_http_stream_discards_load_replay() {
     let (row, state, task) = server("end_turn").await;
-    let response = forward(
+    let response = forward_protocol(
         &AppType::Claude,
         &http::Method::POST,
         &row,
@@ -168,7 +169,7 @@ async fn workbuddy_acp_text_actual_http_stream_discards_load_replay() {
 #[tokio::test]
 async fn workbuddy_acp_text_refusal_never_emits_success_stop() {
     let (row, _, task) = server("refusal").await;
-    let response = forward(
+    let response = forward_protocol(
         &AppType::Claude,
         &http::Method::POST,
         &row,
@@ -203,7 +204,7 @@ async fn workbuddy_acp_text_rejects_unbound_account_and_unsupported_model() {
         .as_mut()
         .unwrap()
         .account_id = Some("other".into());
-    assert!(forward(
+    assert!(forward_protocol(
         &AppType::Claude,
         &http::Method::POST,
         &row,
@@ -215,7 +216,7 @@ async fn workbuddy_acp_text_rejects_unbound_account_and_unsupported_model() {
     let row = provider("http://127.0.0.1:1/session".into());
     let mut body = request(true);
     body["model"] = json!("other");
-    assert!(forward(
+    assert!(forward_protocol(
         &AppType::Claude,
         &http::Method::POST,
         &row,
@@ -229,7 +230,7 @@ async fn workbuddy_acp_text_rejects_unbound_account_and_unsupported_model() {
 #[tokio::test]
 async fn workbuddy_acp_text_rejects_missing_load_capability_before_loading() {
     let (row, state, task) = server("no_load").await;
-    assert!(forward(
+    assert!(forward_protocol(
         &AppType::Claude,
         &http::Method::POST,
         &row,
@@ -298,7 +299,7 @@ async fn workbuddy_acp_text_active_session_guard_releases_on_drop_and_isolates_a
 #[tokio::test]
 async fn workbuddy_acp_text_permission_request_is_terminal_without_reply() {
     let (row, state, task) = server("permission").await;
-    let response = forward(
+    let response = forward_protocol(
         &AppType::Claude,
         &http::Method::POST,
         &row,
@@ -320,7 +321,7 @@ async fn workbuddy_acp_text_nonstream_uses_existing_conversion_and_unique_ids() 
     let (row, _, task) = server("end_turn").await;
     let mut ids = vec![];
     for _ in 0..2 {
-        let response = forward(
+        let response = forward_protocol(
             &AppType::Claude,
             &http::Method::POST,
             &row,
@@ -341,7 +342,7 @@ async fn workbuddy_acp_text_nonstream_uses_existing_conversion_and_unique_ids() 
 #[tokio::test]
 async fn workbuddy_acp_text_drop_closes_http_and_releases_account_session() {
     let (row, state, task) = server("slow").await;
-    let response = forward(
+    let response = forward_protocol(
         &AppType::Claude,
         &http::Method::POST,
         &row,
@@ -361,7 +362,7 @@ async fn workbuddy_acp_text_drop_closes_http_and_releases_account_session() {
     })
     .await
     .unwrap();
-    assert!(forward(
+    assert!(forward_protocol(
         &AppType::Claude,
         &http::Method::POST,
         &row,
@@ -427,7 +428,7 @@ async fn workbuddy_acp_text_rejects_oversized_event_id_without_echoing_it() {
 #[tokio::test]
 async fn workbuddy_acp_text_cancelled_round_and_ticket_url_are_not_accepted() {
     let (row, _, task) = server("cancelled").await;
-    let response = forward(
+    let response = forward_protocol(
         &AppType::Claude,
         &http::Method::POST,
         &row,

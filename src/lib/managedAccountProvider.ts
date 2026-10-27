@@ -8,6 +8,7 @@ export interface ManagedInferenceAccount {
   id: string;
   label: string;
   available: boolean;
+  inferencePaused?: boolean;
 }
 
 /** Original native catalog/protocol text bounds, not an entitlement check. */

@@ -1088,6 +1088,33 @@ impl RequestForwarder {
             // Preserve this candidate's explicit intent even when admission or
             // configuration fails before final request preparation.
             free_only |= super::free_models::configured(&provider.settings_config);
+            if super::managed_accounts::uses_workbuddy_model_route(provider) {
+                // A paused capability is excluded before any account attempt,
+                // refresh, permit or network request. Only an automatic route
+                // may continue to its already-selected remaining candidates.
+                super::free_models::enforce(
+                    &mut free_only,
+                    &body,
+                    &body,
+                    "",
+                    super::free_models::configured(&provider.settings_config),
+                )
+                .map_err(|error| ForwardError {
+                    error,
+                    provider: Some(provider.clone()),
+                })?;
+                if let Err(error) = super::managed_accounts::workbuddy_model_admission() {
+                    if self.automatic_failover {
+                        last_error = Some(error);
+                        last_provider = Some(provider.clone());
+                        continue;
+                    }
+                    return Err(ForwardError {
+                        error,
+                        provider: Some(provider.clone()),
+                    });
+                }
+            }
             if let Err(error) = super::managed_accounts::validate_capabilities(
                 provider,
                 &body,

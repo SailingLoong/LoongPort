@@ -418,6 +418,15 @@ pub struct ProxyService {
     codex_oauth_manager: Arc<CodexOAuthManager>,
 }
 
+/// Internal caller purpose only; never accepted from IPC/serialized settings.
+/// Imports preserve already-selected data, while a new explicit selection must
+/// not publish an upstream capability that has been paused.
+#[derive(Clone, Copy)]
+pub(crate) enum HotSwitchIntent {
+    ExplicitSelection,
+    PreserveImportedTarget,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HotSwitchOutcome {
     pub logical_target_changed: bool,
@@ -3720,6 +3729,7 @@ impl ProxyService {
             provider_id,
             previous.as_ref(),
             previous_local.as_deref(),
+            HotSwitchIntent::ExplicitSelection,
         )
         .await
     }
@@ -3732,6 +3742,7 @@ impl ProxyService {
         provider_id: &str,
         previous_provider: Option<&Provider>,
         previous_local_provider_id: Option<&str>,
+        intent: HotSwitchIntent,
     ) -> Result<HotSwitchOutcome, String> {
         let app_type_enum =
             AppType::from_str(app_type).map_err(|_| format!("无效的应用类型: {app_type}"))?;
@@ -3740,6 +3751,12 @@ impl ProxyService {
             .get_provider_by_id(provider_id, app_type)
             .map_err(|e| format!("读取供应商失败: {e}"))?
             .ok_or_else(|| format!("供应商不存在: {provider_id}"))?;
+
+        if matches!(intent, HotSwitchIntent::ExplicitSelection)
+            && crate::proxy::managed_accounts::uses_workbuddy_model_route(&provider)
+        {
+            return Err("workbuddy.inference_paused".into());
+        }
 
         // Build one read-only projection for both live and restore backup. The
         // stored tier default stays intact when an application preference applies.

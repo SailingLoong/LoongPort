@@ -344,7 +344,11 @@ pub async fn verify_minimax_shared_flow(session: Arc<SecretSession>, case: &str)
 
 #[cfg(all(feature = "gui", feature = "test-hooks"))]
 pub async fn verify_workbuddy_shared_flow(session: Arc<SecretSession>, case: &str) {
-    let state = direct_state(session, None, &[AppType::Claude, AppType::Codex]).unwrap();
+    let state = if case == "paused_legacy_select" {
+        source17_state(session, None).unwrap()
+    } else {
+        direct_state(session, None, &[AppType::Claude, AppType::Codex]).unwrap()
+    };
     crate::workbuddy::shared_routing_fixture::verify(&state, case).await;
 }
 
@@ -466,4 +470,16 @@ pub fn verify_remote_plaintext_auto_attempt(case: &str) {
     crate::secrets::transition::content_tests::remote_plaintext_transport::run_auto_attempt_case(
         case,
     );
+}
+
+/// Original loopback-only WorkBuddy public consumers; no model capability bypass.
+#[cfg(all(feature = "gui", feature = "test-hooks", not(test)))]
+pub async fn verify_workbuddy_public_pause(case: &str) {
+    crate::proxy::server::workbuddy_pool_tests::verify(case).await;
+}
+
+/// Original private protocol tests: ephemeral owners and synthetic transports only.
+#[cfg(all(feature = "gui", feature = "test-hooks", not(test)))]
+pub async fn verify_workbuddy_private_protocol(case: &str) {
+    crate::workbuddy::inference::verify_private_protocol(case).await;
 }

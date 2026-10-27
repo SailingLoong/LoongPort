@@ -208,8 +208,19 @@ fn stream_error(auth: bool) -> std::io::Error {
         "workbuddy.stream_interrupted"
     })
 }
-fn owner_error(_: Failure) -> ProxyError {
-    ProxyError::AuthError("workbuddy.authorization_unavailable".into())
+/// Both saved login realms use the same WorkBuddy model bridge. Account login,
+/// refresh and domestic check-in retain their separate original purpose.
+/// This is a fixed capability withdrawal, not a user-editable feature switch.
+pub(crate) fn require_model_requests() -> Result<(), Failure> {
+    crate::proxy::managed_accounts::workbuddy_model_admission()
+        .map_err(|_| Failure::InferencePaused)
+}
+pub(crate) fn owner_error(failure: Failure) -> ProxyError {
+    if failure == Failure::InferencePaused {
+        ProxyError::InvalidRequest("workbuddy.inference_paused".into())
+    } else {
+        ProxyError::AuthError("workbuddy.authorization_unavailable".into())
+    }
 }
 fn post_dispatch_owner_error(_: Failure) -> ProxyError {
     // Rechecking the original owner after submission must still revoke access,
@@ -364,6 +375,9 @@ pub(crate) async fn set_inference_consent(
     account_id: &str,
     enabled: bool,
 ) -> Result<bool, Failure> {
+    if enabled {
+        require_model_requests()?;
+    }
     let _guard = crate::services::sync_protocol::sync_mutex().lock().await;
     let binding = store::binding(session)?;
     let mut rows = store::load(session, &binding)?;
@@ -663,6 +677,7 @@ impl CancellationHandle {
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum InferenceState {
+    Paused,
     NeedsAuthorization,
     Ready,
     RefreshRequired,
@@ -697,7 +712,11 @@ pub(crate) async fn list_inference_accounts(
             };
             InferenceAccount {
                 id: row.account.id(binding.store_id()),
-                state,
+                state: if require_model_requests().is_err() {
+                    InferenceState::Paused
+                } else {
+                    state
+                },
             }
         })
         .collect())
@@ -707,6 +726,7 @@ fn routing_stamp(
     binding: &StorageIdentity,
     row: &SavedAccount,
 ) -> Option<crate::services::service_source_identity::WorkBuddyStamp> {
+    require_model_requests().ok()?;
     let grant = row.inference.as_ref()?;
     if !row.inference_allowed()
         || !valid_grant(grant, row)
@@ -765,7 +785,9 @@ pub(crate) fn routing_facts(
                 label: row.account.label.clone(),
             });
         } else {
-            let reason = if row.inference_consent == Some(false) {
+            let reason = if require_model_requests().is_err() {
+                Some(LocalNativeUnavailable::PolicyPaused)
+            } else if row.inference_consent == Some(false) {
                 Some(LocalNativeUnavailable::UserRevoked)
             } else if row.inference.is_none() {
                 Some(LocalNativeUnavailable::AuthorizationAbsent)
@@ -825,6 +847,15 @@ impl PendingAuthorization {
         Self::begin_with(session, account_id, &Official, now_ms()).await
     }
     async fn begin_with<T: Transport>(
+        session: Arc<SecretSession>,
+        account_id: &str,
+        t: &T,
+        now: i64,
+    ) -> Result<Self, Failure> {
+        require_model_requests()?;
+        Self::begin_protocol_with(session, account_id, t, now).await
+    }
+    async fn begin_protocol_with<T: Transport>(
         session: Arc<SecretSession>,
         account_id: &str,
         t: &T,
@@ -923,6 +954,14 @@ impl PendingAuthorization {
         self.poll_with(&Official, now_ms()).await
     }
     async fn poll_with<T: Transport>(
+        &mut self,
+        t: &T,
+        now: i64,
+    ) -> Result<AuthorizationProgress, Failure> {
+        require_model_requests()?;
+        self.poll_protocol_with(t, now).await
+    }
+    async fn poll_protocol_with<T: Transport>(
         &mut self,
         t: &T,
         now: i64,
@@ -1072,6 +1111,7 @@ impl Lease {
         session: Arc<SecretSession>,
         account_id: &str,
     ) -> Result<Self, Failure> {
+        require_model_requests()?;
         Self::acquire_for_purpose(session, account_id, true).await
     }
     pub(crate) async fn acquire_for_route(
@@ -1079,6 +1119,7 @@ impl Lease {
         account_id: &str,
         expected: &crate::services::service_source_identity::WorkBuddyStamp,
     ) -> Result<Self, Failure> {
+        require_model_requests()?;
         Self::acquire_with_expected(session, account_id, true, Some(expected)).await
     }
     async fn acquire_for_purpose(
@@ -1232,6 +1273,14 @@ impl Lease {
         t: &T,
         now: i64,
     ) -> Result<Vec<Model>, ProxyError> {
+        require_model_requests().map_err(owner_error)?;
+        self.models_protocol_with(t, now).await
+    }
+    async fn models_protocol_with<T: Transport>(
+        &mut self,
+        t: &T,
+        now: i64,
+    ) -> Result<Vec<Model>, ProxyError> {
         if self.grant.expires_ms <= now.saturating_add(EARLY_MS) {
             self.refresh(t, now).await.map_err(owner_error)?;
         }
@@ -1311,6 +1360,16 @@ impl Lease {
         self.dispatch_with(body, timeout, &Official, now_ms()).await
     }
     async fn dispatch_with<T: Transport>(
+        self,
+        body: Value,
+        timeout: Duration,
+        t: &T,
+        now: i64,
+    ) -> Result<DispatchResponse, ProxyError> {
+        require_model_requests().map_err(owner_error)?;
+        self.dispatch_protocol_with(body, timeout, t, now).await
+    }
+    async fn dispatch_protocol_with<T: Transport>(
         mut self,
         body: Value,
         timeout: Duration,
@@ -1536,9 +1595,11 @@ fn safe_error_value(upstream_status: u16, code: Option<i64>, refusal: bool) -> V
     json!({"error":{"type":if refusal{"access_denied"}else{"upstream_error"},"code":code.map(|c|format!("workbuddy_{c}")),"upstream_status":upstream_status,"message":match code{Some(11004)=>"WorkBuddy refused invocation from an unapproved channel",Some(11140)=>"WorkBuddy restricted this account for unusual activity",_=>"WorkBuddy returned an upstream error"}}})
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 #[path = "inference_tests.rs"]
 mod tests;
+#[cfg(all(feature = "test-hooks", not(test)))]
+pub(crate) use tests::verify_private_protocol;
 
 #[cfg(any(test, feature = "test-hooks"))]
 type FixtureCapture = Arc<Mutex<Vec<(String, Value)>>>;
@@ -1697,7 +1758,7 @@ impl FixtureTransport {
         store::save(session, &binding, rows)
     }
     /// Test-only original-row mutation, limited to the exact generated fixture identity.
-    #[cfg(feature = "test-hooks")]
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) async fn mutate_fixture_grant(
         session: &SecretSession,
         uid: &str,

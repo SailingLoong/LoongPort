@@ -80,6 +80,9 @@ export function AccountOverviewCard({
     autoClaim = t("common.unknown", { defaultValue: "未知" });
   if (account.inferenceState) {
     const states = {
+      paused: t("workbuddy.inference.state.paused", {
+        defaultValue: "WorkBuddy 模型请求已暂停；账号管理和国内签到仍可用",
+      }),
       ready: t("loongport.accounts.inferenceCredentialsReady", {
         defaultValue: "凭据就绪",
       }),

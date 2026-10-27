@@ -59,7 +59,10 @@ export interface ProviderPresentation {
   routingBadge: ProviderRoutingBadge | null;
   routingReason: ProviderRoutingReason | null;
   switchBlockedReason:
-    "officialBlockedByProxy" | "nativeSourceUnavailable" | null;
+    | "officialBlockedByProxy"
+    | "nativeSourceUnavailable"
+    | "workbuddyInferencePaused"
+    | null;
 }
 
 export interface AppConfig {
