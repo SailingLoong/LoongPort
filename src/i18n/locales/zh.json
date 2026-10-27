@@ -2607,6 +2607,7 @@
       "empty": "暂无仓库",
       "invalidUrl": "无效的仓库 URL 格式",
       "addSuccess": "仓库 {{owner}}/{{name}} 已添加，识别到 {{count}} 个技能",
+      "savedRefreshFailed": "仓库 {{owner}}/{{name}} 已保存，但技能列表刷新失败。请刷新以查看最新结果。",
       "addFailed": "添加失败",
       "removeSuccess": "仓库 {{owner}}/{{name}} 已删除",
       "removeFailed": "删除失败",

@@ -2607,6 +2607,7 @@
       "empty": "リポジトリがありません",
       "invalidUrl": "リポジトリ URL の形式が無効です",
       "addSuccess": "リポジトリ {{owner}}/{{name}} を追加しました。検出スキル: {{count}} 件",
+      "savedRefreshFailed": "リポジトリ {{owner}}/{{name}} は保存されましたが、スキル一覧を更新できませんでした。再読み込みして最新の結果を確認してください。",
       "addFailed": "追加に失敗しました",
       "removeSuccess": "リポジトリ {{owner}}/{{name}} を削除しました",
       "removeFailed": "削除に失敗しました",

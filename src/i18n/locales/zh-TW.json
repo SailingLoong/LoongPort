@@ -2576,6 +2576,7 @@
       "empty": "暫無儲存庫",
       "invalidUrl": "無效的儲存庫 URL 格式",
       "addSuccess": "儲存庫 {{owner}}/{{name}} 已新增，識別到 {{count}} 個技能",
+      "savedRefreshFailed": "儲存庫 {{owner}}/{{name}} 已儲存，但技能清單重新整理失敗。請重新整理以查看最新結果。",
       "addFailed": "新增失敗",
       "removeSuccess": "儲存庫 {{owner}}/{{name}} 已刪除",
       "removeFailed": "刪除失敗",

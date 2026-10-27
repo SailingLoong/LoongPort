@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -27,6 +27,9 @@ export function RepoManagerPanel({
   const [repoUrl, setRepoUrl] = useState("");
   const [branch, setBranch] = useState("");
   const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  const draftRevision = useRef(0);
 
   const getSkillCount = (repo: SkillRepo) =>
     skills.filter(
@@ -52,6 +55,7 @@ export function RepoManagerPanel({
   };
 
   const handleAdd = async () => {
+    if (savingRef.current) return;
     setError("");
 
     const parsed = parseRepoUrl(repoUrl);
@@ -60,6 +64,9 @@ export function RepoManagerPanel({
       return;
     }
 
+    const submittedRevision = draftRevision.current;
+    savingRef.current = true;
+    setSaving(true);
     try {
       await onAdd({
         owner: parsed.owner,
@@ -68,10 +75,17 @@ export function RepoManagerPanel({
         enabled: true,
       });
 
-      setRepoUrl("");
-      setBranch("");
+      if (draftRevision.current === submittedRevision) {
+        setRepoUrl("");
+        setBranch("");
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : t("skills.repo.addFailed"));
+      if (draftRevision.current === submittedRevision) {
+        setError(e instanceof Error ? e.message : t("skills.repo.addFailed"));
+      }
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
     }
   };
 
@@ -103,7 +117,11 @@ export function RepoManagerPanel({
               id="repo-url"
               placeholder={t("skills.repo.urlPlaceholder")}
               value={repoUrl}
-              onChange={(e) => setRepoUrl(e.target.value)}
+              onChange={(e) => {
+                draftRevision.current += 1;
+                setRepoUrl(e.target.value);
+                setError("");
+              }}
               className="mt-2"
             />
           </div>
@@ -115,7 +133,11 @@ export function RepoManagerPanel({
               id="branch"
               placeholder={t("skills.repo.branchPlaceholder")}
               value={branch}
-              onChange={(e) => setBranch(e.target.value)}
+              onChange={(e) => {
+                draftRevision.current += 1;
+                setBranch(e.target.value);
+                setError("");
+              }}
               className="mt-2"
             />
           </div>
@@ -124,11 +146,12 @@ export function RepoManagerPanel({
           )}
           <Button
             onClick={handleAdd}
+            disabled={saving}
             className="bg-primary text-primary-foreground hover:bg-primary/90"
             type="button"
           >
             <Plus className="h-4 w-4 mr-2" />
-            {t("skills.repo.add")}
+            {saving ? t("common.saving") : t("skills.repo.add")}
           </Button>
         </div>
       </div>
