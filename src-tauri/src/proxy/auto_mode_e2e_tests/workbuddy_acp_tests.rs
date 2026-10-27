@@ -81,6 +81,19 @@ async fn paused_acp_consumer(stop: &'static str, stream: bool, automatic: bool) 
     let mut config = fx.db.get_proxy_config_for_app("claude").await.unwrap();
     config.auto_failover_enabled = automatic;
     fx.db.update_proxy_config_for_app(config).await.unwrap();
+    if !automatic {
+        // Model a retained/imported manual target, not a new selection request.
+        // The automatic fixture only defines a chain and has no current target.
+        fx.set_current(&fx.cheap_id);
+    }
+    let before_current = (
+        fx.db.get_current_provider("claude").unwrap(),
+        crate::settings::get_current_provider(&AppType::Claude),
+    );
+    if !automatic {
+        assert_eq!(before_current.0.as_deref(), Some(fx.cheap_id.as_str()));
+        assert_eq!(before_current.1.as_deref(), Some(fx.cheap_id.as_str()));
+    }
     let before = serde_json::to_value(fx.db.get_all_providers("claude").unwrap()).unwrap();
     if stream {
         fx.expensive.set_stream(true).await;
@@ -112,6 +125,13 @@ async fn paused_acp_consumer(stop: &'static str, stream: bool, automatic: bool) 
     assert_eq!(
         serde_json::to_value(fx.db.get_all_providers("claude").unwrap()).unwrap(),
         before
+    );
+    assert_eq!(
+        (
+            fx.db.get_current_provider("claude").unwrap(),
+            crate::settings::get_current_provider(&AppType::Claude),
+        ),
+        before_current
     );
     fx.server.stop().await.unwrap();
     task.abort();
