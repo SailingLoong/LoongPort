@@ -1,4 +1,5 @@
 import { createRef } from "react";
+import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import { render, screen, waitFor, act, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi, beforeEach } from "vitest";
@@ -200,6 +201,112 @@ describe("UnifiedSkillsPanel", () => {
       makeInstalledSkill({ id }),
     );
   });
+
+  // Exercise actual QueryObserver refetch semantics: failed fetches resolve
+  // with an error result unless the caller requests throwOnError.
+  it.each([false, true])(
+    "reports a failed import scan instead of treating it as success (cached=%s)",
+    async (cached) => {
+      const client = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      const queryKey = ["synthetic", "unmanaged"];
+      const cachedSkills = [{ directory: "stale", name: "Stale Skill" }];
+      if (cached) client.setQueryData(queryKey, cachedSkills);
+      const queryFn = vi
+        .fn()
+        .mockRejectedValue(new Error("synthetic scan failed"));
+      const observer = new QueryObserver(client, {
+        queryKey,
+        queryFn,
+        enabled: false,
+      });
+      scanUnmanagedMock.mockImplementation((options) =>
+        observer.refetch(options),
+      );
+      const ref = createRef<UnifiedSkillsPanelHandle>();
+      render(
+        <UnifiedSkillsPanel
+          ref={ref}
+          onOpenDiscovery={() => {}}
+          currentApp="claude"
+        />,
+      );
+      try {
+        await act(async () => {
+          await ref.current?.openImport();
+        });
+        expect(toastErrorMock).toHaveBeenCalledWith("common.error", {
+          description: "Error: synthetic scan failed",
+        });
+        expect(toastSuccessMock).not.toHaveBeenCalled();
+        expect(screen.queryByText("skills.import")).not.toBeInTheDocument();
+        expect(importSkillsMock).not.toHaveBeenCalled();
+
+        // The failure must release the existing lock so a deliberate retry works.
+        queryFn.mockResolvedValue([]);
+        await act(async () => {
+          await ref.current?.openImport();
+        });
+        expect(toastSuccessMock).toHaveBeenCalledWith(
+          "skills.noUnmanagedFound",
+          { closeButton: true },
+        );
+      } finally {
+        observer.destroy();
+        client.clear();
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "reports a failed update check instead of no updates (cached=%s)",
+    async (cached) => {
+      const client = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      const queryKey = ["synthetic", "updates"];
+      if (cached) client.setQueryData(queryKey, []);
+      const queryFn = vi
+        .fn()
+        .mockRejectedValue(new Error("synthetic update check failed"));
+      const observer = new QueryObserver(client, {
+        queryKey,
+        queryFn,
+        enabled: false,
+      });
+      checkUpdatesMock.mockImplementation((options) =>
+        observer.refetch(options),
+      );
+      const ref = createRef<UnifiedSkillsPanelHandle>();
+      render(
+        <UnifiedSkillsPanel
+          ref={ref}
+          onOpenDiscovery={() => {}}
+          currentApp="claude"
+        />,
+      );
+      try {
+        await act(async () => {
+          await ref.current?.checkUpdates();
+        });
+        expect(toastErrorMock).toHaveBeenCalledWith("common.error", {
+          description: "Error: synthetic update check failed",
+        });
+        expect(toastSuccessMock).not.toHaveBeenCalled();
+        queryFn.mockResolvedValue([]);
+        await act(async () => {
+          await ref.current?.checkUpdates();
+        });
+        expect(toastSuccessMock).toHaveBeenCalledWith("skills.noUpdates", {
+          closeButton: true,
+        });
+      } finally {
+        observer.destroy();
+        client.clear();
+      }
+    },
+  );
 
   it("opens the import dialog without crashing when app toggles render", async () => {
     const ref = createRef<UnifiedSkillsPanelHandle>();

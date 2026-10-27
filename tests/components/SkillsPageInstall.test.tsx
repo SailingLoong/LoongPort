@@ -1,5 +1,6 @@
+import { toast } from "sonner";
 import { createRef } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
@@ -16,6 +17,7 @@ import type {
 } from "@/lib/api/skills";
 
 const installMutateAsyncMock = vi.fn();
+const addRepoMutateAsyncMock = vi.fn();
 let discoverableSkillsMock: DiscoverableSkill[] = [];
 let skillReposMock: SkillRepo[] = [];
 const refetchDiscoverableMock = vi.fn();
@@ -79,7 +81,7 @@ vi.mock("@/hooks/useSkills", () => ({
     refetch: vi.fn(),
   }),
   useAddSkillRepo: () => ({
-    mutateAsync: vi.fn(),
+    mutateAsync: addRepoMutateAsyncMock,
   }),
   useRemoveSkillRepo: () => ({
     mutateAsync: vi.fn(),
@@ -142,12 +144,66 @@ const makeSkillRepo = (overrides: Partial<SkillRepo> = {}): SkillRepo => ({
 
 describe("SkillsPage - skills.sh install (regression)", () => {
   beforeEach(() => {
+    addRepoMutateAsyncMock.mockReset();
+    vi.mocked(toast.error).mockClear();
+    vi.mocked(toast.success).mockClear();
     installMutateAsyncMock.mockReset();
     installMutateAsyncMock.mockResolvedValue({});
     discoverableSkillsMock = [];
     skillReposMock = [];
     refetchDiscoverableMock.mockReset();
     searchCache.clear();
+  });
+
+  it("retains the repository draft after an add failure and clears it only after a successful retry", async () => {
+    const user = userEvent.setup();
+    const ref = createRef<SkillsPageHandle>();
+    addRepoMutateAsyncMock
+      .mockRejectedValueOnce(new Error("synthetic repository save failed"))
+      .mockResolvedValueOnce(undefined);
+    refetchDiscoverableMock.mockResolvedValue({ data: [] });
+    render(<SkillsPage ref={ref} />);
+
+    // Use the same registered action as App's discovery-page header. Neither
+    // SkillsPage's handler nor its actual RepoManagerPanel child is mocked.
+    act(() => {
+      getSkillsPageHeaderActions("skillssh")
+        .find((action) => action.key === "manage-repos")!
+        .execute(ref.current);
+    });
+    const url = screen.getByLabelText("skills.repo.url");
+    const branch = screen.getByLabelText("skills.repo.branch");
+    await user.type(url, "https://github.com/synthetic-owner/synthetic-repo");
+    await user.type(branch, "review-branch");
+    await user.click(screen.getByRole("button", { name: "skills.repo.add" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("synthetic repository save failed"),
+      ).toBeInTheDocument();
+    });
+    expect(url).toHaveValue(
+      "https://github.com/synthetic-owner/synthetic-repo",
+    );
+    expect(branch).toHaveValue("review-branch");
+    expect(refetchDiscoverableMock).not.toHaveBeenCalled();
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled(); // Inline error is the single owner.
+
+    await user.click(screen.getByRole("button", { name: "skills.repo.add" }));
+    await waitFor(() => expect(url).toHaveValue(""));
+    expect(branch).toHaveValue("");
+    expect(
+      screen.queryByText("synthetic repository save failed"),
+    ).not.toBeInTheDocument();
+    expect(addRepoMutateAsyncMock).toHaveBeenCalledTimes(2);
+    expect(addRepoMutateAsyncMock).toHaveBeenLastCalledWith({
+      owner: "synthetic-owner",
+      name: "synthetic-repo",
+      branch: "review-branch",
+      enabled: true,
+    });
+    expect(toast.success).toHaveBeenCalledTimes(1);
   });
 
   it("installs the second skill when two results share the same directory", async () => {

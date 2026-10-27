@@ -3603,7 +3603,8 @@
       "loginFailed": "登入失敗：{{reason}}",
       "openKeyPage": "管理 API 金鑰",
       "userEditedHint": "此服務商帳號在目前平台的連線設定檔包含手動修改。重新套用金鑰設定時只會更新 API 金鑰，不會覆蓋其他內容。點一下可還原預設設定。",
-      "editConfirmMessage": "儲存後，LoongPort 將不再覆蓋此服務商帳號在目前平台的手動修改；後續重新套用金鑰設定時只會更新 API 金鑰。\n\n若要撤銷修改，請選擇「還原預設設定」。API 金鑰會保留。"
+      "editConfirmMessage": "儲存後，LoongPort 將不再覆蓋此服務商帳號在目前平台的手動修改；後續重新套用金鑰設定時只會更新 API 金鑰。\n\n若要撤銷修改，請選擇「還原預設設定」。API 金鑰會保留。",
+      "opencodeFreeExternalUnavailable": "免費聊天外部請求已暫停；原設定保留，可直接使用官方 OpenCode。付費 API / Go 不受此暫停影響。"
     },
     "imageTab": {
       "companionNotice": "本頁可直接生圖，也可在 CLI 對話中生圖",

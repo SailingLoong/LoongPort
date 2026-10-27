@@ -169,6 +169,70 @@ describe("McpFormModal", () => {
     return { onSave, onClose };
   };
 
+  it("clears TOML validation feedback after correcting the command", () => {
+    renderForm({ defaultFormat: "toml", existingIds: ["taken"] });
+    fireEvent.change(screen.getByPlaceholderText("mcp.form.titlePlaceholder"), {
+      target: { value: "taken" },
+    });
+    const editor = screen.getByPlaceholderText("mcp.form.tomlPlaceholder");
+    fireEvent.change(editor, { target: { value: 'type = "stdio"' } });
+    expect(screen.getByText(/^mcp\.error\.tomlInvalid/)).toBeInTheDocument();
+    fireEvent.change(editor, {
+      target: { value: 'type = "stdio"\ncommand = "synthetic-run"' },
+    });
+    expect(
+      screen.queryByText(/^mcp\.error\.tomlInvalid/),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("mcp.error.idExists")).toBeInTheDocument();
+    expect(screen.getByText("common.add")).toBeDisabled();
+  });
+
+  it("clears duplicate ID feedback when a unique preset replaces the ID", () => {
+    renderForm({ existingIds: ["taken", "preset-stdio"] });
+    fireEvent.change(screen.getByPlaceholderText("mcp.form.titlePlaceholder"), {
+      target: { value: "taken" },
+    });
+    expect(screen.getByText("common.add")).toBeDisabled();
+    fireEvent.click(screen.getByText("preset-stdio"));
+    expect(
+      screen.getByPlaceholderText("mcp.form.titlePlaceholder"),
+    ).toHaveValue("preset-stdio-1");
+    expect(screen.queryByText("mcp.error.idExists")).not.toBeInTheDocument();
+    expect(screen.getByText("common.add")).toBeEnabled();
+  });
+
+  it("revalidates duplicate ID feedback when the wizard replaces the ID", () => {
+    renderForm({ existingIds: ["taken"] });
+    fireEvent.change(screen.getByPlaceholderText("mcp.form.titlePlaceholder"), {
+      target: { value: "taken" },
+    });
+    fireEvent.click(screen.getByText("mcp.form.useWizard"));
+    fireEvent.click(screen.getByTestId("wizard-apply"));
+    expect(screen.queryByText("mcp.error.idExists")).not.toBeInTheDocument();
+    expect(screen.getByText("common.add")).toBeEnabled();
+  });
+
+  it("clears duplicate ID feedback when switching back to custom", () => {
+    renderForm({ existingIds: ["taken"] });
+    fireEvent.change(screen.getByPlaceholderText("mcp.form.titlePlaceholder"), {
+      target: { value: "taken" },
+    });
+    fireEvent.click(screen.getByText("presetSelector.custom"));
+    expect(
+      screen.getByPlaceholderText("mcp.form.titlePlaceholder"),
+    ).toHaveValue("");
+    expect(screen.queryByText("mcp.error.idExists")).not.toBeInTheDocument();
+    expect(screen.getByText("common.add")).toBeEnabled();
+  });
+
+  it("shows duplicate ID feedback when the wizard selects an existing ID", () => {
+    renderForm({ existingIds: ["wizard-id"] });
+    fireEvent.click(screen.getByText("mcp.form.useWizard"));
+    fireEvent.click(screen.getByTestId("wizard-apply"));
+    expect(screen.getByText("mcp.error.idExists")).toBeInTheDocument();
+    expect(screen.getByText("common.add")).toBeDisabled();
+  });
+
   it("应用预设后填充 ID 与配置内容", async () => {
     renderForm();
     await waitFor(() =>

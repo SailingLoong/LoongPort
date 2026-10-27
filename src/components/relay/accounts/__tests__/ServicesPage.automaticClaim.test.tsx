@@ -12,9 +12,14 @@ import { ServicesPage } from "../ServicesPage";
 
 const mocks = vi.hoisted(() => ({
   set: vi.fn(),
+  zcodeSet: vi.fn(),
+  zcodeRead: vi.fn(),
   read: vi.fn(),
   rows: [] as any[],
   unavailable: [] as string[],
+}));
+vi.mock("@/lib/api/zcodeClaim", () => ({
+  zcodeClaimApi: { setAuto: mocks.zcodeSet, state: mocks.zcodeRead },
 }));
 vi.mock("@/lib/api/workbuddy", () => ({
   workbuddyApi: { setAutomatic: mocks.set },
@@ -247,4 +252,52 @@ it("does not attach another platform's read failure to the selected scope", asyn
     within(region).getByText("全部开启", { selector: "span" }),
   ).toBeVisible();
   expect(within(region).queryByText("部分设置待确认")).not.toBeInTheDocument();
+});
+
+it("does not replace the clicked ZCode consent revision during the page refresh", async () => {
+  const old = {
+    id: "zcode-a",
+    label: "Synthetic ZCode",
+    source: "zcode",
+    platform: "zcode",
+    snapshot: {
+      kind: "zcode",
+      dataRoot: "synthetic-root",
+      value: {
+        consentRevision: "context:1",
+        enabled: false,
+        participants: [],
+        records: {},
+        busy: false,
+      },
+    },
+  };
+  const revoked = {
+    ...old,
+    snapshot: {
+      ...old.snapshot,
+      value: { ...old.snapshot.value, consentRevision: "context:2" },
+    },
+  };
+  mocks.rows = [old];
+  mocks.read.mockResolvedValue({
+    data: {
+      accounts: [revoked],
+      unavailable: [],
+      platforms: ["zcode"],
+      connections: [],
+    },
+  });
+  mocks.zcodeRead.mockResolvedValue(revoked.snapshot.value);
+  mocks.zcodeSet.mockResolvedValue({
+    ...revoked.snapshot.value,
+    consentRevision: "context:3",
+    enabled: true,
+    participants: ["zcode-a"],
+  });
+  const user = setup();
+  const region = screen.getByRole("region", { name: "自动领取管理" });
+  await user.click(within(region).getByRole("button", { name: "全部开启" }));
+  await within(region).findByText(/Synthetic ZCode.*设置结果未确认/);
+  expect(mocks.zcodeSet).not.toHaveBeenCalled();
 });

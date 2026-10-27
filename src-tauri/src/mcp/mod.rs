@@ -11,6 +11,12 @@
 //! - `opencode` - OpenCode MCP 同步和导入（含 local/remote 格式转换）
 //! - `hermes` - Hermes MCP 同步和导入
 
+use std::collections::HashMap;
+
+use serde_json::Value;
+
+use crate::app_config::{AppType, McpApps, McpServer};
+
 mod claude;
 mod codex;
 mod gemini;
@@ -38,3 +44,26 @@ pub use hermes::{import_from_hermes, remove_server_from_hermes, sync_single_serv
 pub use opencode::{
     import_from_opencode, remove_server_from_opencode, sync_single_server_to_opencode,
 };
+
+/// Merge a validated native spec without replacing existing user-owned fields.
+/// Native imports count new servers and newly enabled apps; service imports count only new IDs.
+fn merge_imported_server(
+    servers: &mut HashMap<String, McpServer>,
+    id: &str,
+    spec: &Value,
+    app: &AppType,
+) -> bool {
+    let server = servers.entry(id.to_string()).or_insert_with(|| McpServer {
+        id: id.to_string(),
+        name: id.to_string(),
+        server: spec.clone(),
+        apps: McpApps::default(),
+        description: None,
+        homepage: None,
+        docs: None,
+        tags: Vec::new(),
+    });
+    let changed = !server.apps.is_enabled_for(app);
+    server.apps.set_enabled_for(app, true);
+    changed
+}

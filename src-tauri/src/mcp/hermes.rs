@@ -17,10 +17,11 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-use crate::app_config::{McpApps, McpServer, MultiAppConfig};
+use crate::app_config::{AppType, MultiAppConfig};
 use crate::error::AppError;
 use crate::hermes_config;
 
+use super::merge_imported_server;
 use super::validation::validate_server_spec;
 
 /// Hermes-specific fields preserved on merge-on-write, stripped on import.
@@ -297,37 +298,9 @@ pub fn import_from_hermes(config: &mut MultiAppConfig) -> Result<usize, AppError
             continue;
         }
 
-        if let Some(existing) = servers.get_mut(&id) {
-            // Existing server: just enable Hermes app
-            if !existing.apps.hermes {
-                existing.apps.hermes = true;
-                changed += 1;
-                log::info!("MCP server '{id}' enabled for Hermes");
-            }
-        } else {
-            // New server: default to only Hermes enabled
-            servers.insert(
-                id.clone(),
-                McpServer {
-                    id: id.clone(),
-                    name: id.clone(),
-                    server: unified_spec,
-                    apps: McpApps {
-                        claude: false,
-                        codex: false,
-                        gemini: false,
-                        grokbuild: false,
-                        opencode: false,
-                        hermes: true,
-                    },
-                    description: None,
-                    homepage: None,
-                    docs: None,
-                    tags: Vec::new(),
-                },
-            );
+        if merge_imported_server(servers, &id, &unified_spec, &AppType::Hermes) {
             changed += 1;
-            log::info!("Imported new MCP server '{id}' from Hermes");
+            log::info!("MCP server '{id}' imported or enabled for Hermes");
         }
     }
 

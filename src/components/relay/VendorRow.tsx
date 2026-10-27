@@ -301,6 +301,13 @@ function AccountHeader({
       <span className="block truncate text-sm font-medium">
         {account.vendorName}
       </span>
+      {account.plans.length === 1 &&
+        account.plans[0].switchBlockedReason ===
+          "opencodeFreeExternalUnavailable" && (
+          <span className="text-xs text-muted-foreground">
+            {t("loongport.vendor.opencodeFreeExternalUnavailable")}
+          </span>
+        )}
       {account.authMode === "personal-key" && (
         <span className="text-xs text-muted-foreground">
           Personal key · 配置已保存，调用及余额未验证
@@ -466,7 +473,7 @@ function VendorStatus({
           {/* 主按钮。**文案与图标复用上游的 `provider.enable` / `provider.inUse`**
               （四 locale 早就齐了）—— 与 `TierItem` 里那两支逐字相同，
               否则同一个操作会在两种行上有两种叫法。 */}
-          {plan?.isCurrent ? (
+          {plan?.isCurrent && !plan.switchBlockedReason ? (
             <Button
               type="button"
               size="sm"
@@ -592,6 +599,11 @@ function PlanItem({
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-1.5">
           <span className="truncate text-sm">{plan.planName}</span>
+          {plan.switchBlockedReason === "opencodeFreeExternalUnavailable" && (
+            <span className="text-xs text-muted-foreground">
+              {t("loongport.vendor.opencodeFreeExternalUnavailable")}
+            </span>
+          )}
           {userEdited && (
             <span
               className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-amber-600 ring-1 ring-inset ring-amber-500/30 dark:text-amber-400"
@@ -614,7 +626,7 @@ function PlanItem({
           switching || resetting ? HOVER_ACTIONS_PINNED : PLAN_HOVER_ACTIONS,
         )}
       >
-        {plan.isCurrent ? (
+        {plan.isCurrent && !plan.switchBlockedReason ? (
           <Button
             type="button"
             size="sm"
@@ -624,7 +636,7 @@ function PlanItem({
             <Check className="mr-1 h-3.5 w-3.5" />
             {t("provider.inUse")}
           </Button>
-        ) : (
+        ) : plan.canSwitch ? (
           <Button
             type="button"
             size="sm"
@@ -639,7 +651,7 @@ function PlanItem({
             )}
             {switching ? t("loongport.tier.switching") : t("provider.enable")}
           </Button>
-        )}
+        ) : null}
 
         {plan.canEditConfig && (
           <Button
