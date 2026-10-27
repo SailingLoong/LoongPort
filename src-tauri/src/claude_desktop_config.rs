@@ -570,11 +570,12 @@ fn direct_inference_model_specs(provider: &Provider) -> Result<Vec<InferenceMode
         });
     }
 
-    // Sort supports_1m=true first within each name so the subsequent dedup_by
-    // (which keeps the first occurrence) preserves the 1M-capable variant.
+    // 档位序（sonnet → opus → fable → haiku）优先，档位内保持字典序；
+    // supports_1m=true 排前，保证后续 dedup_by（保留首个）留住 1M 档变体。
     result.sort_by(|a, b| {
-        a.name
-            .cmp(&b.name)
+        claude_role_rank(&a.name)
+            .cmp(&claude_role_rank(&b.name))
+            .then_with(|| a.name.cmp(&b.name))
             .then_with(|| b.supports_1m.cmp(&a.supports_1m))
     });
     result.dedup_by(|a, b| a.name == b.name);
@@ -631,7 +632,11 @@ pub fn proxy_model_routes(provider: &Provider) -> Result<Vec<ResolvedModelRoute>
         });
     }
 
-    result.sort_by(|a, b| a.route_id.cmp(&b.route_id));
+    result.sort_by(|a, b| {
+        claude_role_rank(&a.route_id)
+            .cmp(&claude_role_rank(&b.route_id))
+            .then_with(|| a.route_id.cmp(&b.route_id))
+    });
     result.dedup_by(|a, b| a.route_id == b.route_id);
 
     if result.is_empty() {
@@ -825,6 +830,20 @@ fn claude_role_keyword(model: &str) -> Option<&'static str> {
         Some("sonnet")
     } else {
         None
+    }
+}
+
+/// 档位输出顺序：与前端表单固定档位顺序一致（sonnet → opus → fable → haiku，
+/// 见前端 ROLE_ORDER），未命中角色词的条目排在最后。
+/// inferenceModels 按此序输出，Claude Desktop 把首条当默认模型，
+/// 新会话才能默认落在 Sonnet 档而不是字典序排前的档位。
+fn claude_role_rank(model: &str) -> usize {
+    match claude_role_keyword(model) {
+        Some("sonnet") => 0,
+        Some("opus") => 1,
+        Some("fable") => 2,
+        Some("haiku") => 3,
+        _ => 4,
     }
 }
 
@@ -1712,6 +1731,88 @@ mod tests {
         assert_eq!(
             profile["inferenceModels"],
             json!([{ "name": "claude-sonnet-4-6", "supports1m": true }])
+        );
+    }
+
+    #[test]
+    fn claude_desktop_direct_writes_inference_models_in_tier_order() {
+        // 档位序（sonnet → opus → fable → haiku）优先于字典序：Desktop 把
+        // inferenceModels 首条当默认模型，字典序会把默认档挤到 fable/haiku。
+        let mut provider = direct_provider("direct-tier-order");
+        provider.meta = Some(ProviderMeta {
+            claude_desktop_mode: Some(ClaudeDesktopMode::Direct),
+            api_format: Some("anthropic".to_string()),
+            claude_desktop_model_routes: [
+                "claude-haiku-4-5",
+                "claude-sonnet-4-6",
+                "claude-fable-1-0",
+                "claude-opus-4-3",
+            ]
+            .into_iter()
+            .map(|route_id| {
+                (
+                    route_id.to_string(),
+                    ClaudeDesktopModelRoute {
+                        model: route_id.to_string(),
+                        label_override: None,
+                        supports_1m: Some(false),
+                    },
+                )
+            })
+            .collect(),
+            ..Default::default()
+        });
+
+        let specs = direct_inference_model_specs(&provider).expect("direct specs");
+        let names: Vec<&str> = specs.iter().map(|spec| spec.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "claude-sonnet-4-6",
+                "claude-opus-4-3",
+                "claude-fable-1-0",
+                "claude-haiku-4-5"
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_desktop_proxy_routes_follow_tier_order() {
+        let mut provider = direct_provider("proxy-tier-order");
+        provider.meta = Some(ProviderMeta {
+            claude_desktop_mode: Some(ClaudeDesktopMode::Proxy),
+            api_format: Some("openai_chat".to_string()),
+            claude_desktop_model_routes: [
+                "claude-haiku-4-5",
+                "claude-sonnet-4-6",
+                "claude-fable-1-0",
+                "claude-opus-4-3",
+            ]
+            .into_iter()
+            .map(|route_id| {
+                (
+                    route_id.to_string(),
+                    ClaudeDesktopModelRoute {
+                        model: "upstream-model".to_string(),
+                        label_override: None,
+                        supports_1m: Some(false),
+                    },
+                )
+            })
+            .collect(),
+            ..Default::default()
+        });
+
+        let routes = proxy_model_routes(&provider).expect("proxy routes");
+        let ids: Vec<&str> = routes.iter().map(|route| route.route_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "claude-sonnet-4-6",
+                "claude-opus-4-3",
+                "claude-fable-1-0",
+                "claude-haiku-4-5"
+            ]
         );
     }
 
