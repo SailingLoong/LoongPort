@@ -441,7 +441,12 @@ fn conversion_app(
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .unwrap()
 }
-fn conversion_case(source_encrypted: bool, target_plaintext: bool, test_name: &str) {
+fn conversion_case(
+    source_encrypted: bool,
+    target_plaintext: bool,
+    source_legacy: bool,
+    test_name: &str,
+) {
     if std::env::var_os("LOONGPORT_TEST_IPC_CONVERSION_CHILD").is_some() {
         assert!(std::env::var_os("CC_SWITCH_TEST_HOME").is_some());
         crate::app_store::initialize_active_scope().unwrap();
@@ -504,7 +509,21 @@ fn conversion_case(source_encrypted: bool, target_plaintext: bool, test_name: &s
     let _home = TestHome::new().unwrap();
     crate::init_status::clear_init_error();
     let cache = Arc::new(crate::secrets::testing::MemoryKeyStore::default());
-    let root = if source_encrypted {
+    let root = if source_legacy {
+        let root = crate::config::get_app_config_dir();
+        crate::config::ensure_private_directory(&root).unwrap();
+        let vault = VaultContext::generate().unwrap();
+        session::write_metadata(&root, &session::completed_metadata(&vault, true).unwrap())
+            .unwrap();
+        crate::secrets::key_store::save_verified(
+            &*cache,
+            &vault.metadata().vault_id,
+            &vault.metadata().key_id,
+            &vault.export_key(),
+        )
+        .unwrap();
+        root
+    } else if source_encrypted {
         let (root, vault) = encrypted();
         crate::secrets::key_store::save_user_text_verified(&*cache, &vault, " 中文🔑 aBc\r\n ")
             .unwrap();
@@ -548,6 +567,25 @@ fn conversion_case(source_encrypted: bool, target_plaintext: bool, test_name: &s
     let mut request = json!({"mode":if target_plaintext{"plaintext"}else{"encrypted"},"preserveExisting":false,"plaintextAcknowledged":target_plaintext,"reviewToken":status["reviewToken"]});
     if !target_plaintext {
         request["keyText"] = json!(CONVERSION_TEXT);
+    }
+    if source_legacy {
+        crate::config::ensure_private_directory(&root.join("backups")).unwrap();
+        let orphan = root.join("backups/orphan.db-wal");
+        std::fs::write(&orphan, b"synthetic orphan sidecar").unwrap();
+        let error = invoke(
+            &webview,
+            "configure_credential_protection",
+            json!({"request":request.clone()}),
+        )
+        .unwrap_err();
+        assert_eq!(error, "protection.unclaimed_database_artifact");
+        assert!(application
+            .state::<crate::AppState>()
+            .db
+            .secret_session()
+            .read()
+            .is_ok());
+        std::fs::remove_file(orphan).unwrap(); // Repair only this synthetic fixture.
     }
     let result = invoke(
         &webview,
@@ -597,6 +635,7 @@ fn real_ipc_plain_to_user_text_restarts_with_same_user_text() {
     conversion_case(
         false,
         false,
+        false,
         if cfg!(test) {
             "secrets::startup::credential_protection::tests::real_ipc_plain_to_user_text_restarts_with_same_user_text"
         } else {
@@ -610,6 +649,7 @@ fn real_ipc_user_text_to_plaintext_requires_explicit_choice() {
     conversion_case(
         true,
         true,
+        false,
         if cfg!(test) {
             "secrets::startup::credential_protection::tests::real_ipc_user_text_to_plaintext_requires_explicit_choice"
         } else {
@@ -623,12 +663,19 @@ fn real_ipc_user_text_rekey_preserves_authenticated_old_data() {
     conversion_case(
         true,
         false,
+        false,
         if cfg!(test) {
             "secrets::startup::credential_protection::tests::real_ipc_user_text_rekey_preserves_authenticated_old_data"
         } else {
             "protection_ipc_rekey"
         },
     );
+}
+
+#[test]
+#[serial_test::serial]
+fn real_ipc_legacy_generated_key_to_new_user_text_survives_restart() {
+    conversion_case(true, false, true, "secrets::startup::credential_protection::tests::real_ipc_legacy_generated_key_to_new_user_text_survives_restart");
 }
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]

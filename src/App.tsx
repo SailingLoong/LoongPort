@@ -112,6 +112,10 @@ import {
 import { UsagePage } from "@/components/usage/UsagePage";
 import { ThemeSettings } from "@/components/settings/ThemeSettings";
 import { CredentialProtectionEntry } from "@/components/relay/CredentialProtectionEntry";
+import {
+  credentialProtectionApi,
+  credentialProtectionKey,
+} from "@/lib/api/credentialProtection";
 import { UpdateBadge } from "@/components/UpdateBadge";
 import { GitHubStarButton } from "@/components/GitHubStarButton";
 import type { ServiceEntryIntent } from "@/components/relay/accounts/serviceEntryIntent";
@@ -204,6 +208,16 @@ function App() {
   });
   const credentialRuntimeAvailable =
     runtime.data?.credentialRuntimeAvailable === true && !runtime.isError;
+  const protection = useQuery({
+    queryKey: credentialProtectionKey,
+    queryFn: credentialProtectionApi.status,
+    enabled: !runtime.isPending && !credentialRuntimeAvailable,
+    retry: false,
+  });
+  const restartRequired =
+    !credentialRuntimeAvailable &&
+    !protection.isError &&
+    protection.data?.restartRequired === true;
   const { t } = useTranslation();
   const queryClient = useQueryClient();
 
@@ -1525,6 +1539,7 @@ function App() {
         view={currentView}
         top={dragBarHeight}
         disabled={
+          restartRequired ||
           managementBusy ||
           (editingProvider !== null && currentView === "services")
         }
@@ -1887,13 +1902,15 @@ function App() {
       >
         {!credentialRuntimeAvailable ? (
           <div className="page-content space-y-5">
-            <p role="status" className="rounded-lg border p-4 text-sm">
-              {t(
-                runtime.isPending
-                  ? "common.loading"
-                  : "secrets.runtimeUnavailable",
-              )}
-            </p>
+            {!restartRequired && (
+              <p role="status" className="rounded-lg border p-4 text-sm">
+                {t(
+                  runtime.isPending || protection.isPending
+                    ? "common.loading"
+                    : "secrets.runtimeUnavailable",
+                )}
+              </p>
+            )}
             {!runtime.isPending && <CredentialProtectionEntry showInline />}
             {currentView === "settings" && <ThemeSettings />}
           </div>
