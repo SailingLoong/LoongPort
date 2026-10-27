@@ -621,3 +621,132 @@ fn windows_verbatim_drive_root_is_never_probed_as_a_bare_prefix() {
     create_private_directories(&nested).unwrap();
     validate_directory(&nested).unwrap();
 }
+
+// Permanent native-owner selector regressions.
+mod native_selected_owner {
+    use crate::app_store::isolated_scope::*;
+    use std::path::{Path, PathBuf};
+    struct Fixture {
+        _root: tempfile::TempDir,
+        store: PathBuf,
+        data: PathBuf,
+        device: PathBuf,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let root = tempfile::tempdir().unwrap();
+            let store = root.path().join("control/app_paths.json");
+            let data = root.path().join("data");
+            let device = root.path().join("device");
+            for p in [store.parent().unwrap(), &data, &device] {
+                std::fs::create_dir(p).unwrap();
+            }
+            Self {
+                _root: root,
+                store,
+                data,
+                device,
+            }
+        }
+        fn snapshot(&self) -> SelectionSnapshot {
+            capture_selection_at(&self.store, &self.data, &self.device).unwrap()
+        }
+    }
+    fn probe(store: &Path, expected: &str) {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!(
+                    "{}::child_selector_consumer",
+                    module_path!().split_once("::").unwrap().1
+                ),
+                "--nocapture",
+            ])
+            .env("LP_TEST_SELECTION_STORE", store)
+            .env("LP_TEST_SELECTION_EXPECT", expected)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+    #[test]
+    fn child_selector_consumer() {
+        let Some(store) = std::env::var_os("LP_TEST_SELECTION_STORE") else {
+            return;
+        };
+        assert_eq!(
+            lock_selection_at(Path::new(&store)).is_ok(),
+            std::env::var("LP_TEST_SELECTION_EXPECT").unwrap() == "free"
+        );
+    }
+    #[test]
+    fn two_consumers_share_original_lock_through_guard_scope() {
+        let f = Fixture::new();
+        let snapshot = f.snapshot();
+        let guard = lock_selected_source_at(&snapshot).unwrap();
+        assert_eq!(guard.source_data_root(), f.data);
+        probe(&f.store, "busy");
+        drop(guard);
+        probe(&f.store, "free");
+        let original = lock_selection_at(&f.store).unwrap();
+        assert!(lock_selected_source_at(&snapshot).is_err());
+        drop(original);
+        assert!(lock_selected_source_at(&snapshot).is_ok());
+    }
+    #[test]
+    fn control_inside_either_source_tree_refuses_before_lock_creation() {
+        for data_contains in [true, false] {
+            let f = Fixture::new();
+            let parent = f.store.parent().unwrap();
+            let s = capture_selection_at(
+                &f.store,
+                if data_contains { parent } else { &f.data },
+                if data_contains { &f.device } else { parent },
+            )
+            .unwrap();
+            assert!(lock_selected_source_at(&s).is_err());
+            assert!(!parent.join("app_paths.selection.lock").exists());
+        }
+    }
+    #[test]
+    fn stale_selector_and_changes_while_guard_held_are_rejected() {
+        let f = Fixture::new();
+        let s = f.snapshot();
+        std::fs::write(&f.store, b"{\"unknown\":1}").unwrap();
+        assert!(lock_selected_source_at(&s).is_err());
+        let guard = lock_selected_source_at(&f.snapshot()).unwrap();
+        std::fs::write(&f.store, b"{\"unknown\":2}").unwrap();
+        assert!(guard.verify_unchanged().is_err());
+    }
+    #[test]
+    fn replaced_source_identity_is_rejected_and_foreign_lock_is_preserved() {
+        let f = Fixture::new();
+        let guard = lock_selected_source_at(&f.snapshot()).unwrap();
+        std::fs::rename(&f.data, f.data.with_extension("old")).unwrap();
+        std::fs::create_dir(&f.data).unwrap();
+        assert!(guard.verify_unchanged().is_err());
+        drop(guard);
+        let guard = lock_selected_source_at(&f.snapshot()).unwrap();
+        let lock = f.store.parent().unwrap().join("app_paths.selection.lock");
+        std::fs::rename(&lock, lock.with_extension("saved")).unwrap();
+        std::fs::create_dir(&lock).unwrap();
+        std::fs::write(lock.join("foreign"), b"sentinel").unwrap();
+        assert!(guard.verify_unchanged().is_err());
+        drop(guard);
+        assert_eq!(std::fs::read(lock.join("foreign")).unwrap(), b"sentinel");
+    }
+    #[cfg(unix)]
+    #[test]
+    fn aliased_control_root_refused() {
+        let f = Fixture::new();
+        let s = f.snapshot();
+        let parent = f.store.parent().unwrap();
+        let moved = parent.with_extension("moved");
+        std::fs::rename(parent, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, parent).unwrap();
+        assert!(lock_selected_source_at(&s).is_err());
+    }
+}

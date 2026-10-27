@@ -1041,3 +1041,200 @@ fn native_separate_dead_process_resumes_same_opaque_preserving_candidate() {
     assert!(target_tree(&root).unwrap() == before);
     assert_eq!(std::fs::read(root.join(protection::FILE)).unwrap(), record);
 }
+
+// Permanent regressions use this module's real database/session/metadata fixture,
+// not the lightweight selector harness's synthetic authorization permit.
+#[cfg(test)]
+mod native_owner_regressions {
+    use super::*;
+    use crate::workbuddy::native_owner::testing;
+    use std::cell::Cell;
+
+    fn journal(f: &Fixture) -> PathBuf {
+        f.root
+            .join(crate::secrets::owned_file::WORKBUDDY_NATIVE_JOURNAL_FILE)
+    }
+    fn container(f: &Fixture) -> PathBuf {
+        f.store.parent().unwrap().join("isolated-configs")
+    }
+    fn receipts(f: &Fixture) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let client = tempfile::tempdir().unwrap();
+        let context = f.db.secret_session().write().unwrap();
+        testing::receipts(&f.root, &context, client.path())
+    }
+    fn with_permit<T>(
+        f: &Fixture,
+        hook: Option<&dyn Fn()>,
+        op: impl FnOnce(&SelectionSnapshot, &GenerationPreparationPermit<'_>) -> T,
+    ) -> T {
+        let selection = f.selection();
+        let context = f.db.secret_session().write().unwrap();
+        let conn = f.db.conn.lock().unwrap();
+        let metadata = MetadataImage::capture(&f.root).unwrap();
+        let permit = GenerationPreparationPermit {
+            db: &f.db,
+            context: &context,
+            conn: &conn,
+            selection: &selection,
+            device: &f.root,
+            metadata: &metadata,
+            token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            after_verify_test_hook: hook,
+        };
+        op(&selection, &permit)
+    }
+    #[test]
+    #[serial_test::serial]
+    fn prepared_blocks_before_candidate_creation() {
+        let f = Fixture::new(false);
+        let (prepared, _, _) = receipts(&f);
+        std::fs::write(journal(&f), &prepared).unwrap();
+        with_permit(&f, None, |s, p| {
+            assert!(isolated_scope::prepare_generation_at(s, p).is_err())
+        });
+        assert!(!container(&f).exists());
+        assert_eq!(std::fs::read(journal(&f)).unwrap(), prepared);
+    }
+    #[test]
+    #[serial_test::serial]
+    fn terminal_receipts_allow_prepare_and_hold_same_selector_owner() {
+        for restored in [false, true] {
+            let f = Fixture::new(false);
+            let (_, r, c) = receipts(&f);
+            let bytes = if restored { r } else { c };
+            std::fs::write(journal(&f), &bytes).unwrap();
+            with_permit(&f, None, |s, p| {
+                let guard = isolated_scope::lock_selected_source_at(s).unwrap();
+                assert!(isolated_scope::prepare_generation_at(s, p).is_err());
+                drop(guard);
+                let pending = isolated_scope::prepare_generation_at(s, p).unwrap();
+                assert!(isolated_scope::lock_selected_source_at(s).is_err());
+                assert!(pending.root().join("scope-identity.json").is_file());
+            });
+            assert_eq!(std::fs::read(journal(&f)).unwrap(), bytes);
+        }
+    }
+    #[test]
+    #[serial_test::serial]
+    fn prepared_after_early_verify_is_rechecked_before_mkdir() {
+        let f = Fixture::new(false);
+        let (prepared, _, _) = receipts(&f);
+        let calls = Cell::new(0);
+        let hook = || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                std::fs::write(journal(&f), &prepared).unwrap();
+            }
+        };
+        with_permit(&f, Some(&hook), |s, p| {
+            assert!(isolated_scope::prepare_generation_at(s, p).is_err())
+        });
+        assert_eq!(calls.get(), 1); // second verification fails before test-only hook
+        assert!(!container(&f).exists());
+        assert!(isolated_scope::lock_selection_at(&f.store).is_ok());
+        assert_eq!(std::fs::read(journal(&f)).unwrap(), prepared);
+    }
+    #[test]
+    #[serial_test::serial]
+    fn corrupt_journal_blocks_without_repair_or_candidate() {
+        let f = Fixture::new(false);
+        std::fs::write(journal(&f), b"invalid synthetic journal").unwrap();
+        with_permit(&f, None, |s, p| {
+            assert!(isolated_scope::prepare_generation_at(s, p).is_err())
+        });
+        assert!(!container(&f).exists());
+        assert_eq!(
+            std::fs::read(journal(&f)).unwrap(),
+            b"invalid synthetic journal"
+        );
+    }
+    fn run<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(f)
+    }
+    fn pending(f: &Fixture) -> PathBuf {
+        with_permit(f, None, |s, p| {
+            let pending = isolated_scope::prepare_generation_at(s, p).unwrap();
+            pending.root().to_path_buf()
+        })
+    }
+    #[test]
+    #[serial_test::serial]
+    fn pending_and_corrupt_candidate_block_native_before_callback() {
+        for corrupt in [false, true] {
+            let f = Fixture::new(false);
+            let candidate = pending(&f);
+            let marker = candidate.join("scope-identity.json");
+            if corrupt {
+                std::fs::write(&marker, b"invalid candidate").unwrap();
+            }
+            let bytes = std::fs::read(&marker).unwrap();
+            let session = f.db.secret_session();
+            let identity = session.read().unwrap().identity();
+            let called = Cell::new(false);
+            assert!(isolated_scope::lock_selection_at(&f.store).is_ok());
+            assert!(run(testing::selected(
+                session,
+                &identity,
+                session.lifecycle_epoch(),
+                &f.selection(),
+                |owner| {
+                    called.set(true);
+                    testing::initialize(owner)
+                }
+            ))
+            .is_err());
+            assert!(!called.get());
+            assert!(!journal(&f).exists());
+            assert_eq!(std::fs::read(&marker).unwrap(), bytes);
+        }
+    }
+    #[test]
+    #[serial_test::serial]
+    fn candidate_appearing_in_callback_blocks_write() {
+        let f = Fixture::new(false);
+        let candidate = pending(&f);
+        let saved = f.store.parent().unwrap().join("saved-candidate");
+        std::fs::rename(&candidate, &saved).unwrap();
+        let bytes = std::fs::read(saved.join("scope-identity.json")).unwrap();
+        let session = f.db.secret_session();
+        let identity = session.read().unwrap().identity();
+        let called = Cell::new(false);
+        assert!(run(testing::selected(
+            session,
+            &identity,
+            session.lifecycle_epoch(),
+            &f.selection(),
+            |owner| {
+                called.set(true);
+                std::fs::rename(&saved, &candidate).unwrap();
+                testing::initialize(owner)
+            }
+        ))
+        .is_err());
+        assert!(called.get());
+        assert!(!journal(&f).exists());
+        assert_eq!(
+            std::fs::read(candidate.join("scope-identity.json")).unwrap(),
+            bytes
+        );
+    }
+    #[test]
+    #[serial_test::serial]
+    fn no_candidate_allows_owner_initialization() {
+        let f = Fixture::new(false);
+        let session = f.db.secret_session();
+        let identity = session.read().unwrap().identity();
+        run(testing::selected(
+            session,
+            &identity,
+            session.lifecycle_epoch(),
+            &f.selection(),
+            testing::initialize,
+        ))
+        .unwrap();
+        assert!(journal(&f).is_file());
+    }
+}
