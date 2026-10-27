@@ -1003,7 +1003,18 @@ mod native_content_consumer {
                 Ok(())
             })
             .is_err());
-            assert_eq!(digest(&f), before);
+            // The deliberate interruption must keep business reads blocked. Inspect a
+            // private physical snapshot instead; never unblock just to test the DB.
+            assert!(matches!(
+                f.db.conn.lock(),
+                Err(AppError::Config(code)) if code == "secret.recovery_required"
+            ));
+            let captured = crate::database::inspection::capture(
+                &f.db.secrets.root().join(crate::config::DB_FILE_NAME),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(Database::content_digest(&captured.image).unwrap(), before);
             assert_eq!(
                 pending_record(f.db.secrets.root()).unwrap().is_some(),
                 boundary == Checkpoint::Intent
