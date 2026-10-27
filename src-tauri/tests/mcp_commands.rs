@@ -1648,11 +1648,12 @@ fn every_native_mcp_import_preserves_metadata_and_live_files_on_repeat() {
         let json_text = serde_json::to_string_pretty(&json!({
             "mcpServers": {
                 "shared": {"command": "echo", "args": ["imported"]},
-                "fresh": {"command": "echo", "args": ["fresh"]}
+                "fresh": {"command": "echo", "args": ["fresh"]},
+                "invalid": {"command": ""}
             }
         }))
         .unwrap();
-        let toml_text = "[mcp_servers.shared]\ncommand = \"echo\"\nargs = [\"imported\"]\n[mcp_servers.fresh]\ncommand = \"echo\"\nargs = [\"fresh\"]\n";
+        let toml_text = "[mcp_servers.shared]\ncommand = \"echo\"\nargs = [\"imported\"]\n[mcp_servers.fresh]\ncommand = \"echo\"\nargs = [\"fresh\"]\n[mcp_servers.invalid]\ncommand = \"\"\n";
         let files = [
             (get_claude_mcp_path(), json_text.clone()),
             (get_codex_config_path(), toml_text.to_string()),
@@ -1661,22 +1662,25 @@ fn every_native_mcp_import_preserves_metadata_and_live_files_on_repeat() {
             (opencode_dir.join("opencode.json"), serde_json::to_string_pretty(&json!({
                 "mcp": {
                     "shared": {"type": "local", "command": ["echo", "imported"]},
-                    "fresh": {"type": "local", "command": ["echo", "fresh"]}
+                    "fresh": {"type": "local", "command": ["echo", "fresh"]},
+                    "invalid": {"type": "local", "command": []}
                 }
             })).unwrap()),
-            (hermes_dir.join("config.yaml"), "mcp_servers:\n  shared:\n    command: echo\n    args: [imported]\n  fresh:\n    command: echo\n    args: [fresh]\n".to_string()),
+            (hermes_dir.join("config.yaml"), "mcp_servers:\n  shared:\n    command: echo\n    args: [imported]\n  fresh:\n    command: echo\n    args: [fresh]\n  invalid:\n    command: ''\n".to_string()),
         ];
         for (path, text) in &files {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, text).unwrap();
         }
         let state = create_test_state().expect("create test state");
-        let existing = McpServer {
+        let mut existing = McpServer {
             id: "shared".to_string(),
             name: "User-owned name".to_string(),
             server: json!({"type": "stdio", "command": "original", "args": ["keep"]}),
             apps: McpApps {
                 claude: true,
+                gemini: true,
+                opencode: true,
                 ..Default::default()
             },
             description: Some("Keep description".to_string()),
@@ -1684,7 +1688,45 @@ fn every_native_mcp_import_preserves_metadata_and_live_files_on_repeat() {
             docs: Some("https://example.com/docs".to_string()),
             tags: vec!["user-tag".to_string()],
         };
+        existing.apps.set_enabled_for(&app, false);
         state.db.save_mcp_server(&existing).unwrap();
+        type NativeImporter = fn(&mut MultiAppConfig) -> Result<usize, AppError>;
+        // Exercise the existing public native APIs without widening module exports.
+        let native_import: Option<NativeImporter> = match app {
+            AppType::Claude => Some(cc_switch_lib::import_from_claude),
+            AppType::Codex => Some(cc_switch_lib::import_from_codex),
+            AppType::Gemini => Some(cc_switch_lib::import_from_gemini),
+            AppType::GrokBuild => Some(cc_switch_lib::import_from_grokbuild),
+            _ => None,
+        };
+        let mut native_config = MultiAppConfig::default();
+        native_config.mcp.servers = Some(HashMap::from([("shared".into(), existing.clone())]));
+        if let Some(native_import) = native_import {
+            assert_eq!(
+                native_import(&mut native_config).unwrap(),
+                2,
+                "native new + enable for {app:?}"
+            );
+            assert_eq!(
+                native_import(&mut native_config).unwrap(),
+                0,
+                "native repeat for {app:?}"
+            );
+            native_config
+                .mcp
+                .servers
+                .as_mut()
+                .unwrap()
+                .get_mut("shared")
+                .unwrap()
+                .apps
+                .set_enabled_for(&app, false);
+            assert_eq!(
+                native_import(&mut native_config).unwrap(),
+                1,
+                "native enable-only for {app:?}"
+            );
+        }
         let mut expected = existing.clone();
         expected.apps.set_enabled_for(&app, true);
         assert_eq!(import(&state).unwrap(), 1, "first import for {app:?}");
@@ -1693,10 +1735,34 @@ fn every_native_mcp_import_preserves_metadata_and_live_files_on_repeat() {
         assert_eq!(servers.len(), 2, "server count for {app:?}");
         assert_eq!(
             serde_json::to_value(servers.get("shared").unwrap()).unwrap(),
-            serde_json::to_value(expected).unwrap(),
+            serde_json::to_value(&expected).unwrap(),
             "existing metadata for {app:?}"
         );
+        if native_import.is_some() {
+            assert_eq!(
+                serde_json::to_value(native_config.mcp.servers.as_ref().unwrap()).unwrap(),
+                serde_json::to_value(&servers).unwrap(),
+                "native and service merge results for {app:?}"
+            );
+        }
+        state.db.save_mcp_server(&existing).unwrap();
+        assert_eq!(
+            import(&state).unwrap(),
+            0,
+            "service enable-only is not new for {app:?}"
+        );
+        assert_eq!(
+            serde_json::to_value(&state.db.get_all_mcp_servers().unwrap()["shared"]).unwrap(),
+            serde_json::to_value(&expected).unwrap(),
+            "service re-enable preserves metadata for {app:?}"
+        );
         let fresh = servers.get("fresh").unwrap();
+        assert_eq!(fresh.id, "fresh");
+        assert_eq!(fresh.name, "fresh");
+        assert_eq!(fresh.description, None);
+        assert_eq!(fresh.homepage, None);
+        assert_eq!(fresh.docs, None);
+        assert!(fresh.tags.is_empty());
         assert_eq!(fresh.apps.enabled_apps(), vec![app.clone()]);
         assert_eq!(fresh.server["command"], "echo");
         assert_eq!(fresh.server["args"], json!(["fresh"]));

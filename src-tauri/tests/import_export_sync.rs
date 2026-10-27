@@ -716,6 +716,32 @@ url = "https://example.com"
 }
 
 #[test]
+fn import_from_codex_keeps_legacy_first_when_standard_repeats_the_id() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let path = cc_switch_lib::get_codex_config_path();
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let text = r#"[mcp.servers.shared]
+command = "legacy-first"
+[mcp_servers.shared]
+command = "standard-second"
+[mcp_servers.invalid]
+command = ""
+[mcp_servers.valid]
+command = "valid-neighbor"
+"#;
+    fs::write(&path, text).unwrap();
+    let mut config = MultiAppConfig::default();
+    assert_eq!(cc_switch_lib::import_from_codex(&mut config).unwrap(), 2);
+    assert_eq!(cc_switch_lib::import_from_codex(&mut config).unwrap(), 0);
+    let servers = config.mcp.servers.as_ref().unwrap();
+    assert_eq!(servers.len(), 2);
+    assert_eq!(servers["shared"].server["command"], "legacy-first");
+    assert_eq!(servers["valid"].server["command"], "valid-neighbor");
+    assert_eq!(fs::read_to_string(path).unwrap(), text);
+}
+
+#[test]
 fn import_from_codex_merges_into_existing_entries() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
@@ -760,7 +786,7 @@ command = "echo"
     );
 
     let changed = cc_switch_lib::import_from_codex(&mut config).expect("import codex");
-    assert!(changed >= 1, "should mark change for enabled flag");
+    assert_eq!(changed, 1, "should mark change for enabled flag");
 
     // v3.7.0: 检查统一结构
     let entry = config
