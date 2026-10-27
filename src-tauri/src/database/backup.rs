@@ -1577,6 +1577,10 @@ impl Database {
 
             if let Err(err) = Self::remove_db_backup(&path) {
                 log::warn!("删除旧数据库备份失败 {}: {}", path.display(), err);
+                // The primary snapshot may already be gone when sidecar removal
+                // fails. Stop this pass rather than delete another backup for
+                // the same retention slot. Preserving extra backups is safer.
+                break;
             } else {
                 removed += 1;
             }
@@ -2178,6 +2182,117 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
+    fn retention_fixture(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>, AppError> {
+        crate::config::ensure_private_directory(dir)?;
+        // These file-retention fixtures need the settings owner, not a live
+        // database: DB initialization can create its own safety backup.
+        assert_eq!(std::fs::read_dir(dir).unwrap().count(), 0);
+        let mut paths = Vec::new();
+        for (index, name) in ["oldest.db", "middle.db", "newest.db"].iter().enumerate() {
+            let path = dir.join(name);
+            let connection = Connection::open(&path)?;
+            connection.execute_batch("CREATE TABLE retention_canary(value TEXT);")?;
+            drop(connection);
+            let file = std::fs::File::options().write(true).open(&path).unwrap();
+            file.set_times(std::fs::FileTimes::new().set_modified(
+                std::time::UNIX_EPOCH
+                    + std::time::Duration::from_secs(1_700_000_000 + index as u64),
+            ))
+            .unwrap();
+            paths.push(path);
+        }
+        assert_eq!(std::fs::read_dir(dir).unwrap().count(), paths.len());
+        Ok(paths)
+    }
+
+    #[test]
+    #[serial]
+    fn retention_stops_after_sidecar_failure() -> Result<(), AppError> {
+        // A zero setting is normalized by the production settings owner to one.
+        for retain in [0, 1, 2, 3, 10] {
+            let _home = TestHomeGuard::new();
+            let _session = crate::secrets::testing::initialize_settings()?;
+            let _settings = SettingsGuard::with_backup_retain_count(retain);
+            let dir = crate::config::get_app_config_dir().join("backups");
+            let paths = retention_fixture(&dir)?;
+            let middle = std::fs::read(&paths[1]).unwrap();
+            let newest = std::fs::read(&paths[2]).unwrap();
+            // Deterministic real unlink failure, not a mocked filesystem error.
+            let sidecar = dir.join("oldest.db-wal");
+            std::fs::create_dir(&sidecar).unwrap();
+            let _guard = lock_backup_file_operations()?;
+            Database::cleanup_db_backups(&dir, &[paths[2].as_path()])?;
+            assert_eq!(paths[0].exists(), retain >= 3);
+            assert_eq!(std::fs::read(&paths[1]).unwrap(), middle);
+            assert_eq!(std::fs::read(&paths[2]).unwrap(), newest);
+            assert!(
+                sidecar.is_dir(),
+                "unknown failed artifact must not be removed recursively"
+            );
+            let remaining = paths.iter().filter(|path| path.exists()).count();
+            assert!(remaining >= crate::settings::effective_backup_retain_count().min(3));
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn retention_stops_when_the_primary_backup_cannot_be_removed() -> Result<(), AppError> {
+        let _home = TestHomeGuard::new();
+        let _session = crate::secrets::testing::initialize_settings()?;
+        let _settings = SettingsGuard::with_backup_retain_count(2);
+        let dir = crate::config::get_app_config_dir().join("backups");
+        let paths = retention_fixture(&dir)?;
+        std::fs::remove_file(&paths[0]).unwrap();
+        std::fs::create_dir(&paths[0]).unwrap();
+        std::fs::File::open(&paths[0])
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
+            .unwrap();
+        let _guard = lock_backup_file_operations()?;
+        Database::cleanup_db_backups(&dir, &[paths[2].as_path()])?;
+        assert!(paths.iter().all(|path| path.exists()));
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn retention_success_keeps_count_and_protected_snapshot() -> Result<(), AppError> {
+        for retain in [0, 1, 2, 3, 10] {
+            let _home = TestHomeGuard::new();
+            let _session = crate::secrets::testing::initialize_settings()?;
+            let _settings = SettingsGuard::with_backup_retain_count(retain);
+            let dir = crate::config::get_app_config_dir().join("backups");
+            let paths = retention_fixture(&dir)?;
+            let _guard = lock_backup_file_operations()?;
+            Database::cleanup_db_backups(&dir, &[paths[2].as_path()])?;
+            assert!(paths[2].exists());
+            assert_eq!(
+                paths.iter().filter(|path| path.exists()).count(),
+                crate::settings::effective_backup_retain_count().min(3)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn manual_backup_failure_does_not_claim_orphans() -> Result<(), AppError> {
+        let _home = TestHomeGuard::new();
+        let _session = crate::secrets::testing::initialize_settings()?;
+        let dir = crate::config::get_app_config_dir().join("backups");
+        let paths = retention_fixture(&dir)?;
+        let sidecar = dir.join("oldest.db-wal");
+        std::fs::create_dir(&sidecar).unwrap();
+        assert!(Database::delete_backup("oldest.db").is_err());
+        assert!(!paths[0].exists());
+        assert!(sidecar.is_dir());
+        assert!(Database::delete_backup("oldest.db").is_err());
+        assert!(sidecar.is_dir());
+        assert!(paths[1].exists() && paths[2].exists());
+        Ok(())
+    }
     #[test]
     #[serial]
     fn removing_a_backup_removes_only_its_sqlite_file_set() -> Result<(), AppError> {
