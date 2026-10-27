@@ -12,6 +12,82 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 const KEY: &str = " 代际 🔑\r\n aBc ";
 const CANARY: &str = "synthetic-native-generation-secret";
+
+#[test]
+#[serial_test::serial]
+fn reserved_conversion_retries_after_source_preflight_is_repaired() {
+    let f = Fixture::new(true);
+    config_file_io::ensure_private_directory(&f.root.join("backups")).unwrap();
+    let orphan = f.root.join("backups/orphan.db-wal");
+    std::fs::write(&orphan, b"synthetic orphan sidecar").unwrap();
+    let selection = f.selection();
+    let error = convert_at(
+        &f.db,
+        &f.root,
+        selection.clone(),
+        GenerationMode::Encrypted(Zeroizing::new(KEY.into())),
+        &f.cache,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, AppError::Config(code) if code == "protection.unclaimed_database_artifact")
+    );
+    let pending = isolated_scope::inspect_pending_generation_at(&selection)
+        .unwrap()
+        .unwrap();
+    assert_eq!(std::fs::read_dir(pending.root()).unwrap().count(), 1);
+    assert!(f.db.secret_session().read().is_ok());
+    std::fs::remove_file(orphan).unwrap(); // Synthetic fixture only.
+    let root = result_root(
+        convert_at(
+            &f.db,
+            &f.root,
+            selection,
+            GenerationMode::Encrypted(Zeroizing::new(KEY.into())),
+            &f.cache,
+        )
+        .unwrap(),
+    );
+    assert_eq!(root, pending.root());
+    verify_target(&root, &f.cache, false);
+}
+
+#[test]
+#[serial_test::serial]
+fn reserved_conversion_does_not_accept_unrecognized_target_contents() {
+    let f = Fixture::new(true);
+    config_file_io::ensure_private_directory(&f.root.join("backups")).unwrap();
+    let orphan = f.root.join("backups/orphan.db-wal");
+    std::fs::write(&orphan, b"synthetic orphan sidecar").unwrap();
+    let selection = f.selection();
+    assert!(convert_at(
+        &f.db,
+        &f.root,
+        selection.clone(),
+        GenerationMode::Encrypted(Zeroizing::new(KEY.into())),
+        &f.cache
+    )
+    .is_err());
+    let pending = isolated_scope::inspect_pending_generation_at(&selection)
+        .unwrap()
+        .unwrap();
+    std::fs::remove_file(orphan).unwrap();
+    let unknown = pending.root().join("unrecognized.bin");
+    std::fs::write(&unknown, b"preserve unknown candidate contents").unwrap();
+    assert!(convert_at(
+        &f.db,
+        &f.root,
+        selection,
+        GenerationMode::Encrypted(Zeroizing::new(KEY.into())),
+        &f.cache
+    )
+    .is_err());
+    assert_eq!(
+        std::fs::read(unknown).unwrap(),
+        b"preserve unknown candidate contents"
+    );
+    assert!(f.db.secret_session().read().is_ok());
+}
 struct Fixture {
     _home: TestHome,
     root: PathBuf,

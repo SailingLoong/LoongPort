@@ -9,6 +9,7 @@ import { sharedRoutingApi } from "@/lib/api/sharedRouting";
 import { serviceSourcesApi } from "@/lib/api/serviceSources";
 import { applicationRoutingApi } from "@/lib/api/applicationRouting";
 import { credentialProtectionApi } from "@/lib/api/credentialProtection";
+import { startupRecoveryApi } from "@/lib/api/startupRecovery";
 import { serviceOnboardingApi } from "@/lib/api/serviceOnboarding";
 import {
   LAST_APP_STORAGE_KEY,
@@ -80,12 +81,12 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
-function mount() {
+function mount(credentialRuntimeAvailable = true) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Infinity } },
   });
   client.setQueryData(["runtimeAvailability"], {
-    credentialRuntimeAvailable: true,
+    credentialRuntimeAvailable,
   });
   render(
     <QueryClientProvider client={client}>
@@ -98,6 +99,35 @@ function mount() {
   );
   return client;
 }
+it("shows the required restart instead of a credential fault and disables unavailable sidebar navigation", async () => {
+  vi.spyOn(startupRecoveryApi, "status").mockResolvedValue(null);
+  vi.mocked(credentialProtectionApi.status).mockResolvedValue({
+    mode: "encrypted",
+    status: "blocked",
+    shouldPrompt: false,
+    canConfigure: false,
+    canUnlock: false,
+    canSwitchToPlaintext: false,
+    canCreateSeparateConfiguration: false,
+    reviewToken: null,
+    restartRequired: true,
+    errorCode: null,
+  });
+  mount(false);
+  await screen.findByRole("button", { name: "storageProtection.restart" });
+  expect(
+    screen.queryByText("secrets.runtimeUnavailable"),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByText("storageProtection.status.blocked"),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "client.services" }),
+  ).toBeDisabled();
+  expect(
+    screen.getByRole("button", { name: "client.applications" }),
+  ).toBeDisabled();
+});
 it("mounts the actual compact application switcher at the top, only once, above the C2 workspace", async () => {
   mount();
   await screen.findByRole("region", { name: "routingWorkspace.workspace" });
