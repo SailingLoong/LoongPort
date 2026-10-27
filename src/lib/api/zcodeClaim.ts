@@ -28,6 +28,7 @@ export interface ClaimRecord {
   canClaim: boolean;
 }
 export interface ClaimState {
+  consentRevision: string;
   enabled: boolean;
   participants: string[];
   records: Record<string, ClaimRecord>;
@@ -40,11 +41,13 @@ export const zcodeClaimApi = {
     dataRoot: string | undefined,
     enabled: boolean,
     participants: string[],
+    expectedRevision: string,
   ) =>
     invoke<ClaimState>("set_zcode_claim_auto", {
       dataRoot,
       enabled,
       participants,
+      expectedRevision,
     }),
   start: (dataRoot: string | undefined, ids: string[], previewOnly: boolean) =>
     invoke<ClaimState>("start_zcode_claim", { dataRoot, ids, previewOnly }),

@@ -32,9 +32,17 @@ pub(crate) async fn set_zcode_claim_auto(
     data_root: Option<PathBuf>,
     enabled: bool,
     participants: Vec<String>,
+    expected_revision: String,
 ) -> Result<claim_runtime::View, &'static str> {
     main_window(&window)?;
-    claim_runtime::set_auto(state.db.clone(), data_root, enabled, participants).await
+    claim_runtime::set_auto(
+        state.db.clone(),
+        data_root,
+        enabled,
+        participants,
+        expected_revision,
+    )
+    .await
 }
 #[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn start_zcode_claim(

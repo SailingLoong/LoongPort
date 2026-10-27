@@ -40,14 +40,9 @@ fn jobs() -> &'static Jobs {
     static JOBS: OnceLock<Jobs> = OnceLock::new();
     JOBS.get_or_init(Jobs::default)
 }
-#[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Scope {
-    data_root: PathBuf,
-    enabled: bool,
-    participants: Vec<String>,
-    records: BTreeMap<String, Record>,
-}
+#[path = "claim_consent.rs"]
+mod claim_consent;
+use claim_consent::Scope;
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Saved {
@@ -56,6 +51,7 @@ struct Saved {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct View {
+    consent_revision: String,
     enabled: bool,
     participants: Vec<String>,
     records: BTreeMap<String, RecordView>,
@@ -94,9 +90,10 @@ fn ids(db: &Database, ctx: &LibraryContext) -> Result<BTreeSet<String>, &'static
         .map_err(|_| "changed")?;
     Ok(catalog.profiles.into_iter().map(|p| p.id).collect())
 }
-fn view(scope: Scope, valid: &BTreeSet<String>) -> View {
+fn view(context_id: &str, scope: Scope, valid: &BTreeSet<String>) -> View {
     let busy = jobs().busy();
     View {
+        consent_revision: scope.revision(context_id),
         enabled: scope.enabled,
         participants: scope
             .participants
@@ -123,7 +120,7 @@ pub(crate) async fn state(db: Arc<Database>, root: Option<PathBuf>) -> Result<Vi
                 .scopes
                 .remove(ctx.context_id())
                 .unwrap_or_default();
-            Ok(view(scope, &valid))
+            Ok(view(ctx.context_id(), scope, &valid))
         })();
         Ok(result)
     })
@@ -135,6 +132,7 @@ pub(crate) async fn set_auto(
     root: Option<PathBuf>,
     enabled: bool,
     participants: Vec<String>,
+    expected_revision: String,
 ) -> Result<View, &'static str> {
     if participants.len() > 100
         || participants.iter().collect::<BTreeSet<_>>().len() != participants.len()
@@ -142,22 +140,26 @@ pub(crate) async fn set_auto(
         return Err("invalid");
     }
     if !enabled {
+        // Stop the current round immediately, as before. This is not a durable
+        // consent write: a stale request still fails CAS under the owner below.
         jobs().cancel();
     }
     run_owned(db, move |db| {
         let result = (|| {
             let ctx = context(root.as_deref())?;
             let valid = ids(db, &ctx)?;
-            if participants.iter().any(|id| !valid.contains(id)) {
-                return Err("changed");
-            }
             let mut saved = load(db)?;
             let scope = saved.scopes.entry(ctx.context_id().into()).or_default();
             scope.data_root = ctx.data_root().into();
-            scope.enabled = enabled;
-            scope.participants = participants;
-            scope.records.retain(|id, _| valid.contains(id));
-            let out = view(scope.clone(), &valid);
+            // Compare and persist within run_owned's existing serialized owner.
+            scope.update(
+                ctx.context_id(),
+                &expected_revision,
+                enabled,
+                participants,
+                &valid,
+            )?;
+            let out = view(ctx.context_id(), scope.clone(), &valid);
             save(db, &saved)?;
             Ok(out)
         })();
@@ -979,7 +981,7 @@ mod tests {
             records: BTreeMap::from([("deleted".into(), Record::default())]),
             ..Scope::default()
         };
-        let out = view(scope, &BTreeSet::from(["kept".into()]));
+        let out = view("synthetic-context", scope, &BTreeSet::from(["kept".into()]));
         assert_eq!(out.participants, vec!["kept"]);
         assert!(!out.records.contains_key("deleted"));
     }

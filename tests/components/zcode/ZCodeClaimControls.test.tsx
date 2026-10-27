@@ -17,6 +17,7 @@ vi.mock("@/lib/api/zcodeClaim", () => ({
   },
 }));
 const state: ClaimState = {
+  consentRevision: "context:0",
   enabled: false,
   participants: [],
   records: {},
@@ -58,6 +59,7 @@ it("reads state without claiming; selection and auto participation require expli
       "/synthetic/library",
       true,
       ["a"],
+      "context:0",
     ),
   );
 });
@@ -406,4 +408,60 @@ it("cancels using the currently selected library", async () => {
       "/synthetic/other-library",
     ),
   );
+});
+
+it("keeps the reviewed consent revision when polling observes another window's revocation", async () => {
+  vi.mocked(zcodeClaimApi.state).mockResolvedValueOnce({
+    ...state,
+    consentRevision: "context:1",
+  } as ClaimState);
+  render(
+    <ZCodeClaimControls dataRoot="/synthetic/library" profiles={profiles} />,
+  );
+  await screen.findAllByText("Unknown");
+  fireEvent.click(screen.getByLabelText("Select Account A"));
+  fireEvent.click(screen.getByLabelText("Automatic claims"));
+  vi.mocked(zcodeClaimApi.state).mockResolvedValue({
+    ...state,
+    consentRevision: "context:2",
+  } as ClaimState);
+  fireEvent(document, new Event("visibilitychange"));
+  await waitFor(() => expect(zcodeClaimApi.state).toHaveBeenCalledTimes(2));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Apply automatic participation" }),
+  );
+  await waitFor(() =>
+    expect(zcodeClaimApi.setAuto).toHaveBeenCalledWith(
+      "/synthetic/library",
+      true,
+      ["a"],
+      "context:1",
+    ),
+  );
+});
+
+it("refreshes a rejected consent draft without retrying the grant", async () => {
+  vi.mocked(zcodeClaimApi.state).mockResolvedValueOnce({
+    ...state,
+    consentRevision: "context:1",
+  });
+  render(
+    <ZCodeClaimControls dataRoot="/synthetic/library" profiles={profiles} />,
+  );
+  await screen.findAllByText("Unknown");
+  fireEvent.click(screen.getByLabelText("Select Account A"));
+  fireEvent.click(screen.getByLabelText("Automatic claims"));
+  vi.mocked(zcodeClaimApi.state).mockResolvedValue({
+    ...state,
+    consentRevision: "context:2",
+  });
+  vi.mocked(zcodeClaimApi.setAuto).mockRejectedValueOnce("changed");
+  fireEvent.click(
+    screen.getByRole("button", { name: "Apply automatic participation" }),
+  );
+  await waitFor(() =>
+    expect(screen.getByLabelText("Automatic claims")).not.toBeChecked(),
+  );
+  expect(screen.getByLabelText("Select Account A")).not.toBeChecked();
+  expect(zcodeClaimApi.setAuto).toHaveBeenCalledTimes(1);
 });
