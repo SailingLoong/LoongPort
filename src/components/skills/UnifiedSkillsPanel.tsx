@@ -116,7 +116,12 @@ const UnifiedSkillsPanel = React.forwardRef<
   const writeLockRef = React.useRef(false);
   const checkUpdatesLockRef = React.useRef(false);
 
-  const { data: skills, isLoading } = useInstalledSkills();
+  const {
+    data: skills,
+    isLoading,
+    isError: installedSkillsError,
+    refetch: refetchInstalledSkills,
+  } = useInstalledSkills();
   // Skill 专属设置（存储位置/同步方式）的值与保存通道。
   const { settings, autoSaveSettings, updateSettings } = useSettings();
   const {
@@ -372,7 +377,7 @@ const UnifiedSkillsPanel = React.forwardRef<
   const handleOpenImport = async () => {
     if (!beginWrite()) return;
     try {
-      const result = await scanUnmanaged();
+      const result = await scanUnmanaged({ throwOnError: true });
       if (!result.data || result.data.length === 0) {
         toast.success(t("skills.noUnmanagedFound"), { closeButton: true });
         return;
@@ -447,7 +452,7 @@ const UnifiedSkillsPanel = React.forwardRef<
     }
     checkUpdatesLockRef.current = true;
     try {
-      const result = await checkUpdates();
+      const result = await checkUpdates({ throwOnError: true });
       const updates = result.data || [];
       if (updates.length === 0) {
         toast.success(t("skills.noUpdates"), { closeButton: true });
@@ -684,6 +689,17 @@ const UnifiedSkillsPanel = React.forwardRef<
           {isLoading ? (
             <div className="text-center py-12 text-muted-foreground">
               {t("skills.loading")}
+            </div>
+          ) : installedSkillsError && !skills ? (
+            <div role="alert" className="space-y-3 py-12 text-center text-sm">
+              <p>{t("skills.loadFailed")}</p>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void refetchInstalledSkills()}
+              >
+                {t("skills.refresh")}
+              </Button>
             </div>
           ) : !skills || skills.length === 0 ? (
             <div className="text-center py-12">
