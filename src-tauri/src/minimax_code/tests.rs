@@ -1186,59 +1186,223 @@ fn public_signature_matches_independently_computed_golden_bytes() {
         assert_eq!(r.headers()["x-signature"], signature);
     }
 }
+// This fixture serves exactly one bounded Content-Length request, not a general HTTP server.
+fn read_fixture_http_request(stream: &mut std::net::TcpStream) -> std::io::Result<Vec<u8>> {
+    use std::io::{Error, ErrorKind, Read};
+    use std::time::{Duration, Instant};
+    const MAX_HEADER_BYTES: usize = 16 * 1024;
+    const MAX_BODY_BYTES: usize = 16 * 1024;
+    // Retain the original fixture's 200ms read budget, now absolute rather
+    // than allowing each partial read to renew it. Production timeouts stay unchanged.
+    let deadline = Instant::now() + Duration::from_millis(200);
+    let invalid = || Error::new(ErrorKind::InvalidData, "invalid fixture request framing");
+    let mut bytes = Vec::new();
+    let mut expected_len = None;
+    loop {
+        if expected_len.is_none() {
+            if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                let end = end + 4;
+                if end > MAX_HEADER_BYTES {
+                    return Err(invalid());
+                }
+                let headers = std::str::from_utf8(&bytes[..end]).map_err(|_| invalid())?;
+                let mut length = None;
+                for line in headers
+                    .split("\r\n")
+                    .skip(1)
+                    .filter(|line| !line.is_empty())
+                {
+                    let (name, value) = line.split_once(':').ok_or_else(invalid)?;
+                    if name.eq_ignore_ascii_case("transfer-encoding") {
+                        return Err(invalid());
+                    }
+                    if name.eq_ignore_ascii_case("content-length") {
+                        if length.is_some() {
+                            return Err(invalid());
+                        }
+                        let value = value.trim();
+                        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                            return Err(invalid());
+                        }
+                        let value = value.parse::<usize>().map_err(|_| invalid())?;
+                        if value > MAX_BODY_BYTES {
+                            return Err(invalid());
+                        }
+                        length = Some(value);
+                    }
+                }
+                expected_len = Some(end + length.ok_or_else(invalid)?);
+            } else if bytes.len() >= MAX_HEADER_BYTES {
+                return Err(invalid());
+            }
+        }
+        if let Some(expected) = expected_len {
+            if bytes.len() == expected {
+                return Ok(bytes);
+            }
+            if bytes.len() > expected {
+                return Err(invalid());
+            }
+        }
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| Error::new(ErrorKind::TimedOut, "fixture request read deadline"))?;
+        stream.set_read_timeout(Some(remaining))?;
+        let mut chunk = [0u8; 4096];
+        let count = stream.read(&mut chunk)?;
+        if count == 0 {
+            return Err(Error::new(
+                ErrorKind::UnexpectedEof,
+                "incomplete fixture request",
+            ));
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+    }
+}
+
+fn assert_fixture_reads_fragmented_request(header_padding: usize, body_size: usize) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let request = format!("POST /claim HTTP/1.1\r\nHost: {addr}\r\nX-Fixture: {}\r\nContent-Length: {body_size}\r\n\r\n{}", "x".repeat(header_padding), "b".repeat(body_size)).into_bytes();
+    let worker = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let received = read_fixture_http_request(&mut stream);
+        let written = stream.write_all(
+            b"HTTP/1.1 307 Temporary Redirect\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        (received, written)
+    });
+    let mut client = std::net::TcpStream::connect(addr).unwrap();
+    client
+        .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+        .unwrap();
+    let sent = request
+        .chunks(37)
+        .try_for_each(|part| client.write_all(part));
+    let _ = client.shutdown(std::net::Shutdown::Write);
+    let mut response = Vec::new();
+    let read = client.read_to_end(&mut response);
+    // Join before any protocol assertion so failures cannot detach the server.
+    let (received, written) = worker.join().unwrap();
+    let received = received.unwrap();
+    assert_eq!(
+        received.len(),
+        request.len(),
+        "fixture must consume complete headers and declared body before responding"
+    );
+    assert_eq!(received, request);
+    sent.unwrap();
+    written.unwrap();
+    read.unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 307 "));
+}
+
+#[test]
+fn fixture_http_reader_consumes_fragmented_body() {
+    assert_fixture_reads_fragmented_request(0, 8192);
+}
+
+#[test]
+fn fixture_http_reader_consumes_fragmented_headers() {
+    assert_fixture_reads_fragmented_request(5000, 2);
+}
+
+fn assert_fixture_rejects_request(request: &[u8], expected: std::io::ErrorKind) {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let worker = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        read_fixture_http_request(&mut stream)
+    });
+    let mut client = std::net::TcpStream::connect(addr).unwrap();
+    let sent = client.write_all(request);
+    let _ = client.shutdown(std::net::Shutdown::Write);
+    let result = worker.join().unwrap();
+    sent.unwrap();
+    assert_eq!(result.unwrap_err().kind(), expected);
+}
+
+#[test]
+fn fixture_http_reader_rejects_truncated_body() {
+    assert_fixture_rejects_request(
+        b"POST /claim HTTP/1.1\r\nContent-Length: 2\r\n\r\n{",
+        std::io::ErrorKind::UnexpectedEof,
+    );
+}
+
+#[test]
+fn fixture_http_reader_rejects_oversized_body_declaration() {
+    assert_fixture_rejects_request(
+        b"POST /claim HTTP/1.1\r\nContent-Length: 16385\r\n\r\n",
+        std::io::ErrorKind::InvalidData,
+    );
+}
+
+#[test]
+fn fixture_http_reader_rejects_ambiguous_length() {
+    assert_fixture_rejects_request(
+        b"POST /claim HTTP/1.1\r\nContent-Length: 2\r\nContent-Length: 3\r\n\r\n{}",
+        std::io::ErrorKind::InvalidData,
+    );
+}
+
 #[tokio::test]
 async fn real_http_client_does_not_follow_redirect_or_retry_claim() {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::time::{Duration, Instant};
     for redirect in [true, false] {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().unwrap();
-        let worker = std::thread::spawn(move || {
-            let until = Instant::now() + Duration::from_secs(2);
-            let mut count = 0;
-            while Instant::now() < until {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        count += 1;
-                        stream
-                            .set_read_timeout(Some(Duration::from_millis(200)))
-                            .unwrap();
-                        let mut bytes = [0u8; 4096];
-                        let _ = stream.read(&mut bytes);
-                        if redirect {
-                            write!(stream,"HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{addr}/again\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").unwrap();
-                        }
-                        break;
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(5))
-                    }
-                    Err(e) => panic!("{e}"),
-                }
-            }
-            let until = Instant::now() + Duration::from_millis(250);
-            while Instant::now() < until {
-                if listener.accept().is_ok() {
-                    count += 1
-                }
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            count
-        });
         let client = super::http::new_client(Duration::from_millis(500)).unwrap();
         let request = client
             .post(format!("http://{addr}/claim"))
             .body("{}")
             .build()
             .unwrap();
+        let worker = std::thread::spawn(move || -> std::io::Result<usize> {
+            let until = Instant::now() + Duration::from_secs(2);
+            let mut count = 0;
+            while Instant::now() < until {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        count += 1;
+                        read_fixture_http_request(&mut stream)?;
+                        if redirect {
+                            write!(stream,"HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{addr}/again\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}")?;
+                        }
+                        break;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            let until = Instant::now() + Duration::from_millis(250);
+            while Instant::now() < until {
+                match listener.accept() {
+                    Ok(_) => count += 1,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(error) => return Err(error),
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Ok(count)
+        });
         let result = super::http::send_once(&client, request).await;
+        // Always reap the fixture before any result assertion, including an
+        // unexpected client transport error. Keep 307 and single-connection checks.
+        let observed = worker.join().expect("join HTTP fixture");
+        assert_eq!(observed.expect("fixture request read/response write"), 1);
         if redirect {
             assert_eq!(result.unwrap().status, 307)
         } else {
             assert_eq!(result.err(), Some(Failure::NetworkUnavailable))
         }
-        assert_eq!(worker.join().unwrap(), 1);
     }
 }
 
