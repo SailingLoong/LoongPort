@@ -1,10 +1,27 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { CatalogPreview } from "./providers";
+import type { CatalogPreview, ProviderCatalogDecision } from "./providers";
 import type { SubscriptionWindow } from "@/lib/api/applicationRouting";
 
 import type { UsageResult } from "@/types";
 
 import type { AppId } from "./types";
+
+import type {
+  RelayDiscovery,
+  RelayPrepareRequest,
+  RelaySetupReceipt,
+  RelayConnectionReview,
+  RelayConnectionOutcome,
+} from "./relaySetup";
+export type {
+  RelayDiscovery,
+  RelayTierChoice,
+  RelayTierSelection,
+  RelayPrepareRequest,
+  RelaySetupReceipt,
+  RelayKeyFact,
+  RelayTargetFact,
+} from "./relaySetup";
 
 export interface RelayStatus {
   /** 域名输入框的底纹词。 */
@@ -142,22 +159,6 @@ export interface RelayDirectoryListing {
   items: RelayDirectoryItem[];
   /** 实测快照的数据时间（Unix 秒）；0 = 没有快照，前端不显示时间戳。 */
   syncedAt: number;
-}
-
-/** Read-only group discovery; no access key or provider is created. */
-export interface RelayTierChoice {
-  app: AppId;
-  id: string;
-  providerId: string;
-  name: string;
-  groupId: string;
-  prepared?: boolean;
-  compatibility?: "unknown" | "configured";
-}
-
-export interface RelayTierSelection {
-  app: AppId;
-  groupId: string;
 }
 
 export interface ProvisionSummary {
@@ -597,14 +598,49 @@ export const relayApi = {
   balance: (relayId: number, force = false): Promise<RowBalanceResult> =>
     invoke("relay_balance", { relayId, force }),
 
-  discoverTiers: (relayId: number): Promise<RelayTierChoice[]> =>
+  discoverTiers: (relayId: number): Promise<RelayDiscovery> =>
     invoke("relay_discover_tiers", { relayId }),
 
-  prepareTiers: (
+  prepareTiers: (request: RelayPrepareRequest): Promise<RelaySetupReceipt> =>
+    invoke("relay_prepare_tiers", { request }),
+
+  getSetupOperation: (
     relayId: number,
-    selections: RelayTierSelection[],
-  ): Promise<ProvisionSummary> =>
-    invoke("relay_prepare_tiers", { relayId, selections }),
+    operationId?: string,
+    historyOffset?: number,
+  ): Promise<RelaySetupReceipt | null> =>
+    invoke("relay_get_setup_operation", {
+      relayId,
+      operationId,
+      historyOffset,
+    }),
+
+  prepareApplicationConnection: (
+    operationId: string,
+    targetApp: AppId,
+    expectedReceiptRevision: number,
+    catalogDecision?: ProviderCatalogDecision,
+  ): Promise<RelayConnectionReview> =>
+    invoke("relay_prepare_application_connection", {
+      operationId,
+      targetApp,
+      expectedReceiptRevision,
+      catalogDecision,
+    }),
+  applyPreparedTier: (
+    operationId: string,
+    targetApp: AppId,
+    expectedReceiptRevision: number,
+    quitChatgpt: boolean,
+  ): Promise<RelayConnectionOutcome> =>
+    invoke("relay_apply_prepared_tier", {
+      operationId,
+      targetApp,
+      expectedReceiptRevision,
+      quitChatgpt,
+    }),
+  reconcileSetupOperation: (operationId: string): Promise<RelaySetupReceipt> =>
+    invoke("relay_reconcile_setup_operation", { operationId }),
 
   refresh: (relayId: number, app: AppId): Promise<RefreshResult> =>
     invoke("relay_refresh", { relayId, app }),

@@ -1,7 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { PROVIDER_STORE_APP_IDS } from "@/config/appConfig";
 import type { AppId } from "@/lib/api";
-import { relayApi } from "@/lib/api/relay";
 import { vendorApi } from "@/lib/api/vendor";
 export {
   serviceOnboardingKey,
@@ -19,37 +18,28 @@ export interface ServiceConfigurationChoice {
   providerId: string;
   name: string;
 }
-export function useServiceConfigurationChoices(account: ConnectedService) {
+/** Vendor setup retains its existing plan owner. Relay uses useRelaySetup's
+ * native discovery and durable operation, never a local-tier fallback. */
+export function useVendorConfigurationChoices(
+  account: Pick<ConnectedService, "rowId" | "name">,
+) {
   return useQuery({
-    queryKey: ["service-configuration", account.kind, account.rowId],
+    queryKey: ["service-configuration", "vendor", account.rowId],
     queryFn: async () =>
       (
         await Promise.all(
           PROVIDER_STORE_APP_IDS.map(
             async (app): Promise<ServiceConfigurationChoice[]> => {
-              if (account.kind === "vendor") {
-                const listing = await vendorApi.list(app);
-                return (
-                  listing.accounts
-                    .find((row) => row.id === account.rowId)
-                    ?.plans.filter((plan) => plan.canSwitch)
-                    .map((plan) => ({
-                      app,
-                      id: plan.planId,
-                      providerId: plan.providerId,
-                      name: plan.planName,
-                    })) ?? []
-                );
-              }
-              const rows = await relayApi.listRelays(app);
+              const listing = await vendorApi.list(app);
               return (
-                rows
+                listing.accounts
                   .find((row) => row.id === account.rowId)
-                  ?.tiers.map((tier) => ({
+                  ?.plans.filter((plan) => plan.canSwitch)
+                  .map((plan) => ({
                     app,
-                    id: tier.providerId,
-                    providerId: tier.providerId,
-                    name: tier.displayName,
+                    id: plan.planId,
+                    providerId: plan.providerId,
+                    name: plan.planName,
                   })) ?? []
               );
             },

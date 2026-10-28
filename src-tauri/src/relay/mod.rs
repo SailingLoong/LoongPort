@@ -52,3 +52,8 @@ pub mod transit;
 pub use managed::{is_managed, reject_if_managed};
 
 pub mod entitlement_expiry;
+
+pub(crate) mod setup_contract;
+pub(crate) mod setup_journal;
+#[cfg(test)]
+mod setup_protocol_fixture;

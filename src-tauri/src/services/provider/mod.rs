@@ -5424,7 +5424,11 @@ impl ProviderService {
             && crate::mode::operation::uses_upstream4_schema(&state.db)?;
         let managed = matches!(app_type, AppType::Codex)
             && Self::managed_codex_oauth_account_id(&provider).is_some();
-        let _guard = if modern || managed || managed_inference::is_managed_inference(&provider) {
+        let _guard = if modern
+            || managed
+            || app_type == AppType::CodexImage
+            || managed_inference::is_managed_inference(&provider)
+        {
             Some(futures::executor::block_on(
                 state.proxy_service.lock_switch_for_app(app_type.as_str()),
             ))
@@ -5672,6 +5676,15 @@ impl ProviderService {
         provider: Provider,
         credential_write: bool,
     ) -> Result<bool, AppError> {
+        // Image reviewed selection and its existing edit owner share one lock.
+        // Do not route Image into the native/proxy writer below.
+        let _image_guard = if app_type == AppType::CodexImage {
+            Some(futures::executor::block_on(
+                state.proxy_service.lock_switch_for_app(app_type.as_str()),
+            ))
+        } else {
+            None
+        };
         if !app_type.supports_local_proxy() {
             return Self::update_locked_with_credential_intent(
                 state,
@@ -6390,7 +6403,7 @@ impl ProviderService {
             return Ok(());
         }
 
-        let _guard = if app_type.supports_local_proxy() {
+        let _guard = if app_type.supports_local_proxy() || app_type == AppType::CodexImage {
             Some(futures::executor::block_on(
                 state.proxy_service.lock_switch_for_app(app_type.as_str()),
             ))
@@ -6517,8 +6530,10 @@ impl ProviderService {
         // publication under the canonical app owner; proxy/mode policy below
         // remains restricted to local-proxy applications.
         let _switch_guard = if app_type.supports_local_proxy()
-            || matches!(app_type, AppType::OpenCode | AppType::Hermes)
-        {
+            || matches!(
+                app_type,
+                AppType::OpenCode | AppType::Hermes | AppType::CodexImage
+            ) {
             Some(futures::executor::block_on(
                 state.proxy_service.lock_switch_for_app(app_type.as_str()),
             ))

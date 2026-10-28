@@ -27,7 +27,7 @@ fn selected_prepare_inserts_only_local_record_and_preserves_application_routing(
         .unwrap();
     let before_current = db.get_current_provider("claude").unwrap();
     assert!(db
-        .prepare_provider_if_absent("claude", &selected, Some(0.7))
+        .prepare_provider_if_absent("claude", &selected, Some(0.7), None)
         .unwrap());
     let stored = db
         .get_provider_by_id(&selected.id, "claude")
@@ -81,7 +81,7 @@ fn selected_prepare_does_not_join_an_uninitialized_effective_chain() {
         "new-model",
     );
     assert!(db
-        .prepare_provider_if_absent("claude", &selected, Some(0.7))
+        .prepare_provider_if_absent("claude", &selected, Some(0.7), None)
         .unwrap());
     assert_eq!(
         crate::proxy::application_routing::chain_ids(&db, "claude").unwrap(),
@@ -131,7 +131,7 @@ fn selected_prepare_reuses_existing_provider_without_mutating_any_effective_fiel
         "default-model",
     );
     assert!(!db
-        .prepare_provider_if_absent("claude", &replacement, Some(9.0))
+        .prepare_provider_if_absent("claude", &replacement, Some(9.0), None)
         .unwrap());
     let after = db
         .get_provider_by_id(&existing.id, "claude")
@@ -194,7 +194,7 @@ fn concurrent_selected_prepares_across_connections_keep_first_committed_provider
             let next = provider("loongport-0011223344556677", name, key, model);
             barrier.wait();
             let inserted = db
-                .prepare_provider_if_absent("claude", &next, None)
+                .prepare_provider_if_absent("claude", &next, None, None)
                 .unwrap();
             (inserted, next, db)
         })
@@ -263,7 +263,7 @@ fn selected_initial_metadata_failure_rolls_back_provider_and_chain() {
         "model",
     );
     let error = db
-        .prepare_provider_if_absent("claude", &selected, Some(0.7))
+        .prepare_provider_if_absent("claude", &selected, Some(0.7), None)
         .unwrap_err();
     assert!(error.to_string().contains("fixture initial rate failure"));
     assert!(db

@@ -125,6 +125,7 @@ function renderRelayRow(
   relayOverrides: Partial<ComponentProps<typeof RelayRow>["relay"]> = {},
 ) {
   const onLogin = vi.fn();
+  const onConfigure = vi.fn();
   const props: ComponentProps<typeof RelayRow> = {
     relay: {
       id: 1,
@@ -147,6 +148,7 @@ function renderRelayRow(
     busy: new Set(),
     onLogin,
     onProvision,
+    onConfigure,
     onSiteConfigApplied: vi.fn(),
     onSwitchTier: vi.fn(),
     onSelectTierModel: vi.fn(),
@@ -163,6 +165,7 @@ function renderRelayRow(
   // Provider 以默认（模块下线）形态挂上即可 —— 不拉取、不渲染入口。
   return {
     onProvision,
+    onConfigure,
     onLogin,
     ...renderWithQuery(
       <TierVerificationProvider appId="codex" providerIds={[]}>
@@ -315,4 +318,14 @@ describe("行上的刷新动作", () => {
     expect(screen.getByText("未登录")).toBeInTheDocument();
     expect(onProvision).not.toHaveBeenCalled();
   });
+});
+
+it("noTiers creates a reviewed selection draft, never invokes maintenance", async () => {
+  const { onProvision, onConfigure } = renderRelayRow(vi.fn(), {
+    status: "noTiers",
+    tiers: [],
+  });
+  await userEvent.click(screen.getByRole("button", { name: "创建接入配置" }));
+  expect(onConfigure).toHaveBeenCalledOnce();
+  expect(onProvision).not.toHaveBeenCalled();
 });

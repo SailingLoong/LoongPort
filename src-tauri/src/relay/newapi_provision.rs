@@ -10,6 +10,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use sha2::{Digest, Sha256};
 
+use super::setup_journal::{KeyEvent, KeyPreparationJournal, PreparationIssue};
 use crate::error::AppError;
 use crate::relay::newapi::{Group, GroupIdentity, NewApiClient, Token};
 
@@ -85,7 +86,7 @@ struct CanonicalToken {
 /// The digest is encoded as URL-safe base64 and clipped to the remaining
 /// server-side name budget. This retains at least 78 bits for every valid i64
 /// account id while never embedding arbitrary group text in the token name.
-fn managed_token_name(account_id: i64, group: &GroupIdentity) -> String {
+pub(super) fn managed_token_name(account_id: i64, group: &GroupIdentity) -> String {
     let prefix = format!("{MANAGED_TOKEN_PREFIX}/a{account_id}/");
     let digest = URL_SAFE_NO_PAD.encode(Sha256::digest(group.0.as_bytes()));
     let digest_len = NEWAPI_TOKEN_NAME_LIMIT.saturating_sub(prefix.len());
@@ -132,14 +133,6 @@ fn failure(
     }
 }
 
-/// Reconciles remote NewAPI tokens with the authenticated account's current
-/// raw group inventory. It never writes local cc-switch providers.
-#[cfg(test)]
-async fn reconcile(client: &NewApiClient) -> Result<ReconcileResult, AppError> {
-    let account = client.account().await?;
-    reconcile_for_account(client, account.id).await
-}
-
 /// Reconcile after the caller has verified which persisted relay account owns
 /// this authenticated NewAPI session. No group or token request is made before
 /// that account preflight succeeds.
@@ -147,23 +140,57 @@ pub async fn reconcile_for_account(
     client: &NewApiClient,
     account_id: i64,
 ) -> Result<ReconcileResult, AppError> {
-    reconcile_scope(client, account_id, None).await
+    reconcile_scope(client, account_id, None, None).await
 }
 
-/// Prepare only explicitly confirmed upstream groups. This is not an inventory
-/// reconciliation: neither unselected nor obsolete resources are deleted.
+/// Refresh existing managed resources in selected groups. Missing tokens require
+/// recorded user confirmation; this path cannot create or delete remote resources.
 pub async fn reconcile_selected_for_account(
     client: &NewApiClient,
     account_id: i64,
     selected: &[GroupIdentity],
 ) -> Result<ReconcileResult, AppError> {
-    reconcile_scope(client, account_id, Some(selected)).await
+    reconcile_scope(client, account_id, Some(selected), None).await
+}
+
+/// Recorded setup delegates to the original token claim/create owner.
+pub(crate) async fn reconcile_selected_recorded(
+    client: &NewApiClient,
+    account_id: i64,
+    selected: &[GroupIdentity],
+    journal: &dyn KeyPreparationJournal,
+) -> Result<ReconcileResult, AppError> {
+    reconcile_scope(client, account_id, Some(selected), Some(journal)).await
+}
+
+/// Read-only reconciliation: list metadata through the original canonical matcher.
+pub(crate) async fn observe_selected_tokens(
+    client: &NewApiClient,
+    account_id: i64,
+    selected: &[GroupIdentity],
+    journal: &dyn KeyPreparationJournal,
+) -> Result<(), AppError> {
+    if selected.is_empty() {
+        return Ok(());
+    }
+    if client.account().await?.id != account_id {
+        return Err(AppError::Config("relaySetup.accountChanged".into()));
+    }
+    let groups = client.groups().await?;
+    let tokens = client.list_tokens().await?;
+    for group in groups.iter().filter(|g| selected.contains(&g.identity)) {
+        if let Some((token, _)) = canonical_token(&tokens, account_id, group) {
+            journal.record(&group.identity.0, KeyEvent::Observed(token.id.to_string()))?;
+        }
+    }
+    Ok(())
 }
 
 async fn reconcile_scope(
     client: &NewApiClient,
     account_id: i64,
     selected: Option<&[GroupIdentity]>,
+    journal: Option<&dyn KeyPreparationJournal>,
 ) -> Result<ReconcileResult, AppError> {
     let groups = client.groups().await?;
     let observed_groups = groups
@@ -204,6 +231,9 @@ async fn reconcile_scope(
 
     for group in &groups {
         if let Some((token, duplicates)) = canonical_token(&initial_tokens, account_id, group) {
+            if let Some(journal) = journal {
+                journal.record(&group.identity.0, KeyEvent::Reused(token.id.to_string()))?;
+            }
             canonical.push(CanonicalToken {
                 group: group.clone(),
                 token,
@@ -217,6 +247,17 @@ async fn reconcile_scope(
 
     let mut created_groups = Vec::new();
     for group in missing_groups {
+        match journal {
+            Some(journal) => journal.record(&group.identity.0, KeyEvent::BeforeCreate)?,
+            None => {
+                result.failures.push(failure(
+                    Some(group.identity),
+                    ReconcileStage::Create,
+                    AppError::Config("relaySetup.confirmationRequired".into()),
+                ));
+                continue;
+            }
+        }
         match client
             .create_token(
                 &managed_token_name(account_id, &group.identity),
@@ -225,10 +266,18 @@ async fn reconcile_scope(
             .await
         {
             Ok(()) => {
+                // NewAPI acknowledges creation without returning its ID. Store
+                // that known effect now; a later list item is not proof of ID.
+                if let Some(journal) = journal {
+                    journal.record(&group.identity.0, KeyEvent::Created(None))?;
+                }
                 result.tokens_created += 1;
                 created_groups.push(group);
             }
             Err(error) => {
+                if let Some(journal) = journal {
+                    journal.record(&group.identity.0, KeyEvent::OutcomeUnknown)?;
+                }
                 result
                     .failures
                     .push(failure(Some(group.identity), ReconcileStage::Create, error))
@@ -251,6 +300,13 @@ async fn reconcile_scope(
                             token_was_created: true,
                         });
                     } else {
+                        if let Some(journal) = journal {
+                            journal.record_issue(
+                                &group.identity.0,
+                                None,
+                                PreparationIssue::RemoteReadFailed,
+                            )?;
+                        }
                         result.failures.push(ReconcileFailure {
                             group_identity: Some(group.identity),
                             stage: ReconcileStage::Relist,
@@ -261,6 +317,13 @@ async fn reconcile_scope(
             }
             Err(error) => {
                 for group in created_groups {
+                    if let Some(journal) = journal {
+                        journal.record_issue(
+                            &group.identity.0,
+                            None,
+                            PreparationIssue::RemoteReadFailed,
+                        )?;
+                    }
                     result.failures.push(failure(
                         Some(group.identity),
                         ReconcileStage::Relist,
@@ -296,11 +359,20 @@ async fn reconcile_scope(
                     token_was_created: item.token_was_created,
                 });
             }
-            Err(error) => result.failures.push(failure(
-                Some(item.group.identity),
-                ReconcileStage::Reveal,
-                error,
-            )),
+            Err(error) => {
+                if let Some(journal) = journal {
+                    journal.record_issue(
+                        &item.group.identity.0,
+                        None,
+                        PreparationIssue::RemoteReadFailed,
+                    )?;
+                }
+                result.failures.push(failure(
+                    Some(item.group.identity),
+                    ReconcileStage::Reveal,
+                    error,
+                ));
+            }
         }
     }
     if selected.is_none() {
@@ -352,6 +424,7 @@ mod tests {
 
     use super::*;
     use crate::relay::newapi::{GroupIdentity, NewApiClient};
+    use crate::relay::setup_journal::test_support::ConfirmedJournal;
 
     #[derive(Clone)]
     struct TestToken {
@@ -400,10 +473,23 @@ mod tests {
     struct TestServer {
         origin: String,
         state: Arc<Mutex<TestState>>,
+        journal: ConfirmedJournal,
     }
 
     impl TestServer {
+        async fn reconcile(&self, client: &NewApiClient) -> Result<ReconcileResult, AppError> {
+            let account = client.account().await?;
+            reconcile_scope(client, account.id, None, Some(&self.journal)).await
+        }
+
         async fn spawn(state: TestState) -> Self {
+            let journal = ConfirmedJournal::new(
+                &state
+                    .groups
+                    .iter()
+                    .map(|g| g.0.as_str())
+                    .collect::<Vec<_>>(),
+            );
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                 .await
                 .expect("bind test listener");
@@ -429,7 +515,11 @@ mod tests {
                     });
                 }
             });
-            Self { origin, state }
+            Self {
+                origin,
+                state,
+                journal,
+            }
         }
     }
 
@@ -613,10 +703,10 @@ mod tests {
         let client = NewApiClient::new(&server.origin, "fixture-token").unwrap();
         // Two apps selecting the same upstream group must share one resource.
         let selected = vec![GroupIdentity("alpha".into()), GroupIdentity("alpha".into())];
-        let first = reconcile_selected_for_account(&client, 7, &selected)
+        let first = reconcile_selected_recorded(&client, 7, &selected, &server.journal)
             .await
             .unwrap();
-        let second = reconcile_selected_for_account(&client, 7, &selected)
+        let second = reconcile_selected_recorded(&client, 7, &selected, &server.journal)
             .await
             .unwrap();
         assert_eq!(first.tokens_created, 1);
@@ -707,8 +797,8 @@ mod tests {
         .await;
         let client = NewApiClient::new(&server.origin, "access-token-secret").unwrap();
 
-        let first = reconcile(&client).await.unwrap();
-        let second = reconcile(&client).await.unwrap();
+        let first = server.reconcile(&client).await.unwrap();
+        let second = server.reconcile(&client).await.unwrap();
 
         assert_eq!(first.groups.len(), 1);
         assert!(!first.groups[0].token_was_created);
@@ -733,7 +823,7 @@ mod tests {
         .await;
         let client = NewApiClient::new(&server.origin, "access-token-secret").unwrap();
 
-        let result = reconcile(&client).await.unwrap();
+        let result = server.reconcile(&client).await.unwrap();
 
         assert_eq!(result.groups.len(), 1);
         assert!(result.groups[0].token_was_created);
@@ -752,7 +842,7 @@ mod tests {
         .await;
         let client = NewApiClient::new(&server.origin, "access-token-secret").unwrap();
 
-        let result = reconcile(&client).await.unwrap();
+        let result = server.reconcile(&client).await.unwrap();
         let state = server.state.lock().await;
 
         assert_eq!(result.groups.len(), 1);
@@ -770,7 +860,7 @@ mod tests {
         let server = TestServer::spawn(state).await;
         let client = NewApiClient::new(&server.origin, "access-token-secret").unwrap();
 
-        let result = reconcile(&client).await.unwrap();
+        let result = server.reconcile(&client).await.unwrap();
         let state = server.state.lock().await;
 
         assert!(result.groups.is_empty());
@@ -795,8 +885,8 @@ mod tests {
         .await;
         let client = NewApiClient::new(&server.origin, "access-token-secret").unwrap();
 
-        let first = reconcile(&client).await.unwrap();
-        let second = reconcile(&client).await.unwrap();
+        let first = server.reconcile(&client).await.unwrap();
+        let second = server.reconcile(&client).await.unwrap();
         let state = server.state.lock().await;
 
         assert!(first.groups[0].api_key.ends_with("12"));
@@ -817,7 +907,7 @@ mod tests {
         let server = TestServer::spawn(TestState::new(7, &["alpha", "beta"], Vec::new())).await;
         let client = NewApiClient::new(&server.origin, "access-token-secret").unwrap();
 
-        let result = reconcile(&client).await.unwrap();
+        let result = server.reconcile(&client).await.unwrap();
         let state = server.state.lock().await;
 
         assert_eq!(result.groups.len(), 2);
@@ -843,7 +933,7 @@ mod tests {
         let server = TestServer::spawn(state).await;
         let client = NewApiClient::new(&server.origin, "access-token-secret").unwrap();
 
-        let result = reconcile(&client).await.unwrap();
+        let result = server.reconcile(&client).await.unwrap();
 
         assert_eq!(result.observed_groups, vec![alpha, beta]);
         assert_eq!(result.groups.len(), 1);
@@ -870,7 +960,7 @@ mod tests {
         let server = TestServer::spawn(state).await;
         let client = NewApiClient::new(&server.origin, "access-token-secret").unwrap();
 
-        let result = reconcile(&client).await.unwrap();
+        let result = server.reconcile(&client).await.unwrap();
         let state = server.state.lock().await;
 
         assert_eq!(result.groups.len(), 1);
@@ -886,7 +976,7 @@ mod tests {
         let server = TestServer::spawn(state).await;
         let client = NewApiClient::new(&server.origin, "access-token-secret").unwrap();
 
-        let result = reconcile(&client).await.unwrap();
+        let result = server.reconcile(&client).await.unwrap();
 
         assert_eq!(result.groups.len(), 1);
         assert_eq!(result.groups[0].identity, GroupIdentity("beta".into()));
@@ -905,7 +995,7 @@ mod tests {
         let server = TestServer::spawn(state).await;
         let client = NewApiClient::new(&server.origin, "access-token-secret").unwrap();
 
-        let result = reconcile(&client).await.unwrap();
+        let result = server.reconcile(&client).await.unwrap();
 
         assert_eq!(result.observed_groups, vec![GroupIdentity("alpha".into())]);
         assert!(result.groups.is_empty());
@@ -925,7 +1015,7 @@ mod tests {
         let server = TestServer::spawn(state).await;
         let client = NewApiClient::new(&server.origin, "access-token-secret").unwrap();
 
-        let result = reconcile(&client).await.unwrap();
+        let result = server.reconcile(&client).await.unwrap();
         let state = server.state.lock().await;
 
         assert_eq!(result.groups.len(), 1);
@@ -954,7 +1044,7 @@ mod tests {
         .await;
         let client = NewApiClient::new(&server.origin, "access-token-secret").unwrap();
 
-        let result = reconcile(&client).await.unwrap();
+        let result = server.reconcile(&client).await.unwrap();
 
         assert_eq!(result.groups.len(), 1);
         assert_eq!(server.state.lock().await.deleted, vec![11]);
@@ -976,7 +1066,7 @@ mod tests {
         let server = TestServer::spawn(state).await;
         let client = NewApiClient::new(&server.origin, "access-token-secret").unwrap();
 
-        let result = reconcile(&client).await.unwrap();
+        let result = server.reconcile(&client).await.unwrap();
 
         assert_eq!(result.groups.len(), 1);
         assert_eq!(result.failures.len(), 1);
@@ -999,7 +1089,7 @@ mod tests {
         let server = TestServer::spawn(state).await;
         let client = NewApiClient::new(&server.origin, "access-token-secret").unwrap();
 
-        let result = reconcile(&client).await.unwrap();
+        let result = server.reconcile(&client).await.unwrap();
         let debug = format!("{result:?}");
 
         assert!(!debug.contains("access-token-secret"));

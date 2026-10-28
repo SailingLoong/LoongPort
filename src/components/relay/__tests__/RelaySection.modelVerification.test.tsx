@@ -11,6 +11,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const api = vi.hoisted(() => ({
   listRelays: vi.fn(),
+  discoverTiers: vi.fn(),
+  getSetupOperation: vi.fn(),
+  prepareTiers: vi.fn(),
+  reconcileSetupOperation: vi.fn(),
   login: vi.fn(),
   listTierRates: vi.fn(),
   checkSession: vi.fn(),
@@ -150,6 +154,16 @@ vi.mock("@/components/relay/RelayTierList", async () => {
         useTierVerification();
       return (
         <div>
+          {props.relays
+            .filter((relay: any) => relay.status === "noTiers")
+            .map((relay: any) => (
+              <button
+                key={relay.id}
+                onClick={() => props.onConfigure?.(relay.id)}
+              >
+                configure {relay.id}
+              </button>
+            ))}
           {props.relays.flatMap((relay: any) =>
             relay.tiers.map((tier: any) => (
               <div key={tier.providerId}>
@@ -304,6 +318,18 @@ describe("RelaySection model verification ownership", () => {
     // 的身份变化驱动，而真实后端每次响应都是新对象；固定引用会让 mock
     // 与生产行为分叉（刷新后不重拉）。
     api.listRelays.mockImplementation(async () => [relay]);
+    api.discoverTiers.mockResolvedValue({
+      schemaVersion: 1,
+      relayId: 1,
+      account: {
+        identity: "fixture",
+        siteOrigin: "https://relay.example",
+        accountLabel: "account",
+      },
+      revision: "r1",
+      choices: [],
+    });
+    api.getSetupOperation.mockResolvedValue(null);
     api.listTierRates.mockResolvedValue([]);
     api.checkSession.mockResolvedValue([]);
     api.refreshAll.mockResolvedValue(emptyRefreshResult);
@@ -331,6 +357,42 @@ describe("RelaySection model verification ownership", () => {
         return () => {};
       },
     );
+  });
+
+  it("cold account configuration opens the real selection owner without refreshing", async () => {
+    api.listRelays.mockResolvedValue([
+      { ...relay, status: "noTiers", tiers: [] },
+    ]);
+    renderSection("codex");
+    await userEvent.click(
+      await screen.findByRole("button", { name: "configure 1" }),
+    );
+    await screen.findByRole("heading", { name: "准备接入配置" });
+    await waitFor(() => expect(api.discoverTiers).toHaveBeenCalledWith(1));
+    expect(api.refresh).not.toHaveBeenCalled();
+    expect(api.prepareTiers).not.toHaveBeenCalled();
+    expect(api.switchTier).not.toHaveBeenCalled();
+  });
+
+  it("account actions offer explicit configuration separately from maintenance refresh", async () => {
+    render(
+      <QueryClientProvider client={createTestQueryClient()}>
+        <RelaySection
+          appId="codex"
+          onOpenAddHub={vi.fn()}
+          accountSnapshot={{ kind: "relay", row: relay, appId: "codex" }}
+          renderAccounts={(actions) =>
+            actions({ kind: "relay", row: relay, appId: "codex" })
+          }
+        />
+      </QueryClientProvider>,
+    );
+    await userEvent.click(
+      await screen.findByRole("button", { name: "创建接入配置" }),
+    );
+    await screen.findByRole("heading", { name: "准备接入配置" });
+    await waitFor(() => expect(api.discoverTiers).toHaveBeenCalledWith(1));
+    expect(api.refresh).not.toHaveBeenCalled();
   });
 
   it("registration only reloads account facts until configuration is explicitly confirmed", async () => {
