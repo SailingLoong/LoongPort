@@ -1902,6 +1902,27 @@ mod relay_connection_owner_tests {
             .unwrap()
             .is_none());
     }
+    // ACK is a condition, not a latency guarantee for the original OS writer.
+    #[cfg(feature = "gui")]
+    async fn await_setup_ack_entered(
+        entered: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<(), tokio::sync::oneshot::error::RecvError> {
+        entered.await
+    }
+
+    #[cfg(feature = "gui")]
+    #[tokio::test(start_paused = true)]
+    async fn setup_ack_wait_tracks_the_condition_not_elapsed_scheduling_time() {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let waiting = await_setup_ack_entered(entered_rx);
+        futures::pin_mut!(waiting);
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        tokio::time::advance(std::time::Duration::from_secs(6)).await;
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        entered_tx.send(()).unwrap();
+        waiting.await.unwrap();
+    }
+
     #[cfg(feature = "gui")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial_test::serial]
@@ -1925,33 +1946,39 @@ mod relay_connection_owner_tests {
                     Some("setup-owned")
                 );
                 count.fetch_add(1, Ordering::SeqCst);
-                entered_tx.send(()).unwrap();
+                if entered_tx.send(()).is_err() {
+                    return Err(AppError::Message("test ACK observer was dropped".into()));
+                }
+                // Only the caller's release (or sender drop on failure) ends
+                // this ACK. Scheduler delay must never release the lease.
                 release_rx
-                    .recv_timeout(std::time::Duration::from_secs(5))
-                    .unwrap();
-                Ok(())
+                    .recv()
+                    .map_err(|_| AppError::Message("test ACK release sender was dropped".into()))
             }),
             Box::new(|_, _| {}),
         ));
-        tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
-            .await
-            .unwrap()
-            .unwrap();
+        if await_setup_ack_entered(entered_rx).await.is_err() {
+            // Join a failed original worker before TestHome can be destroyed.
+            panic!("original worker ended before ACK: {:?}", task.await);
+        }
         task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
+        let cancelled = task.await;
+        let held_during_ack = crate::services::sync_protocol::sync_mutex()
+            .try_lock()
+            .is_err();
+        let released = release_tx.send(());
+        // Acquiring the original owner proves the real worker finished ACK.
+        // The existing CI job watchdog bounds deadlocks; there is deliberately
+        // no per-phase performance deadline for OS probing or thread scheduling.
+        let lease = crate::services::sync_protocol::sync_mutex().lock().await;
+        drop(lease);
+        // Fail only after releasing and joining the worker's protected phase.
+        assert!(cancelled.unwrap_err().is_cancelled());
         assert!(
-            crate::services::sync_protocol::sync_mutex()
-                .try_lock()
-                .is_err(),
+            held_during_ack,
             "cancelled IPC must not unblock restore while ACK runs"
         );
-        release_tx.send(()).unwrap();
-        let lease = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            crate::services::sync_protocol::sync_mutex().lock(),
-        )
-        .await
-        .unwrap();
+        released.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             state
@@ -1961,7 +1988,6 @@ mod relay_connection_owner_tests {
                 .as_deref(),
             Some("setup-owned")
         );
-        drop(lease);
     }
     #[test]
     #[serial_test::serial]
