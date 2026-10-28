@@ -134,6 +134,28 @@ pub(crate) fn chain_ids_on(
     }
 }
 
+/// Pin the pre-insert effective chain when preparing a local-only candidate.
+/// Without an explicit chain, the read fallback includes every provider; simply
+/// skipping note_provider_created would therefore still authorize the new row.
+/// Call inside the same writer transaction as insertion, so failure rolls both
+/// back. Existing chains retain their exact bytes, members and order.
+pub(crate) fn preserve_chain_before_local_preparation_on(
+    conn: &rusqlite::Connection,
+    app: &str,
+) -> Result<(), AppError> {
+    AppType::from_str(app)?;
+    let initialized: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM settings WHERE key=?1)",
+        [priority_key(app)],
+        |row| row.get(0),
+    )?;
+    if !initialized {
+        let existing = chain_ids_on(conn, app)?;
+        write_order_on(conn, app, &existing)?;
+    }
+    Ok(())
+}
+
 /// 链成员（按存储序，幽灵跳过）——选路与故障切换重试的全集与顺序唯源。
 /// 链外档位不是后备：被用户应用出链的档位永不参与自动重试。
 pub fn chain_providers(db: &Database, app: &str) -> Result<Vec<Provider>, AppError> {
@@ -686,5 +708,48 @@ mod tests {
             Some("gpt-5.6-terra".to_string()),
             "目标档位不服务偏好 → 回落目标档位已选模型"
         );
+    }
+}
+
+#[cfg(test)]
+mod selected_preparation_routing_tests {
+    use super::*;
+
+    #[test]
+    fn preparation_keeps_an_uninitialized_chain_at_its_preinsert_members() {
+        let db = Database::memory().unwrap();
+        let mut conn = db.conn.lock().unwrap();
+        conn.execute("INSERT INTO providers (id,app_type,name,settings_config) VALUES ('before','claude','Before','{}')", []).unwrap();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        preserve_chain_before_local_preparation_on(&tx, "claude").unwrap();
+        tx.execute("INSERT INTO providers (id,app_type,name,settings_config) VALUES ('selected','claude','Selected','{}')", []).unwrap();
+        assert_eq!(chain_ids_on(&tx, "claude").unwrap(), vec!["before"]);
+        tx.commit().unwrap();
+        assert_eq!(chain_ids_on(&conn, "claude").unwrap(), vec!["before"]);
+    }
+
+    #[test]
+    fn preparation_preserves_explicit_chain_bytes_and_empty_cold_chain() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO settings(key,value) VALUES ('application_priority_codex', '[ \"kept\" ]')",
+            [],
+        )
+        .unwrap();
+        preserve_chain_before_local_preparation_on(&conn, "codex").unwrap();
+        let raw: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key='application_priority_codex'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw, "[ \"kept\" ]");
+        preserve_chain_before_local_preparation_on(&conn, "claude").unwrap();
+        conn.execute("INSERT INTO providers(id,app_type,name,settings_config) VALUES ('cold','claude','Cold','{}')", []).unwrap();
+        assert!(chain_ids_on(&conn, "claude").unwrap().is_empty());
     }
 }

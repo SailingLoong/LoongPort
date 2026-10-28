@@ -427,13 +427,15 @@ async fn prepare_relay_selection(
     account: &creds::RelayAccount,
     selections: &[RelayTierSelection],
 ) -> Result<ProvisionSummary, AppError> {
-    if selections.is_empty() {
-        return Ok(ProvisionSummary {
-            tiers: Vec::new(),
-            failures: Vec::new(),
-            keys_created: 0,
-            merged_providers: Vec::new(),
-        });
+    let mut selected_apps = std::collections::HashSet::new();
+    if selections.is_empty()
+        || selections
+            .iter()
+            .any(|selection| !selected_apps.insert(selection.app.as_str()))
+    {
+        return Err(AppError::Config(
+            "Select exactly one group for each chosen application".into(),
+        ));
     }
     // Validate the complete confirmation before provisioning any resource. Re-read
     // upstream availability rather than trusting a potentially stale UI snapshot.
@@ -449,12 +451,49 @@ async fn prepare_relay_selection(
             "Selected configuration is no longer available; refresh choices".into(),
         ));
     }
-    let batch =
-        provision_backend_scope(account, Some(browser_api_fallback(app)), Some(selections)).await?;
     let state = app.state::<AppState>().inner().clone();
+    let mut existing_tiers = Vec::new();
+    let mut missing = Vec::new();
+    for selection in selections {
+        let choice = choices
+            .iter()
+            .find(|choice| choice.app == selection.app && choice.group_id == selection.group_id)
+            .expect("complete selection was validated before any resource write");
+        let app_type = AppType::from_str(&selection.app)?;
+        match state
+            .db
+            .get_provider_by_id(&choice.provider_id, &selection.app)?
+        {
+            Some(provider) => existing_tiers.push(selected_local_tier(
+                &state,
+                account,
+                &app_type,
+                &selection.group_id,
+                &provider,
+            )?),
+            None => missing.push(selection.clone()),
+        }
+    }
+    if missing.is_empty() {
+        return Ok(ProvisionSummary {
+            tiers: existing_tiers,
+            failures: Vec::new(),
+            keys_created: 0,
+            merged_providers: Vec::new(),
+        });
+    }
+    let batch =
+        provision_backend_scope(account, Some(browser_api_fallback(app)), Some(&missing)).await?;
     let account = account.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        persist_provision_batch_scope(&state, &account, batch, false)
+        let mut summary = persist_provision_batch_scope(
+            &state,
+            &account,
+            batch,
+            ProvisionPersistenceIntent::SelectedPrepare,
+        )?;
+        summary.tiers.extend(existing_tiers);
+        Ok(summary)
     })
     .await
     .map_err(|e| AppError::Message(format!("保存托管档位失败: {e}")))?
@@ -758,7 +797,12 @@ async fn provision_relay(
     let persist_state = state.inner().clone();
     let persist_account = site_account.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        persist_provision_batch_scope(&persist_state, &persist_account, batch, false)
+        persist_provision_batch_scope(
+            &persist_state,
+            &persist_account,
+            batch,
+            ProvisionPersistenceIntent::RefreshExisting,
+        )
     })
     .await
     .map_err(|e| AppError::Message(format!("保存托管档位失败: {e}")))?;
@@ -789,15 +833,79 @@ pub(crate) fn persist_provision_batch(
     site_account: &creds::RelayAccount,
     batch: ManagedProvisionBatch,
 ) -> Result<ProvisionSummary, AppError> {
-    persist_provision_batch_scope(state, site_account, batch, true)
+    persist_provision_batch_scope(
+        state,
+        site_account,
+        batch,
+        ProvisionPersistenceIntent::FullMaintenance,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProvisionPersistenceIntent {
+    SelectedPrepare,
+    RefreshExisting,
+    FullMaintenance,
+}
+
+/// Read the existing provider as evidence, without the current-provider service's
+/// legacy cleanup and without refreshing its key, models or routing metadata.
+fn selected_local_tier(
+    state: &AppState,
+    account: &creds::RelayAccount,
+    app: &AppType,
+    group_id: &str,
+    provider: &Provider,
+) -> Result<TierInfo, AppError> {
+    if !belongs_to_relay(provider, &account.site_origin, account.account_id)
+        || provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.loongport_group.as_ref())
+            .is_some_and(|group| group.id != group_id)
+    {
+        return Err(AppError::Config(
+            "Existing configuration has a different account or group identity".into(),
+        ));
+    }
+    let subscription_windows =
+        crate::relay::tier_windows::subscription_windows_from_settings(&provider.settings_config);
+    Ok(TierInfo {
+        provider_id: provider.id.clone(),
+        app_id: app.as_str().into(),
+        group_name: provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.loongport_group.as_ref())
+            .map(|group| group.name.clone())
+            .unwrap_or_else(|| provider.name.clone()),
+        display_name: provider.name.clone(),
+        model: provider_config::selected_model(app, &provider.settings_config).unwrap_or_default(),
+        models: crate::relay::model_catalog::available_models(provider),
+        rate_multiplier: state
+            .db
+            .get_tier_rate_multiplier(app.as_str(), &provider.id)?,
+        is_current: state.db.get_current_provider(app.as_str())?.as_deref()
+            == Some(provider.id.as_str()),
+        can_verify_models: verification_target::supports_app_type(app),
+        user_edited: Some(state.db.get_user_edited(app.as_str(), &provider.id)?),
+        allow_image_generation: None,
+        site_declared_origin: provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.site_declared_origin.clone()),
+        next_reset_at: crate::relay::tier_windows::next_reset_at(&subscription_windows),
+        subscription_windows,
+    })
 }
 
 fn persist_provision_batch_scope(
     state: &AppState,
     site_account: &creds::RelayAccount,
     mut batch: ManagedProvisionBatch,
-    prune: bool,
+    intent: ProvisionPersistenceIntent,
 ) -> Result<ProvisionSummary, AppError> {
+    let prune = intent == ProvisionPersistenceIntent::FullMaintenance;
     let mut tiers = Vec::new();
     let mut merged_providers = Vec::new();
     // NewAPI fills this from the complete upstream inventory before reveal/model/write.
@@ -813,6 +921,35 @@ fn persist_provision_batch_scope(
         let display_name =
             provider_config::provider_display_name(&site_account.site_name, &candidate.group_name);
         keep.insert((app_type.as_str().to_string(), provider_id.clone()));
+
+        if intent == ProvisionPersistenceIntent::SelectedPrepare {
+            match state.db.get_provider_by_id(&provider_id, app_type.as_str()) {
+                Ok(Some(existing)) => {
+                    match selected_local_tier(
+                        state,
+                        site_account,
+                        app_type,
+                        &candidate.group_id,
+                        &existing,
+                    ) {
+                        Ok(tier) => tiers.push(tier),
+                        Err(error) => batch.failures.push(FailureInfo {
+                            group_name: candidate.group_name,
+                            reason: error.to_string(),
+                        }),
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    batch.failures.push(FailureInfo {
+                        group_name: candidate.group_name,
+                        reason: error.to_string(),
+                    });
+                    continue;
+                }
+                Ok(None) => {}
+            }
+        }
 
         let base_url =
             sub2api::base_url_for(app_type, &site_account.site_origin, &candidate.api_base_url);
@@ -945,8 +1082,6 @@ fn persist_provision_batch_scope(
                 .map(|map| map.remove("subscriptionWindows"));
         }
 
-        let current = ProviderService::current(state, app_type.clone()).unwrap_or_default();
-
         let mut provider = Provider {
             id: provider_id.clone(),
             name: display_name.clone(),
@@ -980,6 +1115,41 @@ fn persist_provision_batch_scope(
             settings_config: generated_settings,
             ..provider.clone()
         };
+        if intent == ProvisionPersistenceIntent::SelectedPrepare {
+            let prepared = (|| -> Result<TierInfo, AppError> {
+                crate::services::provider::model_settings::merge_managed_refresh(
+                    app_type,
+                    None,
+                    &generated,
+                    &mut provider,
+                )?;
+                state.db.prepare_provider_if_absent(
+                    app_type.as_str(),
+                    &provider,
+                    rate_multiplier,
+                )?;
+                let stored = state
+                    .db
+                    .get_provider_by_id(&provider_id, app_type.as_str())?
+                    .ok_or_else(|| {
+                        AppError::Config(
+                            "Prepared configuration disappeared; recheck before continuing".into(),
+                        )
+                    })?;
+                selected_local_tier(state, site_account, app_type, &candidate.group_id, &stored)
+            })();
+            drop(settings_guard);
+            match prepared {
+                Ok(tier) => tiers.push(tier),
+                Err(error) => batch.failures.push(FailureInfo {
+                    group_name: candidate.group_name,
+                    reason: error.to_string(),
+                }),
+            }
+            continue;
+        }
+
+        let current = ProviderService::current(state, app_type.clone()).unwrap_or_default();
         if let Err(error) = crate::services::provider::model_settings::save_managed_refresh(
             state,
             app_type,
@@ -1103,7 +1273,9 @@ fn persist_provision_batch_scope(
         });
     }
 
-    futures::executor::block_on(refresh_live_for_current_tiers(state, &refresh_live));
+    if intent != ProvisionPersistenceIntent::SelectedPrepare {
+        futures::executor::block_on(refresh_live_for_current_tiers(state, &refresh_live));
+    }
 
     let removed = if prune {
         prune_stale_tiers(state, &site_account.site_origin, batch.account_id, &keep)?
@@ -1127,8 +1299,10 @@ fn persist_provision_batch_scope(
     // 整个报成失败（用户会以为连密钥都没拿到）。
     // This entire local phase is entered on a blocking thread; per-provider
     // guards above are released before acquiring the MCP application locks.
-    if let Err(e) = futures::executor::block_on(imagegen_mcp::sync_registration(state)) {
-        log::warn!("同步生图工具记录失败（生图可能暂时用不了）: {e}");
+    if intent != ProvisionPersistenceIntent::SelectedPrepare {
+        if let Err(e) = futures::executor::block_on(imagegen_mcp::sync_registration(state)) {
+            log::warn!("同步生图工具记录失败（生图可能暂时用不了）: {e}");
+        }
     }
 
     let retained_observed = keep.iter().any(|(app_type, provider_id)| {
@@ -1816,7 +1990,13 @@ mod tests {
                 group_id: "selected".into(),
             }],
         );
-        let summary = persist_provision_batch_scope(&state, &account, batch, false).unwrap();
+        let summary = persist_provision_batch_scope(
+            &state,
+            &account,
+            batch,
+            ProvisionPersistenceIntent::SelectedPrepare,
+        )
+        .unwrap();
         assert_eq!(summary.tiers.len(), 1);
         for app in [AppType::Claude, AppType::Codex, AppType::Gemini] {
             assert!(db
