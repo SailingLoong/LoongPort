@@ -29,6 +29,7 @@ use super::{
 };
 use crate::diagnostics::{DiagnosticEvent, ResultLogExt};
 use crate::paperclip::execution::RouteBinding;
+use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
 use crate::proxy::providers::copilot_auth::CopilotAuthManager;
 use crate::proxy::providers::xai_oauth_auth::XaiOAuthManager;
 use crate::{
@@ -3182,10 +3183,23 @@ impl RequestForwarder {
                             );
                         }
                         Err(e) => {
-                            log::error!("[CodexOAuth] 获取 access_token 失败: {e}");
-                            return Err(ProxyError::AuthError(format!(
-                                "Codex OAuth 认证失败: {e}"
-                            )));
+                            // Only definitive credential rejection or a missing binding is
+                            // authentication failure. Transport/storage failures must not
+                            // tell the client that its account credentials are invalid.
+                            // Never expose refresh response bodies, URLs or local paths.
+                            let error = match e {
+                                CodexOAuthError::RefreshTokenInvalid => ProxyError::AuthError(
+                                    "Codex OAuth 凭据已失效，请重新登录".into(),
+                                ),
+                                CodexOAuthError::AccountNotFound(_) => ProxyError::AuthError(
+                                    "Codex OAuth 账号不存在，请检查账号绑定".into(),
+                                ),
+                                _ => ProxyError::ForwardFailed(
+                                    "Codex OAuth token 暂时不可用，请稍后重试或检查本地状态".into(),
+                                ),
+                            };
+                            log::error!("[CodexOAuth] 获取 access_token 失败: {error}");
+                            return Err(error);
                         }
                     }
                 } else {
