@@ -32,6 +32,7 @@ import { ZCodeClaimControls } from "./ZCodeClaimControls";
 import { ZCodeDeviceManager } from "./ZCodeDeviceManager";
 import { ZCodeAccountEvidence } from "./ZCodeAccountEvidence";
 import { ZCodeOAuthAdd } from "./ZCodeOAuthAdd";
+import { ZCodeNativeSwitchSection } from "./ZCodeNativeSwitchSection";
 import { ZCodeBackupDialog } from "./ZCodeBackupDialog";
 import {
   Dialog,
@@ -43,6 +44,7 @@ import {
 } from "@/components/ui/dialog";
 import {
   accountErrorText,
+  ConfirmedSwitchFailure,
   safeAccountError,
   zcodeAccountsApi,
   type AccountError,
@@ -52,6 +54,7 @@ import {
   type SourceContext,
   type CurrentNativeIdentity,
   type CatalogStatus,
+  type SwitchOperationStatus,
 } from "@/lib/api/zcodeAccounts";
 
 type ActionKind =
@@ -130,6 +133,51 @@ export function ZCodeAccountPanel({
   const [currentIdentity, setCurrentIdentity] =
     useState<CurrentNativeIdentity | null>(null);
   const [identityReading, setIdentityReading] = useState(false);
+  const [originalOperation, setOriginalOperation] =
+    useState<SwitchOperationStatus | null>(null);
+  const [operationQueryState, setOperationQueryState] = useState<
+    "idle" | "pending" | "ready" | "error" | "changed"
+  >("idle");
+  const [operationPending, setOperationPending] = useState(false);
+  const [originalUnresolved, setOriginalUnresolved] = useState(false);
+  // Local unresolved evidence survives source reinspection/navigation. It is not
+  // a second request store: only the existing API owns native request identity.
+  const unresolvedSources = useRef(
+    new Map<
+      string,
+      {
+        revision: string;
+        operation: SwitchOperationStatus | null;
+        request: Pick<SwitchOperationStatus, "requestId" | "target"> | null;
+        identityUnknown?: boolean;
+      }
+    >(),
+  );
+  const operationEpoch = useRef(0);
+  const operationBinding = useRef<{
+    sourceKey: string;
+    revision: string;
+  } | null>(null);
+  const selectedSourceKey = JSON.stringify(source);
+  const recoveryRef = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    if (
+      operationBinding.current?.sourceKey === selectedSourceKey &&
+      operationBinding.current.revision === context?.contextRevision
+    )
+      return;
+    operationEpoch.current += 1;
+    operationBinding.current = null;
+    setOriginalOperation(null);
+    setOperationQueryState("idle");
+    setOriginalUnresolved(unresolvedSources.current.has(selectedSourceKey));
+  }, [selectedSourceKey, context?.contextRevision]);
+  useEffect(
+    () => () => {
+      operationEpoch.current += 1;
+    },
+    [],
+  );
   const identityEpoch = useRef(0);
   const identityInFlight = useRef(false);
   const [checkingId, setCheckingId] = useState<string | null>(null);
@@ -288,11 +336,11 @@ export function ZCodeAccountPanel({
       accountErrorText.operation_failed;
     return t(`zcode.accounts.errors.${key}`, { defaultValue: fallback });
   };
-  const begin = () => {
+  const begin = (preserveNotice = false) => {
     if (inFlight.current || disabled) return false;
     inFlight.current = true;
     setBusy(true);
-    setNotice(null);
+    if (!preserveNotice) setNotice(null);
     return true;
   };
   const finish = () => {
@@ -572,45 +620,190 @@ export function ZCodeAccountPanel({
       finish();
     }
   };
-  const queryOriginal = async (revision: string) => {
-    const operation = await zcodeAccountsApi.queryLastOperation(
-      source,
-      revision,
-    );
-    if (!operation) return;
-    if (operation.phase === "restartFailed") {
-      setError({
-        code: "zcode.account.committed_restart_failed",
-        remedy: "openNativeSettings",
-        committed: true,
-      });
-    } else if (
-      operation.phase === "restartVerified" ||
-      (operation.phase === "committed" && !operation.restartRequested)
-    ) {
-      setNotice(
-        copy(
-          "originalConfirmed",
-          "The original local switch is confirmed. Online sign-in remains unverified.",
-        ),
+  const queryOriginal = async (
+    revision: string,
+    preserveNotice = false,
+    observedFailure: SwitchOperationStatus | null = null,
+  ) => {
+    const snapshot = { ...source };
+    const sourceKey = JSON.stringify(snapshot);
+    const retained = unresolvedSources.current.get(sourceKey);
+    const epoch = ++operationEpoch.current;
+    operationBinding.current = { sourceKey, revision };
+    setOperationQueryState("pending");
+    try {
+      const result = await zcodeAccountsApi.queryLastOperationState(
+        snapshot,
+        revision,
+        retained?.identityUnknown
+          ? undefined
+          : (retained?.request ?? undefined),
       );
-    } else if (operation.phase === "failed") {
-      setNotice(
-        copy(
-          "originalFailed",
-          "The original switch ended before a confirmed commit. Review the current source before a new confirmation.",
-        ),
-      );
-    } else {
-      setError({
-        code:
-          operation.phase === "committed"
-            ? "zcode.account.committed_result_unknown"
-            : "zcode.account.operation_already_known",
-        remedy: "queryOriginal",
-        committed: operation.phase === "committed",
-      });
+      if (operationEpoch.current !== epoch) return;
+      if (retained?.identityUnknown) {
+        // Unreadable pointer storage cannot prove that any later request is
+        // the previously unknown operation. This is not a new dispatch.
+        setOriginalOperation(null);
+        setOperationQueryState("error");
+        setOriginalUnresolved(true);
+        setNeedsReview(true);
+        return;
+      }
+      // A locally verified failed receipt remains evidence if a later query
+      // temporarily fails after its pointer was forgotten. Null alone is not clearance.
+      const verifiedFailure =
+        observedFailure ??
+        (retained?.revision === revision &&
+        retained.operation?.phase === "failed"
+          ? retained.operation
+          : null);
+      const operation =
+        result.operation ??
+        (verifiedFailure &&
+        (!result.request ||
+          (result.request.requestId === verifiedFailure.requestId &&
+            result.request.target === verifiedFailure.target))
+          ? verifiedFailure
+          : null);
+      const prior = retained?.request;
+      if (
+        prior &&
+        ((result.request &&
+          (result.request.requestId !== prior.requestId ||
+            result.request.target !== prior.target)) ||
+          (operation &&
+            (operation.requestId !== prior.requestId ||
+              operation.target !== prior.target)))
+      ) {
+        // Another same-source request cannot resolve the original physical write.
+        setOriginalOperation(
+          retained.revision === revision ? retained.operation : null,
+        );
+        setOperationQueryState("changed");
+        setOriginalUnresolved(true);
+        setNeedsReview(true);
+        return;
+      }
+      // Missing records and read failures retain the same captured request identity.
+      // Absence cannot erase earlier unresolved physical-operation evidence.
+      if (result.error || (!operation && (retained || result.request))) {
+        if (!retained?.request)
+          unresolvedSources.current.set(sourceKey, {
+            ...(retained ?? { revision, operation: observedFailure }),
+            identityUnknown:
+              !!result.error && !result.request && !observedFailure,
+            request:
+              result.request ??
+              (observedFailure
+                ? {
+                    requestId: observedFailure.requestId,
+                    target: observedFailure.target,
+                  }
+                : null),
+          });
+        setOriginalOperation(
+          retained?.revision === revision
+            ? retained.operation
+            : observedFailure,
+        );
+        if (result.error) setError(safeAccountError(result.error));
+        setOriginalUnresolved(true);
+        setOperationQueryState("error");
+        setNeedsReview(true);
+        return;
+      }
+      setOriginalOperation(operation);
+      setOperationQueryState("ready");
+      const unresolved =
+        operation !== null &&
+        operation.phase !== "failed" &&
+        operation.phase !== "restartVerified" &&
+        !(operation.phase === "committed" && !operation.restartRequested);
+      if (unresolved)
+        unresolvedSources.current.set(sourceKey, {
+          revision,
+          operation,
+          request: operation
+            ? { requestId: operation.requestId, target: operation.target }
+            : null,
+        });
+      else unresolvedSources.current.delete(sourceKey);
+      setOriginalUnresolved(unresolved);
+      if (!operation) return;
+      if (operation.phase === "restartFailed") {
+        setError({
+          code: "zcode.account.committed_restart_failed",
+          remedy: "openNativeSettings",
+          committed: true,
+        });
+      } else if (
+        operation.phase === "restartVerified" ||
+        (operation.phase === "committed" && !operation.restartRequested)
+      ) {
+        if (!preserveNotice)
+          setNotice(
+            copy(
+              "originalConfirmed",
+              "The original local switch is confirmed. Online sign-in remains unverified.",
+            ),
+          );
+      } else if (operation.phase === "failed") {
+        if (!preserveNotice)
+          setNotice(
+            copy(
+              "originalFailed",
+              "The original switch ended before a confirmed commit. Review the current source before a new confirmation.",
+            ),
+          );
+      } else {
+        setError({
+          code:
+            operation.phase === "committed"
+              ? "zcode.account.committed_result_unknown"
+              : "zcode.account.operation_already_known",
+          remedy: "queryOriginal",
+          committed: operation.phase === "committed",
+        });
+        setNeedsReview(true);
+      }
+    } catch (cause) {
+      if (operationEpoch.current !== epoch) return;
+      setOperationQueryState("error");
+      if (!retained?.request) {
+        unresolvedSources.current.set(sourceKey, {
+          ...(retained ?? { revision, operation: observedFailure }),
+          identityUnknown: !observedFailure,
+          request: observedFailure
+            ? {
+                requestId: observedFailure.requestId,
+                target: observedFailure.target,
+              }
+            : null,
+        });
+        if (observedFailure) setOriginalOperation(observedFailure);
+      } else
+        setOriginalOperation(
+          retained.revision === revision ? retained.operation : null,
+        );
+      setOriginalUnresolved(true);
+      setError(safeAccountError(cause));
       setNeedsReview(true);
+    }
+  };
+  const queryOriginalExplicitly = async () => {
+    if (
+      !context ||
+      locked ||
+      action ||
+      identityInFlight.current ||
+      !begin(true)
+    )
+      return;
+    setError(null);
+    try {
+      await queryOriginal(context.contextRevision);
+    } finally {
+      finish();
     }
   };
   const inspect = async () => {
@@ -651,7 +844,7 @@ export function ZCodeAccountPanel({
     }
   };
   const refresh = async () => {
-    if (!begin()) return;
+    if (!begin(true)) return;
     setAction(null);
     setError(null);
     try {
@@ -681,6 +874,7 @@ export function ZCodeAccountPanel({
     if (
       kind === "switch" &&
       (full ||
+        originalUnresolved ||
         !catalog.data?.profiles.some(
           (profile) => profile.id === id && profile.canActivate === true,
         ))
@@ -721,6 +915,12 @@ export function ZCodeAccountPanel({
   const perform = async (updateDuplicate = false) => {
     if (!action || !begin()) return;
     const selected = action;
+    let switchDispatched = false;
+    let switchEpoch: number | null = null;
+    const invocation: {
+      request: Pick<SwitchOperationStatus, "requestId" | "target"> | null;
+    } = { request: null };
+    let confirmedFailure: SwitchOperationStatus | null = null;
     setError(null);
     try {
       // An open confirmation never silently adopts a newly fetched revision.
@@ -763,12 +963,51 @@ export function ZCodeAccountPanel({
         case "switch":
           // The previous observation is stale even if the switch reply is lost.
           invalidateCurrentIdentity();
-          result = await zcodeAccountsApi.switch(
-            selected.source,
-            selected.contextRevision!,
-            selected.id!,
-            selected.catalogRevision!,
-          );
+          switchDispatched = true;
+          switchEpoch = operationEpoch.current;
+          operationBinding.current = {
+            sourceKey: JSON.stringify(selected.source),
+            revision: selected.contextRevision!,
+          };
+          unresolvedSources.current.set(JSON.stringify(selected.source), {
+            revision: selected.contextRevision!,
+            operation: null,
+            request: null,
+          });
+          setOriginalUnresolved(true);
+          setOriginalOperation(null);
+          setOperationQueryState("idle");
+          setOperationPending(true);
+          try {
+            result = await zcodeAccountsApi.switch(
+              selected.source,
+              selected.contextRevision!,
+              selected.id!,
+              selected.catalogRevision!,
+              (evidence) => {
+                if (
+                  switchEpoch !== operationEpoch.current ||
+                  evidence.contextRevision !== selected.contextRevision ||
+                  JSON.stringify(evidence.source) !==
+                    JSON.stringify(selected.source)
+                )
+                  return;
+                invocation.request = {
+                  requestId: evidence.requestId,
+                  target: evidence.target,
+                };
+                // Only this wrapper invocation can advance from an inspected
+                // previous terminal request to its newly allocated request.
+                unresolvedSources.current.set(JSON.stringify(selected.source), {
+                  revision: selected.contextRevision!,
+                  operation: null,
+                  request: invocation.request,
+                });
+              },
+            );
+          } finally {
+            setOperationPending(false);
+          }
           break;
         case "archive":
           result = await zcodeAccountsApi.archive(selected.recoveryRevision);
@@ -839,10 +1078,45 @@ export function ZCodeAccountPanel({
       }
       setNeedsReview(false);
     } catch (cause) {
+      if (
+        switchDispatched &&
+        switchEpoch === operationEpoch.current &&
+        cause instanceof ConfirmedSwitchFailure &&
+        invocation.request !== null &&
+        cause.operation.requestId === invocation.request.requestId &&
+        cause.operation.target === invocation.request.target &&
+        cause.operation.phase === "failed" &&
+        !unresolvedSources.current.get(JSON.stringify(selected.source))
+          ?.identityUnknown &&
+        cause.contextRevision === selected.contextRevision &&
+        JSON.stringify(cause.source) === JSON.stringify(selected.source) &&
+        cause.operation.target === selected.id
+      ) {
+        // Only the wrapper's request-bound terminal evidence permits a fresh
+        // review. Generic errors and missing records never provide clearance.
+        confirmedFailure = cause.operation;
+        unresolvedSources.current.set(JSON.stringify(selected.source), {
+          revision: selected.contextRevision!,
+          operation: cause.operation,
+          request: invocation.request,
+        });
+        setOriginalUnresolved(false);
+      }
       setError(safeAccountError(cause));
       setNeedsReview(true);
       setAction(null);
     } finally {
+      // The backend query shares the native mutex: query only after settlement.
+      if (switchDispatched) {
+        if (!invocation.request && switchEpoch === operationEpoch.current)
+          unresolvedSources.current.set(JSON.stringify(selected.source), {
+            revision: selected.contextRevision!,
+            operation: null,
+            request: null,
+            identityUnknown: true,
+          });
+        await queryOriginal(selected.contextRevision!, true, confirmedFailure);
+      }
       finish();
     }
   };
@@ -886,9 +1160,21 @@ export function ZCodeAccountPanel({
         return {
           title: copy("switchTitle", "Switch ZCode account?"),
           message: copy(
-            "switchMessage",
-            "Switch the native session in {{root}} to saved account {{id}}. Quit ZCode normally first. LoongPort preserves the outgoing saved account and local recovery material. Current account status remains unknown until independently verified.",
-            { root, id },
+            "nativeSwitch.confirmation",
+            "Target: {{label}} · {{id}} · {{family}}\nInstallation: {{installation}}\nData directory: {{root}}\nInspected version/build: {{version}} / {{build}}\nThe existing safe process handles a running client; it will not continue if it cannot exit safely. Local write completion does not verify online sign-in. Read local identity separately and verify in the official client.",
+            {
+              root,
+              id,
+              label:
+                catalog.data?.profiles.find((profile) => profile.id === id)
+                  ?.label ?? id,
+              family:
+                catalog.data?.profiles.find((profile) => profile.id === id)
+                  ?.family ?? "",
+              installation: action.source.installPath,
+              version: context?.version ?? "",
+              build: context?.build ?? "",
+            },
           ),
           confirm: copy("switchConfirm", "Switch to this account"),
         };
@@ -1372,37 +1658,21 @@ export function ZCodeAccountPanel({
           )}
         </p>
       )}
-      <div className="space-y-2">
-        <p className="text-sm text-muted-foreground">
-          {currentIdentity?.id
-            ? copy(
-                "currentNativeIdentity",
-                "Current native account: {{account}} · {{family}}",
-                {
-                  account: currentIdentity.label ?? currentIdentity.id,
-                  family: currentIdentity.family ?? "",
-                },
-              )
-            : copy("currentUnknown", "Current account: unknown")}
-        </p>
-        {currentIdentity && (
-          <p className="text-xs text-muted-foreground">
-            {copy(
-              "currentReadAt",
-              "Read at {{time}}. This is a local observation, not an online status check.",
-              { time: new Date(currentIdentity.readAt).toISOString() },
-            )}
-          </p>
-        )}
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={!context || locked || identityReading || !!action}
-          onClick={() => void readCurrentIdentity()}
-        >
-          {copy("readCurrentIdentity", "Read current native identity")}
-        </Button>
-      </div>
+      <ZCodeNativeSwitchSection
+        currentIdentity={currentIdentity}
+        identityReading={identityReading}
+        operation={originalOperation}
+        queryState={operationQueryState}
+        operationPending={operationPending}
+        controlsDisabled={locked || !!action || !!checkingId}
+        hasInspectedSource={context !== null}
+        onReadIdentity={() => void readCurrentIdentity()}
+        onQueryOriginal={() => void queryOriginalExplicitly()}
+        onViewRecovery={() => {
+          recoveryRef.current?.scrollIntoView({ block: "start" });
+          recoveryRef.current?.focus();
+        }}
+      />
       {displayedError && (
         <p role="alert" className="text-sm text-destructive">
           {notice
@@ -1647,14 +1917,52 @@ export function ZCodeAccountPanel({
                             disabled={
                               !ordinaryReady ||
                               profile.canActivate !== true ||
+                              originalUnresolved ||
                               full ||
                               !!action
                             }
                             onClick={() => review("switch", profile.id)}
                           >
-                            {copy("switch", "Switch saved account")}
+                            {copy(
+                              "nativeSwitch.switch",
+                              "Switch to this account",
+                            )}
                           </Button>
                         </div>
+                        {originalUnresolved && (
+                          <p className="w-full text-xs text-muted-foreground">
+                            {copy(
+                              "nativeSwitch.resolveOriginal",
+                              "Query the unresolved original operation before starting another switch.",
+                            )}
+                          </p>
+                        )}
+                        {needsReview && !originalUnresolved && (
+                          <p className="w-full text-xs text-muted-foreground">
+                            {copy(
+                              "nativeSwitch.refreshBeforeReview",
+                              "Refresh account status before reviewing a new switch.",
+                            )}
+                          </p>
+                        )}
+                        {!context && (
+                          <p className="w-full text-xs text-muted-foreground">
+                            {copy(
+                              "nativeSwitch.switchInspectFirst",
+                              "Inspect a supported native source before switching to this account.",
+                            )}
+                          </p>
+                        )}
+                        {context &&
+                          profile.canActivate !== true &&
+                          !profile.activationBlockedReason && (
+                            <p className="w-full text-xs text-muted-foreground">
+                              {copy(
+                                "nativeSwitch.notEligible",
+                                "The backend has not granted native activation for this account.",
+                              )}
+                            </p>
+                          )}
                         <p className="w-full text-xs text-muted-foreground">
                           {copy(
                             "connectionCheckDisclosure",
@@ -1720,6 +2028,8 @@ export function ZCodeAccountPanel({
       )}
       <section
         className="space-y-3"
+        ref={recoveryRef}
+        tabIndex={-1}
         aria-label={copy("recoveryTitle", "Local account recovery")}
       >
         <h4 className="text-sm font-medium">
