@@ -57,7 +57,7 @@ describe("OpenCode Go Provider Preset", () => {
 
     const env = (openCodeGo!.settingsConfig as any).env;
     expect(env).toMatchObject({
-      ANTHROPIC_BASE_URL: "https://opencode.ai/zen/go",
+      ANTHROPIC_BASE_URL: "https://opencode.ai/inference/go/anthropic",
       ANTHROPIC_API_KEY: "",
       ANTHROPIC_MODEL: "deepseek-v4-flash",
       ANTHROPIC_DEFAULT_HAIKU_MODEL: "deepseek-v4-flash",
