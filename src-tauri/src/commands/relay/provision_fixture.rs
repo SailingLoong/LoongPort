@@ -413,9 +413,31 @@ fn verify_selected_new_projection_isolation() {
 }
 
 fn verify_selected_metadata_rollback() {
+    // AppState construction performs the admitted legacy routing migration, so a
+    // fresh Database no longer implies an absent chain after startup. Exercise
+    // both transaction branches explicitly rather than assuming startup is inert.
+    for initial_chain in [None, Some("[  ]")] {
+        verify_selected_metadata_rollback_with_chain(initial_chain);
+    }
+}
+
+fn verify_selected_metadata_rollback_with_chain(initial_chain: Option<&str>) {
     let account = account(7);
     let db = Arc::new(crate::database::Database::memory().unwrap());
     let state = AppState::new(db.clone()).unwrap();
+    match initial_chain {
+        Some(raw) => db.set_setting("application_priority_codex", raw).unwrap(),
+        None => {
+            db.conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "DELETE FROM settings WHERE key='application_priority_codex'",
+                    [],
+                )
+                .unwrap();
+        }
+    }
     let mut selected = batch(&account, "rollback");
     restrict_batch_to_selection(
         &mut selected,
@@ -425,10 +447,12 @@ fn verify_selected_metadata_rollback() {
         }],
     );
     let id = selected.candidates[0].provider_id.clone();
-    assert!(db
-        .get_setting("application_priority_codex")
-        .unwrap()
-        .is_none());
+    assert_eq!(
+        db.get_setting("application_priority_codex")
+            .unwrap()
+            .as_deref(),
+        initial_chain
+    );
     db.conn
         .lock()
         .unwrap()
@@ -453,11 +477,12 @@ fn verify_selected_metadata_rollback() {
         db.get_provider_by_id(&id, "codex").unwrap().is_none(),
         "initial metadata failure must not leave a partially prepared provider"
     );
-    assert!(
+    assert_eq!(
         db.get_setting("application_priority_codex")
             .unwrap()
-            .is_none(),
-        "provider failure must also roll back initial effective-chain materialization"
+            .as_deref(),
+        initial_chain,
+        "provider failure must roll back new chain materialization and preserve existing bytes"
     );
 }
 
