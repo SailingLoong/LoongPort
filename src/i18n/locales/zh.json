@@ -4584,8 +4584,9 @@
       "localLabelReset": "留空可恢复使用账号的官方显示名。",
       "saveDisplayName": "保存显示名",
       "login": {
-        "deviceHint": "重新授权时请选择该账号已绑定的设备 ID，或明确选择新的 ID。",
+        "deviceHint": "添加或重新授权账号时，请选择未绑定的设备 ID。",
         "deviceBound": "已绑定",
+        "deviceTakenNoAvailable": "当前设备 ID 已被绑定，请先导入其他设备 ID。",
         "deviceLoadFailed": "无法读取设备 ID。",
         "retryDevices": "重试",
         "device": "账号设备 ID",

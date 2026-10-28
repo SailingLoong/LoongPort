@@ -63,6 +63,9 @@ export function ZCodeOAuthAdd({
   ) => t(`zcode.accounts.login.${key}`, { defaultValue, ...values });
   const [family, setFamily] = useState<LoginFamily>("bigmodel");
   const [devices, setDevices] = useState<string[]>([]);
+  const [effectiveDeviceMid, setEffectiveDeviceMid] = useState<string | null>(
+    null,
+  );
   const [deviceMid, setDeviceMid] = useState("current");
   const [deviceLoading, setDeviceLoading] = useState(open && !savedAccount);
   const [deviceLoadFailed, setDeviceLoadFailed] = useState(false);
@@ -221,6 +224,7 @@ export function ZCodeOAuthAdd({
     if (!open || savedId) return;
     let active = true;
     setDevices([]);
+    setEffectiveDeviceMid(null);
     setDeviceMid("current");
     setDeviceLoading(true);
     setDeviceLoadFailed(false);
@@ -228,6 +232,7 @@ export function ZCodeOAuthAdd({
       (state) => {
         if (active) {
           setDevices(state.devices);
+          setEffectiveDeviceMid(state.effectiveDeviceMid);
           setDeviceLoading(false);
         }
       },
@@ -404,6 +409,14 @@ export function ZCodeOAuthAdd({
     setPaused(true);
   };
   const phase = progress?.phase;
+  const selectedDeviceMid =
+    deviceMid === "current" ? effectiveDeviceMid : deviceMid;
+  const isBoundDevice = (id: string) =>
+    boundDeviceMids.some((bound) => bound.toLowerCase() === id.toLowerCase());
+  const deviceTaken =
+    selectedDeviceMid !== null && isBoundDevice(selectedDeviceMid);
+  const currentDeviceTaken =
+    effectiveDeviceMid !== null && isBoundDevice(effectiveDeviceMid);
   const completeCoding = progress?.purpose === "completeCoding";
   const blocked = busy !== null || reading;
   const keyUncertain =
@@ -518,13 +531,17 @@ export function ZCodeOAuthAdd({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="current">
+                    <SelectItem value="current" disabled={currentDeviceTaken}>
                       {copy("deviceCurrent", "Use current environment")}
                     </SelectItem>
                     {devices.map((id) => (
-                      <SelectItem key={id} value={id}>
+                      <SelectItem
+                        key={id}
+                        value={id}
+                        disabled={isBoundDevice(id)}
+                      >
                         {id}
-                        {boundDeviceMids.includes(id)
+                        {isBoundDevice(id)
                           ? ` · ${copy("deviceBound", "Bound")}`
                           : ""}
                       </SelectItem>
@@ -536,7 +553,15 @@ export function ZCodeOAuthAdd({
                 <p className="text-xs text-muted-foreground">
                   {copy(
                     "deviceHint",
-                    "When reauthorizing, select this account's existing device ID or explicitly choose a new one.",
+                    "Choose an unassigned device ID when adding or reauthorizing an account.",
+                  )}
+                </p>
+              )}
+              {devices.length === 0 && currentDeviceTaken && (
+                <p role="status" className="text-xs text-muted-foreground">
+                  {copy(
+                    "deviceTakenNoAvailable",
+                    "The current device ID is already bound. Import another device ID before continuing.",
                   )}
                 </p>
               )}
@@ -939,7 +964,9 @@ export function ZCodeOAuthAdd({
           </Button>
           {!progress && !savedAccount && (
             <Button
-              disabled={blocked || deviceLoading || deviceLoadFailed}
+              disabled={
+                blocked || deviceLoading || deviceLoadFailed || deviceTaken
+              }
               onClick={() => void begin()}
             >
               {copy("continue", "Continue official sign-in")}

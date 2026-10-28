@@ -4584,8 +4584,9 @@
       "localLabelReset": "Leave empty to use the account's official display label.",
       "saveDisplayName": "Save display name",
       "login": {
-        "deviceHint": "When reauthorizing, select this account's existing device ID or explicitly choose a new one.",
+        "deviceHint": "Choose an unassigned device ID when adding or reauthorizing an account.",
         "deviceBound": "Bound",
+        "deviceTakenNoAvailable": "The current device ID is already bound. Import another device ID before continuing.",
         "deviceLoadFailed": "Unable to load device IDs.",
         "retryDevices": "Retry",
         "device": "Account device ID",
