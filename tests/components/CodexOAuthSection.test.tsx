@@ -1,9 +1,19 @@
+import * as tauriCore from "@tauri-apps/api/core";
 import { http, HttpResponse } from "msw";
 import { server } from "../msw/server";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { createTestQueryClient } from "../utils/testQueryClient";
 import { useState } from "react";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { AccountApplicationNavigation } from "@/components/relay/accounts/AccountWorkspace";
+import { PreservedView } from "@/components/ui/PreservedView";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CodexOAuthSection } from "@/components/providers/forms/CodexOAuthSection";
@@ -95,6 +105,7 @@ describe("CodexOAuthSection", () => {
   afterEach(() => {
     cleanup();
     queryClient.clear();
+    vi.restoreAllMocks();
     if (scrollIntoViewDescriptor) {
       Object.defineProperty(
         HTMLElement.prototype,
@@ -487,7 +498,11 @@ describe("CodexOAuthSection", () => {
     expect(onSelectionConfirmed).not.toHaveBeenCalled();
   });
   it("keeps unified authorization and quota separate from inference acceptance", () => {
-    render(<CodexOAuthSection unified showAccountQuota />);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <CodexOAuthSection unified showAccountQuota />
+      </QueryClientProvider>,
+    );
     expect(
       screen.getByRole("region", { name: "授权状态" }),
     ).toBeInTheDocument();
@@ -497,5 +512,137 @@ describe("CodexOAuthSection", () => {
     expect(
       screen.getByRole("region", { name: "模型与推理" }),
     ).toHaveTextContent("尚未验收");
+  });
+
+  const linkedProviders = {
+    first: {
+      id: "first",
+      name: "Account A configuration",
+      settingsConfig: { auth: { secret: "private-provider-secret" } },
+      meta: {
+        authBinding: {
+          source: "managed_account",
+          authProvider: "codex_oauth",
+          accountId: "account-1",
+        },
+      },
+      presentation: { isOfficial: true, isCurrent: true },
+    },
+    second: {
+      id: "second",
+      name: "Account B configuration",
+      settingsConfig: {},
+      meta: {
+        authBinding: {
+          source: "managed_account",
+          authProvider: "codex_oauth",
+          accountId: "account-2",
+        },
+      },
+      presentation: { isOfficial: true, isCurrent: false },
+    },
+  };
+  function captureCommands() {
+    const calls: { command: string; body: unknown }[] = [];
+    vi.spyOn(tauriCore, "invoke").mockImplementation(async (command, body) => {
+      calls.push({ command, body });
+      if (command === "get_providers") return linkedProviders as never;
+      throw new Error(`Unexpected native call: ${command}`);
+    });
+    return calls;
+  }
+  it("reads one Codex catalog for unified details and opens only the explicit existing application", async () => {
+    const calls = captureCommands();
+    const onOpen = vi.fn();
+    const user = userEvent.setup();
+    const original = mocks.useCodexOauth();
+    mocks.useCodexOauth.mockReturnValue({
+      ...original,
+      accounts: original.accounts.map((account: { id: string }) => ({
+        ...account,
+        login: "shared@example.invalid",
+      })),
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AccountApplicationNavigation.Provider value={onOpen}>
+          <CodexOAuthSection unified />
+        </AccountApplicationNavigation.Provider>
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+    await screen.findByText("Account A configuration");
+    expect(
+      screen.queryByText("Account B configuration"),
+    ).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Switch official client account" }),
+    );
+    expect(onOpen).not.toHaveBeenCalled();
+    await user.click(
+      screen.getByRole("button", { name: "Go to Codex application page" }),
+    );
+    expect(onOpen).toHaveBeenCalledExactlyOnceWith("codex");
+    await user.click(
+      screen.getAllByRole("button", { name: "查看 shared@example.invalid" })[1],
+    );
+    await screen.findByText("Account B configuration");
+    expect(
+      screen.queryByText("Account A configuration"),
+    ).not.toBeInTheDocument();
+    expect(calls).toEqual([
+      { command: "get_providers", body: { app: "codex" } },
+    ]);
+    const auth = mocks.useCodexOauth();
+    for (const key of [
+      "addAccount",
+      "removeAccount",
+      "setDefaultAccount",
+      "logout",
+      "cancelAuth",
+    ])
+      expect(auth[key]).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain("private-provider-secret");
+  });
+  it.each([false, true])(
+    "does not add provider reads in select mode (unified=%s)",
+    async (unified) => {
+      const calls = captureCommands();
+      render(
+        <CodexOAuthSection
+          mode="select"
+          unified={unified}
+          onAccountSelect={vi.fn()}
+        />,
+      );
+      await act(async () => {});
+      expect(calls).toEqual([]);
+      expect(
+        screen.queryByRole("region", { name: "Codex official client" }),
+      ).not.toBeInTheDocument();
+    },
+  );
+  it("stops new provider reads when a retained account page becomes hidden", async () => {
+    const calls = captureCommands();
+    const view = (active: boolean) => (
+      <QueryClientProvider client={queryClient}>
+        <PreservedView active={active}>
+          <CodexOAuthSection unified />
+        </PreservedView>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(view(true));
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+    await screen.findByText("Account A configuration");
+    rerender(view(false));
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
+    });
+    expect(calls).toEqual([
+      { command: "get_providers", body: { app: "codex" } },
+    ]);
+    expect(
+      screen.queryByRole("button", { name: "Go to Codex application page" }),
+    ).not.toBeInTheDocument();
   });
 });

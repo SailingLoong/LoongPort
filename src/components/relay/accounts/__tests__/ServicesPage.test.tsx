@@ -1,3 +1,8 @@
+import { useContext } from "react";
+import {
+  AccountApplicationNavigation,
+  AccountWorkspace,
+} from "../AccountWorkspace";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -15,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   detail: vi.fn(),
   balance: vi.fn(),
   sources: vi.fn(),
+  navigationProbe: false,
 }));
 vi.mock("@/lib/api/relay", () => ({ relayApi: { listRelays: mocks.relays } }));
 vi.mock("@/lib/api/serviceSources", () => ({
@@ -25,6 +31,7 @@ vi.mock("@/hooks/useTauriEvent", () => ({ useTauriEvent: vi.fn() }));
 vi.mock("../../RelaySection", () => ({
   RelaySection: (props: any) => {
     mocks.detail(props);
+    if (mocks.navigationProbe) return <NavigationProbe />;
     return props.renderAccounts ? (
       props.renderAccounts(
         () => <div>Account controls</div>,
@@ -84,6 +91,7 @@ const vendor: VendorAccountRow = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.navigationProbe = false;
   localStorage.clear();
   mocks.sources.mockResolvedValue([]);
   mocks.relays.mockResolvedValue([relay]);
@@ -358,4 +366,57 @@ describe("ServicesPage 账号卡活动状态行", () => {
       ).not.toBeInTheDocument(),
     );
   });
+});
+
+function NavigationProbe() {
+  const openApp = useContext(AccountApplicationNavigation);
+  return (
+    <AccountWorkspace
+      accounts={[{ id: "sample", name: "Sample account" }]}
+      label={(row) => row.name}
+    >
+      {() => (
+        <button onClick={() => openApp?.("codex")}>Open explicit Codex</button>
+      )}
+    </AccountWorkspace>
+  );
+}
+it("forwards an explicit account application target but preserves the real legacy click's original app", async () => {
+  mocks.navigationProbe = true;
+  const onOpenApp = vi.fn();
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  render(
+    <QueryClientProvider client={client}>
+      <ServicesPage
+        appId="gemini"
+        account={{ kind: "relay", id: 1 }}
+        onOpenApp={onOpenApp}
+        onOpenAddHub={vi.fn()}
+      />
+    </QueryClientProvider>,
+  );
+  const user = userEvent.setup();
+  await user.click(
+    await screen.findByRole("button", { name: "Open explicit Codex" }),
+  );
+  expect(onOpenApp).toHaveBeenLastCalledWith("codex");
+  await user.click(screen.getByRole("button", { name: "到应用中查看与配置" }));
+  expect(onOpenApp).toHaveBeenLastCalledWith("gemini");
+  expect(onOpenApp.mock.calls).toEqual([["codex"], ["gemini"]]);
+});
+it("does not forward a React click event through the legacy no-argument account navigation", async () => {
+  const onOpenApp = vi.fn();
+  render(
+    <AccountApplicationNavigation.Provider value={onOpenApp}>
+      <AccountWorkspace accounts={[{ id: "sample" }]} label={() => "Sample"}>
+        {() => null}
+      </AccountWorkspace>
+    </AccountApplicationNavigation.Provider>,
+  );
+  await userEvent
+    .setup()
+    .click(screen.getByRole("button", { name: "到应用中查看与配置" }));
+  expect(onOpenApp).toHaveBeenCalledExactlyOnceWith();
 });

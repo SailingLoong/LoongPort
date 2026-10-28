@@ -1454,6 +1454,21 @@
     "enterpriseDomainPlaceholder": "e.g. company.ghe.com"
   },
   "codexOauth": {
+    "nativeSwitchEntry": {
+      "title": "Codex official client",
+      "boundary": "Direct native account switching is not available here. Set as Default only changes LoongPort's default managed-auth account; it does not switch the official client.",
+      "reauth": "Renew authorization before using this account. Opening the application does not renew it.",
+      "loading": "Loading linked Codex configurations…",
+      "readError": "Unable to read linked configurations. This read does not switch accounts.",
+      "retry": "Retry reading configurations",
+      "linkedTitle": "Linked Codex official configurations",
+      "selectedConfiguration": "Selected application configuration",
+      "empty": "No Codex official configuration explicitly bound to this account was found.",
+      "nativeSwitch": "Switch official client account",
+      "openApp": "Go to Codex application page",
+      "navigationUnavailable": "This view has no application navigation entry.",
+      "hint": "Choose the corresponding configuration on LoongPort's Codex application page and follow its existing switch confirmation. Configuration state does not verify the client's online identity."
+    },
     "authStatus": "Auth status",
     "notAuthenticated": "Not authenticated",
     "loginWithChatGPT": "Sign in with ChatGPT",

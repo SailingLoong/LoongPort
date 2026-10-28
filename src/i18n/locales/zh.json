@@ -1454,6 +1454,21 @@
     "enterpriseDomainPlaceholder": "例如：company.ghe.com"
   },
   "codexOauth": {
+    "nativeSwitchEntry": {
+      "title": "Codex 官方客户端",
+      "boundary": "本页尚未接入原生账号直接切换。设为默认只修改 LoongPort 托管认证默认项，不会切换官方客户端。",
+      "reauth": "使用此账号前需要重新授权。前往应用页不会自动续授权。",
+      "loading": "正在读取已绑定的 Codex 配置…",
+      "readError": "无法读取已绑定的配置。读取操作不会切换账号。",
+      "retry": "重新读取配置",
+      "linkedTitle": "已绑定的 Codex 官方配置",
+      "selectedConfiguration": "应用当前已选配置",
+      "empty": "未找到明确绑定此账号的 Codex 官方配置。",
+      "nativeSwitch": "切换官方客户端账号",
+      "openApp": "前往 Codex 应用页",
+      "navigationUnavailable": "此视图没有应用页导航入口。",
+      "hint": "请在 LoongPort 的 Codex 应用页选择对应配置，并按原切换确认操作；配置状态不代表客户端在线身份。"
+    },
     "authStatus": "认证状态",
     "notAuthenticated": "未认证",
     "loginWithChatGPT": "使用 ChatGPT 登录",
