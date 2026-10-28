@@ -2170,6 +2170,7 @@ pub fn run() {
             commands::delete_pi_prompt_template,
             // Pi native provider and session views
             commands::get_pi_current_state,
+            commands::preview_workbuddy_native_capture,
             commands::list_workbuddy_accounts,
             commands::list_minimax_code_accounts,
             commands::refresh_minimax_code_account,

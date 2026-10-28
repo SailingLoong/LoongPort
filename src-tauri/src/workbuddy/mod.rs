@@ -34,3 +34,6 @@ pub(crate) mod shared_routing_fixture;
 mod native;
 pub(crate) mod native_owner;
 mod native_transaction;
+
+#[cfg(any(feature = "gui", test))]
+pub(crate) mod native_preview;

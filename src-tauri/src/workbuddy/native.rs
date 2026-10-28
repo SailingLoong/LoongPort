@@ -253,6 +253,16 @@ pub(crate) fn capture(
     {
         return Err(NativeError::UnsupportedContext);
     }
+    let identity = validated_identity(bytes, context.realm.as_str())?;
+    Ok(NativeSnapshot {
+        context: context.clone(),
+        identity,
+        bytes: Zeroizing::new(bytes.to_vec()),
+    })
+}
+
+// Shared strict schema validator; it does not mint a source/install binding.
+fn validated_identity(bytes: &[u8], realm: &str) -> Result<String, NativeError> {
     if bytes.len() > MAX_NATIVE_AUTH_BYTES {
         return Err(NativeError::InvalidDocument);
     }
@@ -292,7 +302,7 @@ pub(crate) fn capture(
     }) {
         return Err(NativeError::UnsupportedContext);
     }
-    if auth.get("domain").and_then(Value::as_str) != Some(context.realm.as_str()) {
+    if auth.get("domain").and_then(Value::as_str) != Some(realm) {
         return Err(NativeError::ContextMismatch);
     }
     // Upstream import checks these root aliases before the nested active blocks.
@@ -302,7 +312,7 @@ pub(crate) fn capture(
         .is_some_and(|v| v.as_str() != Some(identity))
         || root
             .get("domain")
-            .is_some_and(|v| v.as_str() != Some(context.realm.as_str()))
+            .is_some_and(|v| v.as_str() != Some(realm))
     {
         return Err(NativeError::InvalidDocument);
     }
@@ -313,11 +323,34 @@ pub(crate) fn capture(
     {
         return Err(NativeError::InvalidDocument);
     }
-    Ok(NativeSnapshot {
-        context: context.clone(),
-        identity: identity.to_owned(),
-        bytes: Zeroizing::new(bytes.to_vec()),
-    })
+    Ok(identity.to_owned())
+}
+
+/// Observation is deliberately not NativeSnapshot: known file location does not
+/// authenticate a machine/install/key context, and cannot authorize prepare/apply.
+#[cfg(any(test, feature = "gui"))]
+pub(super) fn observe(bytes: &[u8]) -> Result<&'static str, NativeError> {
+    if bytes.len() > MAX_NATIVE_AUTH_BYTES {
+        return Err(NativeError::InvalidDocument);
+    }
+    serde_json::from_slice::<UniqueJson>(bytes).map_err(|_| NativeError::InvalidDocument)?;
+    let document =
+        SecretDocument(serde_json::from_slice(bytes).map_err(|_| NativeError::InvalidDocument)?);
+    let realm = match document
+        .0
+        .get("auth")
+        .and_then(|a| a.get("domain"))
+        .and_then(Value::as_str)
+    {
+        Some("www.workbuddy.cn") => "www.workbuddy.cn",
+        Some("www.codebuddy.cn") => "www.codebuddy.cn",
+        Some(_) => return Err(NativeError::UnsupportedContext),
+        None => return Err(NativeError::InvalidDocument),
+    };
+    // The identity is required for original strict validation, never returned.
+    let mut identity = validated_identity(bytes, realm)?;
+    identity.zeroize();
+    Ok(realm)
 }
 
 #[cfg(test)]

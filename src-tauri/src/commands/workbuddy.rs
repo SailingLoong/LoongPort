@@ -187,3 +187,13 @@ pub(crate) async fn set_workbuddy_inference_consent(
     crate::workbuddy::inference::set_inference_consent(state.db.secret_session(), &id, enabled)
         .await
 }
+
+/// Explicit observation only: never captures a reusable native snapshot or writes state.
+#[tauri::command]
+pub(crate) async fn preview_workbuddy_native_capture(
+) -> Result<crate::workbuddy::native_preview::Preview, crate::workbuddy::native_preview::PreviewError>
+{
+    tauri::async_runtime::spawn_blocking(crate::workbuddy::native_preview::preview_current)
+        .await
+        .map_err(|_| crate::workbuddy::native_preview::PreviewError::UnreadableSource)?
+}
