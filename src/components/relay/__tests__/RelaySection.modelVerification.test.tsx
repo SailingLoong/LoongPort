@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const api = vi.hoisted(() => ({
   listRelays: vi.fn(),
+  login: vi.fn(),
   listTierRates: vi.fn(),
   checkSession: vi.fn(),
   refreshAll: vi.fn(),
@@ -332,6 +333,23 @@ describe("RelaySection model verification ownership", () => {
     );
   });
 
+  it("registration only reloads account facts until configuration is explicitly confirmed", async () => {
+    renderSection("codex");
+    await screen.findByRole("button", { name: "use provider-a" });
+    const before = api.listRelays.mock.calls.length;
+    await act(async () => {
+      await eventHandlers.get("onboarding-register-completed")?.({
+        relayId: 1,
+        siteName: "Fixture relay",
+      });
+    });
+    await waitFor(() =>
+      expect(api.listRelays.mock.calls.length).toBeGreaterThan(before),
+    );
+    expect(api.refresh).not.toHaveBeenCalled();
+    expect(api.refreshAll).not.toHaveBeenCalled();
+  });
+
   it.each(["use", "model"])(
     "passes the original %s target through catalog preview and final apply",
     async (action) => {
@@ -409,6 +427,28 @@ describe("RelaySection model verification ownership", () => {
     renderSection("codex");
     await screen.findByTestId("verdict-provider-a");
     expect(api.checkSession).not.toHaveBeenCalled();
+    expect(api.refresh).not.toHaveBeenCalled();
+  });
+
+  it("re-login consumes only authentication and reloads account facts", async () => {
+    api.login.mockResolvedValue(true);
+    await renderRelayEntry(
+      <QueryClientProvider client={createTestQueryClient()}>
+        <ServicesPage
+          appId="codex"
+          onOpenApp={vi.fn()}
+          onOpenAddHub={vi.fn()}
+        />
+      </QueryClientProvider>,
+    );
+    const before = api.listRelays.mock.calls.length;
+    fireEvent.click(
+      await screen.findByRole("button", { name: "loongport.row.reLogin" }),
+    );
+    await waitFor(() => expect(api.login).toHaveBeenCalledWith(1, "codex"));
+    await waitFor(() =>
+      expect(api.listRelays.mock.calls.length).toBeGreaterThan(before),
+    );
     expect(api.refresh).not.toHaveBeenCalled();
   });
 

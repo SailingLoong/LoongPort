@@ -57,7 +57,6 @@ export interface RelayDirectoryPageProps {
 }
 
 export function RelayDirectoryPage({
-  sourceAppId,
   onBack,
   onAuthenticated,
   embedded = false,
@@ -204,15 +203,8 @@ export function RelayDirectoryPage({
       toast.success(
         t("loongport.addSite.connected", { name: result.siteName }),
       );
-      try {
-        await relayApi.refresh(result.relayId, sourceAppId);
-      } catch (reason) {
-        toast.error(
-          t("loongport.directory.provisionFailed", {
-            reason: extractErrorMessage(reason),
-          }),
-        );
-      }
+      // Authentication stores the account only. Group discovery and preparation
+      // belong to the explicit configuration flow, never to this read boundary.
       onAuthenticated?.();
       if (onConnected)
         onConnected({

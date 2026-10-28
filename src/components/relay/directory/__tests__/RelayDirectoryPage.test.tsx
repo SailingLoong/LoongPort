@@ -470,7 +470,7 @@ describe("RelayDirectoryPage", () => {
     expect(screen.getByText("Apex Relay")).toBeInTheDocument();
   });
 
-  it("waits for authentication and backend refresh before returning", async () => {
+  it("returns after authentication without a configuration write", async () => {
     const onBack = vi.fn();
     const onAuthenticated = vi.fn();
     renderDirectory({
@@ -488,7 +488,7 @@ describe("RelayDirectoryPage", () => {
     await waitFor(() =>
       expect(importDirectorySite).toHaveBeenCalledWith("https://apex.example"),
     );
-    expect(refresh).toHaveBeenCalledWith(7, "claude");
+    expect(refresh).not.toHaveBeenCalled();
     await waitFor(() => expect(onAuthenticated).toHaveBeenCalled());
     expect(onBack).toHaveBeenCalled();
   });
@@ -514,7 +514,7 @@ describe("RelayDirectoryPage", () => {
     expect(toastError).not.toHaveBeenCalled();
   });
 
-  it("returns to the relay list when refresh fails after authentication", async () => {
+  it("does not depend on the mutating refresh service after authentication", async () => {
     refresh.mockRejectedValue(new Error("网络不通"));
     const onBack = vi.fn();
     const onAuthenticated = vi.fn();
@@ -532,9 +532,8 @@ describe("RelayDirectoryPage", () => {
 
     await waitFor(() => expect(onAuthenticated).toHaveBeenCalled());
     expect(onBack).toHaveBeenCalled();
-    expect(toastError).toHaveBeenCalledWith(
-      expect.stringContaining("网络不通"),
-    );
+    expect(refresh).not.toHaveBeenCalled();
+    expect(toastError).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -567,6 +566,25 @@ describe("RelayDirectoryPage", () => {
     await waitFor(() =>
       expect(toastError).toHaveBeenCalledWith("loongport.addSite.importFailed"),
     );
+  });
+
+  it("hands authenticated directory accounts to selection without preparing configurations", async () => {
+    const onConnected = vi.fn();
+    renderDirectory({ sourceAppId: "codex", onBack: vi.fn(), onConnected });
+    const row = (await screen.findByText("Apex Relay")).closest("article");
+    fireEvent.click(
+      within(row!).getByRole("button", {
+        name: "loongport.directory.actions.authenticate",
+      }),
+    );
+    await waitFor(() =>
+      expect(onConnected).toHaveBeenCalledWith({
+        kind: "relay",
+        rowId: 7,
+        name: "Apex Relay",
+      }),
+    );
+    expect(refresh).not.toHaveBeenCalled();
   });
 
   it("allows only one authentication operation at a time", async () => {

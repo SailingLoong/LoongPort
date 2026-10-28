@@ -179,7 +179,13 @@ fn verify_persistence() {
     let account = account(7);
     let db = Arc::new(crate::database::Database::memory().unwrap());
     let state = AppState::new(db.clone()).unwrap();
-    persist_provision_batch_scope(&state, &account, batch(&account, "old"), false).unwrap();
+    persist_provision_batch_scope(
+        &state,
+        &account,
+        batch(&account, "old"),
+        ProvisionPersistenceIntent::SelectedPrepare,
+    )
+    .unwrap();
     let old_id = managed::newapi_provider_id_for(&account.site_origin, 7, "old");
     let old_codex = db.get_provider_by_id(&old_id, "codex").unwrap().unwrap();
     let mut next = batch(&account, "selected");
@@ -190,7 +196,13 @@ fn verify_persistence() {
             group_id: "selected".into(),
         }],
     );
-    let summary = persist_provision_batch_scope(&state, &account, next, false).unwrap();
+    let summary = persist_provision_batch_scope(
+        &state,
+        &account,
+        next,
+        ProvisionPersistenceIntent::SelectedPrepare,
+    )
+    .unwrap();
     assert_eq!(summary.tiers.len(), 1);
     for app in ["claude", "codex", "gemini"] {
         assert!(db.get_provider_by_id(&old_id, app).unwrap().is_some());
@@ -206,6 +218,247 @@ fn verify_persistence() {
     assert!(db.get_provider_by_id(&new_id, "codex").unwrap().is_some());
     assert!(db.get_provider_by_id(&new_id, "claude").unwrap().is_none());
     assert!(db.get_provider_by_id(&new_id, "gemini").unwrap().is_none());
+}
+
+fn verify_selected_isolation() {
+    let account = account(7);
+    let db = Arc::new(crate::database::Database::memory().unwrap());
+    let state = AppState::new(db.clone()).unwrap();
+    let mut selected = batch(&account, "selected");
+    restrict_batch_to_selection(
+        &mut selected,
+        &[RelayTierSelection {
+            app: "codex".into(),
+            group_id: "selected".into(),
+        }],
+    );
+    let id = selected.candidates[0].provider_id.clone();
+    let mut original = provider(id.clone(), Some(7));
+    original.settings_config =
+        json!({"auth":{"OPENAI_API_KEY":"fixture-manual-key"},"config":"model = \"manual-model\""});
+    original.notes = Some("retain manually edited routing".into());
+    original.in_failover_queue = true;
+    db.save_provider("codex", &original).unwrap();
+    db.set_available_models("codex", &id, &["manual-model".into()])
+        .unwrap();
+    db.set_current_provider("codex", &id).unwrap();
+    db.set_user_edited("codex", &id, true).unwrap();
+    db.set_setting(
+        "application_priority_codex",
+        &serde_json::to_string(&[&id]).unwrap(),
+    )
+    .unwrap();
+    let before = db.get_provider_by_id(&id, "codex").unwrap().unwrap();
+    let before_chain = db.get_setting("application_priority_codex").unwrap();
+    let before_mcp = db.get_all_mcp_servers().unwrap();
+    let summary = persist_provision_batch_scope(
+        &state,
+        &account,
+        selected,
+        ProvisionPersistenceIntent::SelectedPrepare,
+    )
+    .unwrap();
+    let after = db.get_provider_by_id(&id, "codex").unwrap().unwrap();
+    assert_eq!(
+        serde_json::to_value(&before).unwrap(),
+        serde_json::to_value(&after).unwrap()
+    );
+    assert_eq!(before.available_models, after.available_models);
+    assert_eq!(
+        db.get_current_provider("codex").unwrap().as_deref(),
+        Some(id.as_str())
+    );
+    assert_eq!(
+        db.get_setting("application_priority_codex").unwrap(),
+        before_chain
+    );
+    assert_eq!(
+        serde_json::to_value(db.get_all_mcp_servers().unwrap()).unwrap(),
+        serde_json::to_value(before_mcp).unwrap()
+    );
+    assert!(db.get_user_edited("codex", &id).unwrap());
+    assert!(summary.merged_providers.is_empty());
+    assert_eq!(summary.tiers[0].model, "manual-model");
+}
+
+/// Exercise the new-row branch against side effects that would otherwise be
+/// observable: a mergeable current duplicate, registered MCP, and live files.
+fn verify_selected_new_projection_isolation() {
+    let account = account(7);
+    let db = Arc::new(crate::database::Database::memory().unwrap());
+    let state = AppState::new(db.clone()).unwrap();
+    let mut selected = batch(&account, "selected-new");
+    restrict_batch_to_selection(
+        &mut selected,
+        &[RelayTierSelection {
+            app: "codex".into(),
+            group_id: "selected-new".into(),
+        }],
+    );
+    let candidate = &selected.candidates[0];
+    let id = candidate.provider_id.clone();
+    let mut duplicate = provider("fixture-unmanaged-current".into(), None);
+    duplicate.settings_config = provider_config::settings_config_for(
+        &AppType::Codex,
+        &candidate.api_key,
+        "Imported duplicate",
+        &sub2api::base_url_for(
+            &AppType::Codex,
+            &account.site_origin,
+            &candidate.api_base_url,
+        ),
+        "manual-model",
+    )
+    .unwrap();
+    duplicate.in_failover_queue = true;
+    db.save_provider("codex", &duplicate).unwrap();
+    db.set_current_provider("codex", &duplicate.id).unwrap();
+    db.set_user_edited("codex", &duplicate.id, true).unwrap();
+    let chain = format!("[ \"{}\" ]", duplicate.id);
+    db.set_setting("application_priority_codex", &chain)
+        .unwrap();
+    db.save_mcp_server(&crate::app_config::McpServer {
+        id: crate::relay::imagegen_mcp::IMAGEGEN_MCP_ID.into(),
+        name: "Existing image tool sentinel".into(),
+        server: json!({"type":"stdio", "command":"fixture-never-executed"}),
+        apps: crate::app_config::McpApps::default(),
+        description: Some("preserve registration until explicit apply".into()),
+        homepage: None,
+        docs: None,
+        tags: vec!["fixture-sentinel".into()],
+    })
+    .unwrap();
+
+    // Integration support installs a per-process synthetic home before entry.
+    assert!(std::env::var_os("CC_SWITCH_TEST_HOME").is_some());
+    struct LiveSentinel(std::path::PathBuf, Option<Vec<u8>>);
+    impl Drop for LiveSentinel {
+        fn drop(&mut self) {
+            match &self.1 {
+                Some(bytes) => std::fs::write(&self.0, bytes).unwrap(),
+                None => {
+                    let _ = std::fs::remove_file(&self.0);
+                }
+            }
+        }
+    }
+    let mut live = Vec::new();
+    for (path, content) in [
+        (
+            crate::codex_config::get_codex_config_path(),
+            b"# selected preparation must not publish live\nmodel = \"manual-model\"\n".as_slice(),
+        ),
+        (
+            crate::codex_config::get_codex_auth_path(),
+            br#"{"OPENAI_API_KEY":"fixture-live-sentinel"}"#.as_slice(),
+        ),
+    ] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        live.push((
+            LiveSentinel(path.clone(), std::fs::read(&path).ok()),
+            content.to_vec(),
+        ));
+        std::fs::write(path, content).unwrap();
+    }
+    let before = db
+        .get_provider_by_id(&duplicate.id, "codex")
+        .unwrap()
+        .unwrap();
+    let before_mcp = serde_json::to_value(db.get_all_mcp_servers().unwrap()).unwrap();
+    let summary = persist_provision_batch_scope(
+        &state,
+        &account,
+        selected,
+        ProvisionPersistenceIntent::SelectedPrepare,
+    )
+    .unwrap();
+    assert!(summary.failures.is_empty(), "{:?}", summary.failures);
+    assert_eq!(summary.tiers.len(), 1);
+    assert!(summary.merged_providers.is_empty());
+    let prepared = db.get_provider_by_id(&id, "codex").unwrap().unwrap();
+    assert_eq!(
+        provider_fingerprint::for_provider(&prepared, &AppType::Codex),
+        provider_fingerprint::for_provider(&before, &AppType::Codex),
+        "fixture duplicate must really be mergeable",
+    );
+    assert!(provider_fingerprint::for_provider(&prepared, &AppType::Codex).is_some());
+    assert_eq!(
+        serde_json::to_value(&before).unwrap(),
+        serde_json::to_value(
+            db.get_provider_by_id(&duplicate.id, "codex")
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        db.get_current_provider("codex").unwrap().as_deref(),
+        Some(duplicate.id.as_str())
+    );
+    assert!(db.get_user_edited("codex", &duplicate.id).unwrap());
+    assert!(!prepared.in_failover_queue);
+    assert_eq!(
+        db.get_setting("application_priority_codex")
+            .unwrap()
+            .as_deref(),
+        Some(chain.as_str())
+    );
+    assert_eq!(
+        serde_json::to_value(db.get_all_mcp_servers().unwrap()).unwrap(),
+        before_mcp
+    );
+    for (guard, bytes) in &live {
+        assert_eq!(std::fs::read(&guard.0).unwrap(), *bytes);
+    }
+}
+
+fn verify_selected_metadata_rollback() {
+    let account = account(7);
+    let db = Arc::new(crate::database::Database::memory().unwrap());
+    let state = AppState::new(db.clone()).unwrap();
+    let mut selected = batch(&account, "rollback");
+    restrict_batch_to_selection(
+        &mut selected,
+        &[RelayTierSelection {
+            app: "codex".into(),
+            group_id: "rollback".into(),
+        }],
+    );
+    let id = selected.candidates[0].provider_id.clone();
+    assert!(db
+        .get_setting("application_priority_codex")
+        .unwrap()
+        .is_none());
+    db.conn
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_initial_rate BEFORE UPDATE OF tier_rate_multiplier ON providers
+         BEGIN SELECT RAISE(ABORT, 'fixture initial rate failure'); END;",
+        )
+        .unwrap();
+    let summary = persist_provision_batch_scope(
+        &state,
+        &account,
+        selected,
+        ProvisionPersistenceIntent::SelectedPrepare,
+    )
+    .unwrap();
+    assert_eq!(summary.failures.len(), 1);
+    assert!(summary.failures[0]
+        .reason
+        .contains("fixture initial rate failure"));
+    assert!(summary.tiers.is_empty());
+    assert!(
+        db.get_provider_by_id(&id, "codex").unwrap().is_none(),
+        "initial metadata failure must not leave a partially prepared provider"
+    );
+    assert!(
+        db.get_setting("application_priority_codex")
+            .unwrap()
+            .is_none(),
+        "provider failure must also roll back initial effective-chain materialization"
+    );
 }
 
 fn verify_legacy() {
@@ -472,7 +725,7 @@ async fn verify_capabilities() {
                 let persist_account = account.clone();
                 let persist_state = state.clone();
                 let summary = tokio::task::spawn_blocking(move || {
-                    persist_provision_batch_scope(&persist_state, &persist_account, batch, false)
+                    persist_provision_batch_scope(&persist_state, &persist_account, batch, ProvisionPersistenceIntent::SelectedPrepare)
                 }).await.unwrap().expect("selected partial creation must return a structured receipt, not erase progress as an error");
                 assert_eq!(summary.keys_created, expected_created);
                 assert_eq!(summary.tiers.len(), usize::from(expected_success));
@@ -528,7 +781,12 @@ async fn verify_composite_partial() {
             let persist_state = state.clone();
             let persist_account = account.clone();
             let receipt = tokio::task::spawn_blocking(move || {
-                persist_provision_batch_scope(&persist_state, &persist_account, batch, false)
+                persist_provision_batch_scope(
+                    &persist_state,
+                    &persist_account,
+                    batch,
+                    ProvisionPersistenceIntent::SelectedPrepare,
+                )
             })
             .await
             .unwrap()
@@ -576,6 +834,19 @@ pub(crate) async fn verify(case: &str) {
                 assert!(fixture.state.lock().unwrap().requests.is_empty());
             }
         }
+        "selected_metadata_rollback" => {
+            tokio::task::spawn_blocking(verify_selected_metadata_rollback)
+                .await
+                .unwrap()
+        }
+        "selected_new_isolation" => {
+            tokio::task::spawn_blocking(verify_selected_new_projection_isolation)
+                .await
+                .unwrap()
+        }
+        "selected_isolation" => tokio::task::spawn_blocking(verify_selected_isolation)
+            .await
+            .unwrap(),
         "persistence" => tokio::task::spawn_blocking(verify_persistence)
             .await
             .unwrap(),

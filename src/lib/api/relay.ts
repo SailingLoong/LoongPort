@@ -483,13 +483,13 @@ export const relayApi = {
    * **每次都是全新登录态**（登录窗用 incognito，见后端注释）：同一个站可以
    * 挂多个账号，删掉再加也不会复用旧 token。
    */
-  login: (relayId: number, app: AppId): Promise<RefreshResult | null> =>
+  login: (relayId: number, app: AppId): Promise<boolean> =>
     invoke("relay_login", { relayId, app }),
 
   /**
    * 在默认浏览器中登录这一行（站点握手页接力）：发起即返回，登录在浏览器完成，
    * 凭据经 loongport://connect 深链回来落库，收尾由 ONBOARDING_REGISTER_COMPLETED
-   * 事件驱动（toast + 档位预配 + 列表刷新）。Err = 站点未部署握手页/网络问题。
+   * 事件驱动（toast + 只读账号列表刷新）。Err = 站点未部署握手页/网络问题。
    */
   browserLogin: (relayId: number): Promise<void> =>
     invoke("relay_browser_login", { relayId }),

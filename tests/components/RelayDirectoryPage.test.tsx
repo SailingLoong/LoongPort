@@ -83,6 +83,7 @@ describe("RelayDirectoryPage", () => {
     expect(api.plazaSeedFromFirstSite).toHaveBeenCalledWith("panel.example");
     expect(api.importSite).toHaveBeenCalledWith("panel.example");
     expect(api.plazaSetVisible).not.toHaveBeenCalled();
+    expect(api.refresh).not.toHaveBeenCalled();
   });
   it("does not reinterpret an unmatched directory search as a connection", async () => {
     settings.plazaVisible = true;
