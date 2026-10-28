@@ -1194,6 +1194,9 @@ fn read_fixture_http_request(stream: &mut std::net::TcpStream) -> std::io::Resul
     const MAX_BODY_BYTES: usize = 16 * 1024;
     // Retain the original fixture's 200ms read budget, now absolute rather
     // than allowing each partial read to renew it. Production timeouts stay unchanged.
+    // Accepted sockets may inherit a nonblocking listener on some platforms.
+    // Read timeouts only enforce this fixture budget on a blocking socket.
+    stream.set_nonblocking(false)?;
     let deadline = Instant::now() + Duration::from_millis(200);
     let invalid = || Error::new(ErrorKind::InvalidData, "invalid fixture request framing");
     let mut bytes = Vec::new();
@@ -1259,6 +1262,37 @@ fn read_fixture_http_request(stream: &mut std::net::TcpStream) -> std::io::Resul
         }
         bytes.extend_from_slice(&chunk[..count]);
     }
+}
+
+#[test]
+fn fixture_http_reader_normalizes_nonblocking_socket_before_waiting() {
+    use std::time::{Duration, Instant};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (mut stream, _) = listener.accept().unwrap();
+    // Explicitly model platforms where accept inherits listener nonblocking mode.
+    stream.set_nonblocking(true).unwrap();
+    let worker = std::thread::spawn(move || {
+        let started = Instant::now();
+        let result = read_fixture_http_request(&mut stream);
+        (result, started.elapsed())
+    });
+    // Keep the peer open without sending: nonblocking reads fail immediately,
+    // whereas the fixture must retain its bounded blocking read budget.
+    let (result, elapsed) = worker.join().unwrap();
+    drop(client);
+    assert!(
+        elapsed >= Duration::from_millis(150),
+        "read returned before its budget: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "read must remain bounded: {elapsed:?}"
+    );
+    assert!(matches!(
+        result.unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    ));
 }
 
 fn assert_fixture_reads_fragmented_request(header_padding: usize, body_size: usize) {
