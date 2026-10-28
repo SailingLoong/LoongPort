@@ -4931,6 +4931,28 @@
     }
   },
   "workbuddy": {
+    "nativePreview": {
+      "title": "WorkBuddy native client observation",
+      "description": "Read the known local CN auth-file location only when you click. No account or settings are saved or changed.",
+      "inspect": "Inspect native format",
+      "inspecting": "Inspecting…",
+      "missing": "No auth file observed at the known location.",
+      "recognized": "A supported personal-account document format was observed.",
+      "realmWorkbuddy": "Document realm: WorkBuddy CN (www.workbuddy.cn)",
+      "realmCodebuddy": "Document realm: CodeBuddy CN (www.codebuddy.cn)",
+      "markerPresent": "Logout marker observed: present.",
+      "markerAbsent": "Logout marker observed: absent.",
+      "notActivation": "Known location only; installation and login validity are not verified. Marker presence is not login status. Account capture and switching are not enabled.",
+      "error": {
+        "unsafeSource": "The source is unsafe to inspect.",
+        "sourceChanged": "The files changed during inspection. Try again later.",
+        "unreadableSource": "The source could not be read.",
+        "invalidDocument": "The document format could not be recognized safely.",
+        "unsupportedContext": "This account context is not supported for observation.",
+        "unsupportedPlatform": "Observation is not supported on this platform.",
+        "unknown": "No reliable observation was returned."
+      }
+    },
     "auto": {
       "unknown": "Automatic claim: unconfirmed",
       "label": "Automatic claim for this account",

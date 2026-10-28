@@ -97,3 +97,10 @@ it("inference permission is a dedicated command, not another login", async () =>
     ["set_workbuddy_inference_consent", { id: "account-a", enabled: false }],
   ]);
 });
+
+it("native observation invokes only the explicit no-argument read command", async () => {
+  await workbuddyApi.previewNative();
+  expect(vi.mocked(invoke).mock.calls).toEqual([
+    ["preview_workbuddy_native_capture"],
+  ]);
+});

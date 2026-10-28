@@ -1,3 +1,4 @@
+import { WorkBuddyNativePreview } from "./WorkBuddyNativePreview";
 import { AutomaticClaimStatus } from "@/components/relay/accounts/AutomaticClaimStatus";
 import { useAutomaticClaimStatus } from "@/hooks/useAutomaticClaimStatus";
 import {
@@ -503,6 +504,7 @@ export function WorkBuddyAccounts({
   };
   return (
     <section aria-label={t("workbuddy.title")} className="space-y-3">
+      <WorkBuddyNativePreview />
       <header className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-sm font-medium">{t("workbuddy.title")}</h2>
         <div className="flex gap-2">

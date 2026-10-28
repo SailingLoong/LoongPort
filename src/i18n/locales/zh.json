@@ -4931,6 +4931,28 @@
     }
   },
   "workbuddy": {
+    "nativePreview": {
+      "title": "WorkBuddy 原生客户端观测",
+      "description": "仅在点击后读取已知的国内版认证文件位置。不保存账号，不修改文件或设置。",
+      "inspect": "检查原生格式",
+      "inspecting": "检查中…",
+      "missing": "未在已知位置发现认证文件。",
+      "recognized": "观测到受支持的个人账号文档格式。",
+      "realmWorkbuddy": "文档登录域：WorkBuddy 国内版（www.workbuddy.cn）",
+      "realmCodebuddy": "文档登录域：CodeBuddy 国内版（www.codebuddy.cn）",
+      "markerPresent": "退出标记观测：存在。",
+      "markerAbsent": "退出标记观测：不存在。",
+      "notActivation": "仅为已知位置观测，未认证安装或验证登录有效性；退出标记不代表登录状态。尚未启用账号采集或切换。",
+      "error": {
+        "unsafeSource": "来源不满足安全读取条件。",
+        "sourceChanged": "观测期间文件发生变化，请稍后重试。",
+        "unreadableSource": "无法读取来源。",
+        "invalidDocument": "无法安全识别文档格式。",
+        "unsupportedContext": "暂不支持观测此账号上下文。",
+        "unsupportedPlatform": "此平台暂不支持观测。",
+        "unknown": "未获得可信的观测结果。"
+      }
+    },
     "auto": {
       "unknown": "自动领取：状态待确认",
       "label": "此账号自动领取",

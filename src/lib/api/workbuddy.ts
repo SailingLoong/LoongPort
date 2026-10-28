@@ -62,6 +62,8 @@ export interface WorkBuddyInferenceModel {
   name: string;
 }
 export const workbuddyApi = {
+  // Untrusted IPC data is validated and redacted by the observation consumer.
+  previewNative: () => invoke<unknown>("preview_workbuddy_native_capture"),
   setInferenceConsent: (id: string, enabled: boolean) =>
     invoke<boolean>("set_workbuddy_inference_consent", { id, enabled }),
   setAutomatic: (account: WorkBuddyAccount, enabled: boolean) =>

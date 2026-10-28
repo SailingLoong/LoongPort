@@ -430,7 +430,45 @@ mod tests {
         std::fs::remove_file(&marker).unwrap();
         std::fs::create_dir(&marker).unwrap();
         assert!(observe_at(home.path(), HostOs::Linux, || {}).is_err());
-        assert!(observe_at(&home.path().join(".."), HostOs::Linux, || {}).is_err());
+        // PathBuf::join normalizes away `..` for Windows verbatim bases
+        // (as returned by canonicalize). Append literal OS text instead so the
+        // input actually exercises observe_at's ParentDir refusal on every OS.
+        let mut traversal = home.path().as_os_str().to_os_string();
+        traversal.push(std::path::MAIN_SEPARATOR_STR);
+        traversal.push("..");
+        let traversal = PathBuf::from(traversal);
+        assert!(traversal
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir)));
+        let after_read = std::cell::Cell::new(false);
+        assert_eq!(
+            observe_at(&traversal, HostOs::Linux, || after_read.set(true)).unwrap_err(),
+            PreviewError::UnsafeSource
+        );
+        assert!(!after_read.get());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn verbatim_parent_fixture_preserves_the_component_that_join_normalizes() {
+        // Pure path regression: no discovery or reads of this synthetic location.
+        let base = Path::new(r"\\?\C:\synthetic-native-preview\child");
+        assert!(!base
+            .join("..")
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir)));
+        let mut literal = base.as_os_str().to_os_string();
+        literal.push(r"\..");
+        let literal = PathBuf::from(literal);
+        assert!(literal
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir)));
+        assert_eq!(
+            observe_at(&literal, HostOs::Windows, || panic!(
+                "unsafe path reached IO"
+            ))
+            .unwrap_err(),
+            PreviewError::UnsafeSource
+        );
     }
     #[test]
     fn auth_marker_and_parent_changes_block_the_result() {

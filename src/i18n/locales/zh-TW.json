@@ -4882,6 +4882,28 @@
     }
   },
   "workbuddy": {
+    "nativePreview": {
+      "title": "WorkBuddy 原生用戶端觀測",
+      "description": "僅在點擊後讀取已知的中國大陸版認證檔案位置。不儲存帳號，不修改檔案或設定。",
+      "inspect": "檢查原生格式",
+      "inspecting": "檢查中…",
+      "missing": "未在已知位置發現認證檔案。",
+      "recognized": "觀測到受支援的個人帳號文件格式。",
+      "realmWorkbuddy": "文件登入網域：WorkBuddy 中國大陸版（www.workbuddy.cn）",
+      "realmCodebuddy": "文件登入網域：CodeBuddy 中國大陸版（www.codebuddy.cn）",
+      "markerPresent": "登出標記觀測：存在。",
+      "markerAbsent": "登出標記觀測：不存在。",
+      "notActivation": "僅為已知位置觀測，未認證安裝或驗證登入有效性；登出標記不代表登入狀態。尚未啟用帳號擷取或切換。",
+      "error": {
+        "unsafeSource": "來源不符合安全讀取條件。",
+        "sourceChanged": "觀測期間檔案發生變化，請稍後重試。",
+        "unreadableSource": "無法讀取來源。",
+        "invalidDocument": "無法安全識別文件格式。",
+        "unsupportedContext": "暫不支援觀測此帳號情境。",
+        "unsupportedPlatform": "此平台暫不支援觀測。",
+        "unknown": "未取得可靠的觀測結果。"
+      }
+    },
     "auto": {
       "unknown": "自動領取：狀態待確認",
       "label": "此帳號自動領取",

@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { WorkBuddyAccounts } from "@/components/workbuddy/WorkBuddyAccounts";
 import type { WorkBuddyAccount } from "@/lib/api/workbuddy";
 const api = vi.hoisted(() => ({
+  previewNative: vi.fn(),
   automaticStatus: vi.fn(),
   list: vi.fn(),
   refresh: vi.fn(),
@@ -64,6 +65,13 @@ beforeEach(() => {
     nextCheckAt: null,
     result: null,
     reason: null,
+  });
+  api.previewNative.mockResolvedValue({
+    sourceVerification: "knownLocationOnly",
+    activationAvailable: false,
+    authFile: "missing",
+    realm: null,
+    logoutMarkerPresent: false,
   });
   api.list.mockResolvedValue([row]);
   api.listInferenceAccounts.mockResolvedValue([
@@ -1434,4 +1442,27 @@ it("paused WorkBuddy keeps domestic check-in and balance but no inference action
   expect(api.beginInferenceLogin).not.toHaveBeenCalled();
   expect(api.discoverModels).not.toHaveBeenCalled();
   expect(api.setInferenceConsent).not.toHaveBeenCalled();
+});
+
+it("offers native observation separately even with no API accounts or paused inference", async () => {
+  api.list.mockResolvedValue([]);
+  api.listInferenceAccounts.mockResolvedValue([
+    { id: row.id, state: "paused" },
+  ]);
+  render(<WorkBuddyAccounts unified />);
+  expect(
+    await screen.findByRole("button", {
+      name: "workbuddy.nativePreview.inspect",
+    }),
+  ).toBeVisible();
+  expect(api.beginLogin).not.toHaveBeenCalled();
+  expect(api.beginInferenceLogin).not.toHaveBeenCalled();
+  expect(api.previewNative).not.toHaveBeenCalled();
+  await userEvent.click(
+    screen.getByRole("button", { name: "workbuddy.nativePreview.inspect" }),
+  );
+  expect(
+    await screen.findByText("workbuddy.nativePreview.missing"),
+  ).toBeVisible();
+  expect(api.previewNative.mock.calls).toEqual([[]]);
 });
