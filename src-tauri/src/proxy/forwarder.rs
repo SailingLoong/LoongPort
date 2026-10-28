@@ -29,6 +29,7 @@ use super::{
 };
 use crate::diagnostics::{DiagnosticEvent, ResultLogExt};
 use crate::paperclip::execution::RouteBinding;
+use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
 use crate::proxy::providers::copilot_auth::CopilotAuthManager;
 use crate::proxy::providers::xai_oauth_auth::XaiOAuthManager;
 use crate::{
@@ -3182,10 +3183,23 @@ impl RequestForwarder {
                             );
                         }
                         Err(e) => {
-                            log::error!("[CodexOAuth] 获取 access_token 失败: {e}");
-                            return Err(ProxyError::AuthError(format!(
-                                "Codex OAuth 认证失败: {e}"
-                            )));
+                            // Only definitive credential rejection or a missing binding is
+                            // authentication failure. Transport/storage failures must not
+                            // tell the client that its account credentials are invalid.
+                            // Never expose refresh response bodies, URLs or local paths.
+                            let error = match e {
+                                CodexOAuthError::RefreshTokenInvalid => ProxyError::AuthError(
+                                    "Codex OAuth 凭据已失效，请重新登录".into(),
+                                ),
+                                CodexOAuthError::AccountNotFound(_) => ProxyError::AuthError(
+                                    "Codex OAuth 账号不存在，请检查账号绑定".into(),
+                                ),
+                                _ => ProxyError::ForwardFailed(
+                                    "Codex OAuth token 暂时不可用，请稍后重试或检查本地状态".into(),
+                                ),
+                            };
+                            log::error!("[CodexOAuth] 获取 access_token 失败: {error}");
+                            return Err(error);
                         }
                     }
                 } else {
@@ -5790,6 +5804,209 @@ mod tests {
             in_failover_queue: false,
             available_models: None,
         }
+    }
+
+    const CODEX_REFRESH_CANARY: &str = "synthetic-private-refresh-token-canary";
+
+    // Regression at the real consumer, not a reimplemented error mapper.
+    // The refresh transport result is synthetic; manager -> forwarder retry
+    // loop -> original IntoResponse all execute. TestHome blocks real refresh
+    // HTTP when no injected result exists, and both access tokens are expired.
+    async fn assert_codex_refresh_failure_consumer(
+        error: crate::proxy::providers::codex_oauth_auth::CodexOAuthError,
+        expected: u16,
+    ) {
+        use crate::provider::{AuthBinding, AuthBindingSource, ProviderMeta};
+        use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
+        use axum::response::IntoResponse;
+
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let db = Arc::new(Database::memory().unwrap());
+        let manager = Arc::new(CodexOAuthManager::new(db.secrets.clone()).unwrap());
+        let mut providers = Vec::new();
+        for id in ["synthetic-first", "synthetic-second"] {
+            manager
+                .add_test_account_with_access_token(id, "synthetic-expiring-access", None)
+                .await
+                .unwrap();
+            // Expire both caches before queuing the first account's error.
+            manager
+                .test_refresh_next(id, "unused-access", "unused-refresh")
+                .await;
+            let mut provider = Provider::with_id(
+                id.into(),
+                id.into(),
+                json!({
+                    "auth": {}, "config": "",
+                    "env": {"ANTHROPIC_MODEL":"gpt-5", "ANTHROPIC_AUTH_TOKEN":"synthetic-placeholder"}
+                }),
+                None,
+            );
+            provider.meta = Some(ProviderMeta {
+                provider_type: Some("codex_oauth".into()),
+                auth_binding: Some(AuthBinding {
+                    source: AuthBindingSource::ManagedAccount,
+                    auth_provider: Some("codex_oauth".into()),
+                    account_id: Some(id.into()),
+                }),
+                ..Default::default()
+            });
+            assert!(super::super::providers::is_codex_official_provider(
+                &provider
+            ));
+            db.save_provider("claude", &provider).unwrap();
+            providers.push(provider);
+        }
+        db.set_current_provider("claude", "synthetic-first")
+            .unwrap();
+        manager
+            .test_refresh_failure_next("synthetic-first", error)
+            .await;
+        let service = crate::services::ProxyService::new_with_codex_oauth_manager(
+            db.clone(),
+            manager.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
+        let mut forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+        forwarder.router = Arc::new(ProviderRouter::new(db.clone()));
+        forwarder.failover_manager = Arc::new(FailoverSwitchManager::new(db.clone()));
+        forwarder.service_owner = Arc::downgrade(&service);
+        forwarder.current_provider_id_at_start = "synthetic-first".into();
+        forwarder.max_attempts = 2;
+        let outcome = tokio::time::timeout(Duration::from_secs(5), forwarder.forward_with_retry(
+                &AppType::Claude, http::Method::POST, "/v1/messages",
+                json!({"model":"gpt-5","max_tokens":8,"messages":[{"role":"user","content":"synthetic"}]}),
+                http::HeaderMap::new(), Extensions::new(), providers,
+            )).await.expect("synthetic token failure must finish without network");
+        let failure = match outcome {
+            Err(e) => e,
+            Ok(_) => panic!("expired synthetic accounts cannot forward"),
+        };
+        assert_eq!(
+            failure.provider.as_ref().unwrap().id,
+            "synthetic-first",
+            "official card must not silently switch"
+        );
+        assert!(
+            !manager.test_refresh_is_queued(),
+            "real manager must consume refresh fixture"
+        );
+        let response = failure.error.into_response();
+        assert_eq!(response.status().as_u16(), expected);
+        let bytes = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            !body.contains(CODEX_REFRESH_CANARY),
+            "raw credential/transport details must not escape"
+        );
+        assert!(!db
+            .provider_attempt_error_rates("claude")
+            .unwrap()
+            .contains_key("synthetic-second"));
+        assert_eq!(
+            manager.list_accounts().await.len(),
+            2,
+            "classification must not delete accounts"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn codex_refresh_consumer_network() {
+        use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
+        assert_codex_refresh_failure_consumer(
+            CodexOAuthError::NetworkError(CODEX_REFRESH_CANARY.into()),
+            502,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn codex_refresh_consumer_forbidden() {
+        use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
+        assert_codex_refresh_failure_consumer(
+            CodexOAuthError::TokenFetchFailed(format!("403 {CODEX_REFRESH_CANARY}")),
+            502,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn codex_refresh_consumer_rate_limited() {
+        use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
+        assert_codex_refresh_failure_consumer(
+            CodexOAuthError::TokenFetchFailed(format!("429 {CODEX_REFRESH_CANARY}")),
+            502,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn codex_refresh_consumer_unavailable() {
+        use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
+        assert_codex_refresh_failure_consumer(
+            CodexOAuthError::TokenFetchFailed(format!("503 {CODEX_REFRESH_CANARY}")),
+            502,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn codex_refresh_consumer_io() {
+        use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
+        assert_codex_refresh_failure_consumer(
+            CodexOAuthError::IoError(CODEX_REFRESH_CANARY.into()),
+            502,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn codex_refresh_consumer_parse() {
+        use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
+        assert_codex_refresh_failure_consumer(
+            CodexOAuthError::ParseError(CODEX_REFRESH_CANARY.into()),
+            502,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn codex_refresh_consumer_recovery_required() {
+        use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
+        assert_codex_refresh_failure_consumer(
+            CodexOAuthError::ProtectedStorage(crate::error::AppError::Config(format!(
+                "mode.verification_required {CODEX_REFRESH_CANARY}"
+            ))),
+            502,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn codex_refresh_consumer_invalid() {
+        use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
+        assert_codex_refresh_failure_consumer(CodexOAuthError::RefreshTokenInvalid, 401).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn codex_refresh_consumer_missing() {
+        use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
+        assert_codex_refresh_failure_consumer(
+            CodexOAuthError::AccountNotFound(CODEX_REFRESH_CANARY.into()),
+            401,
+        )
+        .await;
     }
 
     fn test_forwarder(
