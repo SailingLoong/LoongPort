@@ -72,3 +72,12 @@ fixture_case!(
     selected_initial_metadata_failure_rolls_back_provider_and_chain,
     "selected_metadata_rollback"
 );
+
+fixture_case!(
+    selected_setup_preflight_rejects_before_write_then_records_and_recovers_shared_group,
+    "setup_preflight_journal"
+);
+fixture_case!(
+    selected_setup_rechecks_authentication_after_waiting_for_original_account_lock,
+    "setup_auth_lock"
+);

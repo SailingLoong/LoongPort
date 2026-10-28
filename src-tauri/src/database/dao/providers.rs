@@ -13,13 +13,19 @@ mod qoder_automatic;
 #[cfg(test)]
 #[path = "providers/selected_prepare_tests.rs"]
 mod selected_prepare_tests;
+#[cfg(test)]
+#[path = "providers/setup_prepare_tests.rs"]
+mod setup_prepare_tests;
 
 /// Preparation stores a candidate without publishing it into application routing.
 /// All ordinary saves retain the existing update and chain-publication semantics.
 #[derive(Clone, Copy)]
-enum ProviderSaveIntent {
+enum ProviderSaveIntent<'a> {
     Maintain,
-    PrepareNewLocal { rate_multiplier: Option<f64> },
+    PrepareNewLocal {
+        rate_multiplier: Option<f64>,
+        authority: Option<&'a crate::relay::setup_journal::PreparationAuthority>,
+    },
 }
 
 /// Delete one row in a caller-owned inventory mutation. The final inventory
@@ -477,6 +483,7 @@ impl Database {
         app_type: &str,
         provider: &Provider,
         rate_multiplier: Option<f64>,
+        authority: Option<&crate::relay::setup_journal::PreparationAuthority>,
     ) -> Result<bool, AppError> {
         use crate::services::provider::qoder_daily::PersistOutcome;
         let vault = self.secrets.read()?;
@@ -488,13 +495,50 @@ impl Database {
                 false,
                 false,
                 None,
-                ProviderSaveIntent::PrepareNewLocal { rate_multiplier },
+                ProviderSaveIntent::PrepareNewLocal {
+                    rate_multiplier,
+                    authority,
+                },
             ),
             self.secrets.as_ref(),
             &vault,
             None,
         )
         .map(|outcome| matches!(outcome, PersistOutcome::Applied))
+    }
+
+    /// Validate the original setup scope inside the caller's pinned storage/SQL
+    /// boundary. Shared by POST preflight and this same provider transaction.
+    pub(crate) fn validate_relay_setup_authority_on(
+        conn: &rusqlite::Connection,
+        storage: &StorageContext,
+        authority: &crate::relay::setup_journal::PreparationAuthority,
+        lifecycle_epoch: u64,
+    ) -> Result<crate::relay::setup_contract::RelaySetupReceipt, AppError> {
+        use crate::relay::setup_contract::{account_identity_digest, session_fingerprint};
+        crate::database::storage::check_identity(conn, storage)?;
+        let receipt = super::relay_setup_operations::bound_on(
+            conn,
+            &authority.storage_binding,
+            &authority.operation_id,
+        )?;
+        let account = crate::relay::creds::get(conn, storage, receipt.relay_id)?
+            .ok_or_else(|| AppError::Config("relaySetup.accountChanged".into()))?;
+        let id = account
+            .account_id
+            .ok_or_else(|| AppError::Config("relaySetup.accountChanged".into()))?;
+        let identity =
+            account_identity_digest(account.backend_kind.as_str(), &account.site_origin, id)
+                .map_err(|code| AppError::Config(format!("relaySetup.{code}")))?;
+        let fingerprint = session_fingerprint(&identity, &account.auth_token);
+        super::relay_setup_operations::validate_authority_on(
+            conn,
+            authority,
+            storage.identity().store_id(),
+            &identity,
+            &fingerprint,
+            lifecycle_epoch,
+        )
     }
 
     /// The existing provider SQL owner, under the operation's pinned generation.
@@ -581,7 +625,7 @@ impl Database {
             bool,
             bool,
             Option<&crate::database::credential_revision::WriteProof>,
-            ProviderSaveIntent,
+            ProviderSaveIntent<'_>,
         ),
         session: &crate::secrets::session::SecretSession,
         vault: &std::sync::RwLockReadGuard<'_, StorageContext>,
@@ -610,13 +654,71 @@ impl Database {
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         use crate::services::provider::qoder_daily::{self, PersistOutcome};
+        let setup_authority = match intent {
+            ProviderSaveIntent::PrepareNewLocal { authority, .. } => authority,
+            ProviderSaveIntent::Maintain => None,
+        };
+        let setup_receipt = setup_authority
+            .map(|authority| {
+                Self::validate_relay_setup_authority_on(
+                    &tx,
+                    vault,
+                    authority,
+                    session.lifecycle_epoch(),
+                )
+            })
+            .transpose()?;
+        if let Some(receipt) = &setup_receipt {
+            if !receipt
+                .targets
+                .iter()
+                .any(|target| target.app == app_type && target.provider_id == provider.id)
+            {
+                return Err(AppError::Config("relaySetup.selectionChanged".into()));
+            }
+        }
         let credential_revisions =
             crate::database::credential_revision::original_provider_uses_revisions(&tx)?;
         let current =
             Self::get_all_providers_on_connection(&tx, vault, app_type)?.shift_remove(&provider.id);
         if matches!(intent, ProviderSaveIntent::PrepareNewLocal { .. }) && current.is_some() {
-            // This observation and the insert below share the writer transaction.
-            // The caller re-reads the original row and verifies its identity.
+            // Never rewrite a concurrent winner. Recorded setup also checks its
+            // identity and commits the Existing fact under this same transaction.
+            if let (Some(authority), Some(receipt), Some(existing)) =
+                (setup_authority, setup_receipt.as_ref(), current.as_ref())
+            {
+                let target = receipt
+                    .targets
+                    .iter()
+                    .find(|target| target.app == app_type && target.provider_id == provider.id)
+                    .ok_or_else(|| AppError::Config("relaySetup.selectionChanged".into()))?;
+                if !crate::relay::managed::belongs_to_relay(
+                    existing,
+                    provider.website_url.as_deref().unwrap_or_default(),
+                    provider
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.loongport_account_id),
+                ) || existing
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.loongport_group.as_ref())
+                    .is_some_and(|group| group.id != target.group_id)
+                {
+                    return Err(AppError::Config(
+                        "relaySetup.needsConfigurationReview".into(),
+                    ));
+                }
+                super::relay_setup_operations::local_fact_in_transaction_on(
+                    &tx,
+                    &authority.storage_binding,
+                    &authority.operation_id,
+                    app_type,
+                    crate::relay::setup_contract::ConfigurationState::Existing,
+                    chrono::Utc::now().timestamp_millis(),
+                )?;
+                tx.commit()?;
+            }
             return Ok(PersistOutcome::AlreadyCurrent);
         }
         if matches!(intent, ProviderSaveIntent::PrepareNewLocal { .. }) {
@@ -822,7 +924,10 @@ impl Database {
             }
         }
 
-        if let ProviderSaveIntent::PrepareNewLocal { rate_multiplier } = intent {
+        if let ProviderSaveIntent::PrepareNewLocal {
+            rate_multiplier, ..
+        } = intent
+        {
             tx.execute(
                 "UPDATE providers SET available_models=?1, tier_rate_multiplier=?4 WHERE id=?2 AND app_type=?3",
                 params![
@@ -862,6 +967,22 @@ impl Database {
             tx.execute(
                 "UPDATE providers SET user_edited = 1 WHERE id = ?1 AND app_type = ?2",
                 params![provider.id, app_type],
+            )?;
+        }
+        if let Some(authority) = setup_authority {
+            Self::validate_relay_setup_authority_on(
+                &tx,
+                vault,
+                authority,
+                session.lifecycle_epoch(),
+            )?;
+            super::relay_setup_operations::local_fact_in_transaction_on(
+                &tx,
+                &authority.storage_binding,
+                &authority.operation_id,
+                app_type,
+                crate::relay::setup_contract::ConfigurationState::Prepared,
+                chrono::Utc::now().timestamp_millis(),
             )?;
         }
         tx.commit().map_err(|e| AppError::Database(e.to_string()))?;

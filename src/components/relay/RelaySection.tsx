@@ -47,6 +47,7 @@ import { getAppLabel } from "@/config/appConfig";
 import { useStreamCheck } from "@/hooks/useStreamCheck";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
 
+import { ServiceConfiguration } from "./onboarding/ServiceConfiguration";
 import { ImageTabNotice } from "./ImageTabNotice";
 import { SiteConfigDialog } from "./SiteConfigDialog";
 import { RelayTierList } from "./RelayTierList";
@@ -145,6 +146,11 @@ export function RelaySection({
    * 一对命令 + 一个 settings 键，那些现在全删了。
    */
   const isImageTab = appId === "codex-image";
+  const [setupTarget, setSetupTarget] = useState<{
+    rowId: number;
+    name: string;
+    appId: AppId;
+  } | null>(null);
   const [localRelays, setRelays] = useState<RelayRowData[]>([]);
   const relays = useMemo(
     () =>
@@ -1029,6 +1035,24 @@ export function RelaySection({
         >
           {t("common.refresh")}
         </Button>
+        {target.kind === "relay" &&
+          row.status !== "notLoggedIn" &&
+          row.status !== "sessionExpired" && (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={provisionBusy || loginBusy}
+              onClick={() =>
+                setSetupTarget({
+                  rowId: row.id,
+                  name: `${target.row.siteName} · ${target.row.accountLabel}`,
+                  appId: target.appId,
+                })
+              }
+            >
+              {t("loongport.setup.entry", { defaultValue: "创建接入配置" })}
+            </Button>
+          )}
         {target.kind === "relay" && (
           <Button
             variant="outline"
@@ -1080,6 +1104,25 @@ export function RelaySection({
       </Button>
     );
   };
+
+  if (setupTarget) {
+    const returnToAccount = () => {
+      setSetupTarget(null);
+      void reload(true);
+    };
+    return (
+      <ServiceConfiguration
+        account={{
+          kind: "relay",
+          rowId: setupTarget.rowId,
+          name: setupTarget.name,
+        }}
+        sourceAppId={setupTarget.appId}
+        onBack={returnToAccount}
+        onDone={returnToAccount}
+      />
+    );
+  }
 
   if (!renderAccounts && !accountFilter && isImageTab && bothEmpty) {
     return <ImageTabNotice empty />;
@@ -1147,6 +1190,15 @@ export function RelaySection({
               onAddSite={() => onOpenAddHub("directory")}
               onLogin={(relayId) => void handleLogin(relayId)}
               onProvision={handleProvision}
+              onConfigure={(relayId) => {
+                const row = relays.find((item) => item.id === relayId);
+                if (row)
+                  setSetupTarget({
+                    rowId: row.id,
+                    name: `${row.siteName} · ${row.accountLabel}`,
+                    appId,
+                  });
+              }}
               onSiteConfigApplied={() => reload(true)}
               onReorder={(ids) => void handleReorder(ids)}
               onSwitchTier={(relayId, tier) =>

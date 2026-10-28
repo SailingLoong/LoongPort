@@ -35,6 +35,12 @@ impl Database {
     /// 在指定连接上创建表（供迁移和测试使用）
     pub(crate) fn create_tables_on_conn(conn: &Connection) -> Result<(), AppError> {
         let loongport_version = super::loongport_schema::read_stored_version(conn)?;
+        if loongport_version >= 32 {
+            super::dao::relay_setup_operations::validate_schema(conn)?;
+            super::dao::relay_setup_operations::read_rows(conn)?;
+        } else if loongport_version == 0 {
+            super::dao::relay_setup_operations::create_schema(conn)?;
+        }
         if loongport_version >= 31 {
             super::credential_revision::validate_schema(conn)?;
         }

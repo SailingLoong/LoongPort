@@ -103,6 +103,7 @@ fn import_authorizer(context: rusqlite::hooks::AuthContext<'_>) -> rusqlite::hoo
 const SYNC_SKIP_TABLES: &[&str] = &[
     "paperclip_run_bindings",
     "qoder_campaign_operations",
+    "relay_setup_operations",
     "proxy_request_logs",
     "stream_check_logs",
     "provider_health",
@@ -547,6 +548,7 @@ impl Database {
                 current_conn,
                 connection,
             )?;
+            crate::database::dao::relay_setup_operations::preserve_local(current_conn, connection)?;
             Self::preserve_qoder_states_on_restore(current_conn, connection, current, next)?;
             crate::secrets::inventory::validate_storage_database(connection, next)
         })?;
@@ -902,7 +904,7 @@ impl Database {
         let backup_path = {
             let mut main_conn = lock_conn!(self.conn);
             super::storage::check_identity(&main_conn, vault)?;
-            let (preserved_bindings, preserved_qoder_operations) = {
+            let (preserved_bindings, preserved_qoder_operations, preserved_relay_operations) = {
                 let mut staged_conn = lock_conn!(staged.conn);
                 super::storage_generation::with_private_triggers_disabled(
                     &mut staged_conn,
@@ -915,11 +917,16 @@ impl Database {
                             &main_conn,
                             staged_conn,
                         )?;
+                        crate::database::dao::relay_setup_operations::preserve_local(
+                            &main_conn,
+                            staged_conn,
+                        )?;
                         Ok((
                             crate::paperclip::bindings::read_rows(staged_conn)?,
                             crate::database::dao::qoder_campaign_operations::read_rows(
                                 staged_conn,
                             )?,
+                            crate::database::dao::relay_setup_operations::read_rows(staged_conn)?,
                         ))
                     },
                 )?
@@ -933,6 +940,12 @@ impl Database {
                 != preserved_qoder_operations
             {
                 return Err(AppError::Config("qoder.local_operations_changed".into()));
+            }
+            crate::database::dao::relay_setup_operations::validate_schema(&temp_conn)?;
+            if crate::database::dao::relay_setup_operations::read_rows(&temp_conn)?
+                != preserved_relay_operations
+            {
+                return Err(AppError::Config("relaySetup.localOperationsChanged".into()));
             }
             super::storage_generation::with_private_triggers_disabled(
                 &mut temp_conn,
@@ -2062,6 +2075,10 @@ impl Database {
                 &main_conn,
                 &staging_conn,
             )?;
+            crate::database::dao::relay_setup_operations::preserve_local(
+                &main_conn,
+                &staging_conn,
+            )?;
             Self::preserve_qoder_states_on_restore(&main_conn, &staging_conn, &vault, &vault)?;
             self.invalidate_pricing_observations()?;
             self.secrets.invalidate_database_leases();
@@ -2363,6 +2380,7 @@ mod tests {
         Ok(())
     }
     include!("backup_qoder_tests.rs");
+    include!("backup_relay_setup_tests.rs");
     include!("backup_qoder_http_auth_tests.rs");
     use super::{lock_backup_file_operations, Database};
     use crate::error::AppError;

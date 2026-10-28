@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import { PROVIDER_STORE_APP_IDS } from "@/config/appConfig";
 import type { AppId } from "@/lib/api";
-import { relayApi, type SwitchTierCommandResult } from "@/lib/api/relay";
+import type { SwitchTierCommandResult } from "@/lib/api/relay";
 import type { ProviderCatalogDecision } from "@/lib/api/providers";
 import { applicationRoutingApi } from "@/lib/api/applicationRouting";
 import { vendorApi } from "@/lib/api/vendor";
@@ -14,7 +14,7 @@ import { applicationOverviewApi } from "@/lib/api/applicationOverview";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import {
   type ConnectedService,
-  useServiceConfigurationChoices,
+  useVendorConfigurationChoices,
   useServiceOnboardingStatus,
   serviceOnboardingKey,
 } from "./useServiceOnboarding";
@@ -40,14 +40,14 @@ export interface ConfigurationResult {
   error?: string;
 }
 
-export function useServiceConfiguration(
-  account: ConnectedService,
+export function useVendorServiceConfiguration(
+  account: Pick<ConnectedService, "rowId" | "name">,
   sourceAppId: AppId,
   onDone: () => void,
 ) {
   const client = useQueryClient();
   const { t } = useTranslation();
-  const choices = useServiceConfigurationChoices(account);
+  const choices = useVendorConfigurationChoices(account);
   const status = useServiceOnboardingStatus();
   const [selection, setSelection] = useState<Partial<Record<AppId, string>>>(
     {},
@@ -128,12 +128,11 @@ export function useServiceConfiguration(
       const snapshot = await applicationOverviewApi.state(app);
       if (!snapshot.configurationRevision)
         throw new Error(t("loongport.onboarding.cannotVerify"));
-      const target = snapshot.configurations.find((item) =>
-        account.kind === "vendor"
-          ? item.selection.kind === "vendor" &&
-            item.selection.rowId === account.rowId &&
-            item.selection.planId === id
-          : item.providerId === id,
+      const target = snapshot.configurations.find(
+        (item) =>
+          item.selection.kind === "vendor" &&
+          item.selection.rowId === account.rowId &&
+          item.selection.planId === id,
       );
       const applied = snapshot.isAdditive
         ? target?.presentation.isInConfig
@@ -182,9 +181,7 @@ export function useServiceConfiguration(
         if (results[app]?.revision) continue;
         update(app, { id, state: "applying" });
         const switchConfig = (quitChatgpt?: boolean) =>
-          account.kind === "vendor"
-            ? vendorApi.switch(account.rowId, id, app, quitChatgpt)
-            : relayApi.switchTier(id, app, quitChatgpt);
+          vendorApi.switch(account.rowId, id, app, quitChatgpt);
         let result;
         try {
           result = await switchConfig();

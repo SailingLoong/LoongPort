@@ -353,8 +353,8 @@ pub struct LegacyRoutingReview {
     pub revision: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "protocol", rename_all = "camelCase")]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(tag = "protocol", rename_all = "camelCase", deny_unknown_fields)]
 pub enum PreparedRoutingRequest {
     Native {
         request: crate::mode::state::SaveRequest,
@@ -408,7 +408,10 @@ fn routing_request_revision(
 /// Caller holds the original switch lock. The classification and review image
 /// are captured together; a checkpoint never authorizes a legacy fallback.
 fn require_legacy_routing(state: &AppState, app: &AppType) -> Result<(), AppError> {
-    if !app.supports_local_proxy() || crate::mode::operation::uses_upstream4_schema(&state.db)? {
+    if *app != AppType::CodexImage
+        && (!app.supports_local_proxy()
+            || crate::mode::operation::uses_upstream4_schema(&state.db)?)
+    {
         return Err(AppError::Config("mode.verification_required".into()));
     }
     crate::secrets::upgrade::checkpoint::ensure_no_pending_checkpoint(
@@ -428,6 +431,30 @@ fn legacy_routing_revision(
         ));
     }
     let draft_digest = routing_request_digest(app, change)?;
+    // Image has an existing DB-current owner, not a native file/AppWrite owner.
+    // Keep its compatibility review explicit and do not admit other nonproxy apps.
+    if *app == AppType::CodexImage {
+        let selection = change
+            .selection
+            .as_ref()
+            .filter(|selection| selection.model.is_none())
+            .ok_or_else(|| AppError::Config("mode.invalid_save_request".into()))?;
+        if change.order.is_some()
+            || state
+                .db
+                .get_provider_by_id(&selection.provider_id, app.as_str())?
+                .is_none()
+        {
+            return Err(AppError::Config("mode.invalid_save_request".into()));
+        }
+        let revision = crate::services::provider::service_configuration_revision(state, app)?;
+        let bytes = crate::config::serialize_json_bytes(&serde_json::json!([
+            "imageCompatibilityRouting",
+            draft_digest,
+            revision
+        ]))?;
+        return Ok(crate::live::engine::sha256_hex(&bytes));
+    }
     // Bind only the original owners this draft reads or changes. An order-only
     // review does not become stale merely because an unrelated credential rotates.
     let selection = if let Some(selection) = &change.selection {
@@ -523,12 +550,18 @@ pub(crate) fn prepare_routing_strategy(
     let _switch =
         futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.as_str()));
     ensure_legacy_change_allowed(state, app, change)?;
-    if app.supports_local_proxy() && !crate::mode::operation::uses_upstream4_schema(&state.db)? {
+    if *app == AppType::CodexImage
+        || (app.supports_local_proxy()
+            && !crate::mode::operation::uses_upstream4_schema(&state.db)?)
+    {
         let review = LegacyRoutingReview {
             draft_digest: routing_request_digest(app, change)?,
             revision: legacy_routing_revision(state, app, change)?,
         };
         return Ok(PreparedRoutingRequest::Legacy { review });
+    }
+    if !app.supports_local_proxy() {
+        return Err(AppError::Config("mode.verification_required".into()));
     }
     prepare_native_routing_request_locked(state, app, change, id)
         .map(|request| PreparedRoutingRequest::Native { request })
@@ -575,6 +608,18 @@ fn apply_legacy_routing_locked(
     review: &LegacyRoutingReview,
 ) -> Result<crate::services::SwitchResult, AppError> {
     verify_legacy_routing_review(state, app, change, review)?;
+    if *app == AppType::CodexImage {
+        let selection = change
+            .selection
+            .as_ref()
+            .ok_or_else(|| AppError::Config("mode.invalid_save_request".into()))?;
+        return ProviderService::switch_with_catalog_locked(
+            state,
+            app.clone(),
+            &selection.provider_id,
+            None,
+        );
+    }
     if let Some(selection) = &change.selection {
         return select_legacy_locked_with_commit(state, app, selection, || {
             if let Some(order) = &change.order {
@@ -602,6 +647,78 @@ fn apply_legacy_routing_locked(
 }
 
 #[cfg(feature = "gui")]
+pub(crate) type RoutingAdmission = Box<dyn FnOnce(&AppState) -> Result<(), AppError> + Send>;
+#[cfg(feature = "gui")]
+pub(crate) type RoutingAcknowledgement =
+    Box<dyn FnOnce(&AppState, &Result<serde_json::Value, AppError>) -> Result<(), AppError> + Send>;
+
+#[cfg(feature = "gui")]
+fn apply_reviewed_legacy_routing_locked(
+    state: &AppState,
+    app: &AppType,
+    change: &ApplicationRoutingChange,
+    user_choice: Option<bool>,
+    review: &LegacyRoutingReview,
+    admission: Option<RoutingAdmission>,
+) -> Result<(SwitchTierCommandResult, Option<String>), AppError> {
+    verify_legacy_routing_review(state, app, change, review)?;
+    let taken_over = crate::services::provider::is_app_taken_over(state, app);
+    if let Some(confirmation) = application_routing_confirmation_locked(
+        state,
+        app,
+        change,
+        user_choice,
+        chatgpt_app::needs_user_attention(),
+        taken_over,
+    )? {
+        return Ok::<_, AppError>((confirmation, None));
+    }
+    // Capture presentation before any effects. A label read failure must
+    // not turn an already-completed legacy write into an ambiguous error.
+    let selected = change
+        .selection
+        .as_ref()
+        .map(|selection| selection.provider_id.clone());
+    let provider_name = selected
+        .as_ref()
+        .map(|id| {
+            state
+                .db
+                .get_provider_by_id(id, app.as_str())
+                .map(|provider| provider.map(|p| p.name).unwrap_or_default())
+        })
+        .transpose()?
+        .unwrap_or_default();
+    // The lock remains held through around(). Quit may flush native bytes;
+    // apply_legacy_routing_locked rechecks them before any configuration write.
+    verify_legacy_routing_review(state, app, change, review)?;
+    if let Some(admit) = admission {
+        admit(state)?;
+    }
+    let action = || apply_legacy_routing_locked(state, app, change, review);
+    let (switched, outcome) = if change.selection.is_some()
+        && wants_chatgpt_quit(user_choice.unwrap_or(false), app, taken_over)
+    {
+        chatgpt_app::around(false, action)?
+    } else {
+        (action()?, chatgpt_app::AroundOutcome::default())
+    };
+    let mut warnings = outcome.warnings;
+    warnings.extend(switched.warnings);
+    Ok((
+        SwitchTierCommandResult::Switched {
+            result: SwitchTierResult {
+                provider_name,
+                chatgpt_was_running: outcome.was_running,
+                chatgpt_relaunched: outcome.relaunched,
+                warnings,
+            },
+        },
+        selected,
+    ))
+}
+
+#[cfg(feature = "gui")]
 pub async fn apply_reviewed_legacy_application_routing(
     app_handle: &tauri::AppHandle,
     app: AppType,
@@ -614,69 +731,12 @@ pub async fn apply_reviewed_legacy_application_routing(
     let (response, selected) = tauri::async_runtime::spawn_blocking(move || {
         let _switch =
             futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.as_str()));
-        verify_legacy_routing_review(&state, &app, &change, &review)?;
-        let taken_over = crate::services::provider::is_app_taken_over(&state, &app);
-        if let Some(confirmation) = application_routing_confirmation_locked(
-            &state,
-            &app,
-            &change,
-            user_choice,
-            chatgpt_app::needs_user_attention(),
-            taken_over,
-        )? {
-            return Ok::<_, AppError>((confirmation, None));
-        }
-        // Capture presentation before any effects. A label read failure must
-        // not turn an already-completed legacy write into an ambiguous error.
-        let selected = change
-            .selection
-            .as_ref()
-            .map(|selection| selection.provider_id.clone());
-        let provider_name = selected
-            .as_ref()
-            .map(|id| {
-                state
-                    .db
-                    .get_provider_by_id(id, app.as_str())
-                    .map(|provider| provider.map(|p| p.name).unwrap_or_default())
-            })
-            .transpose()?
-            .unwrap_or_default();
-        // The lock remains held through around(). Quit may flush native bytes;
-        // apply_legacy_routing_locked rechecks them before any configuration write.
-        verify_legacy_routing_review(&state, &app, &change, &review)?;
-        let action = || apply_legacy_routing_locked(&state, &app, &change, &review);
-        let (switched, outcome) = if change.selection.is_some()
-            && wants_chatgpt_quit(user_choice.unwrap_or(false), &app, taken_over)
-        {
-            chatgpt_app::around(false, action)?
-        } else {
-            (action()?, chatgpt_app::AroundOutcome::default())
-        };
-        let mut warnings = outcome.warnings;
-        warnings.extend(switched.warnings);
-        Ok((
-            SwitchTierCommandResult::Switched {
-                result: SwitchTierResult {
-                    provider_name,
-                    chatgpt_was_running: outcome.was_running,
-                    chatgpt_relaunched: outcome.relaunched,
-                    warnings,
-                },
-            },
-            selected,
-        ))
+        apply_reviewed_legacy_routing_locked(&state, &app, &change, user_choice, &review, None)
     })
     .await
     .map_err(|error| AppError::Message(error.to_string()))??;
     if let Some(id) = selected {
-        crate::services::application_overview::record_successful_selection(
-            &app_handle.state::<AppState>().db,
-            &event_app,
-            &id,
-        );
-        emit_provider_switched(app_handle, &event_app, &id);
-        crate::tray::refresh_tray_menu(app_handle);
+        publish_routing_selection(app_handle, &event_app, &id);
     }
     Ok(response)
 }
@@ -712,6 +772,33 @@ pub(crate) fn apply_requested_routing_locked(
     user_choice: Option<bool>,
     request: &crate::mode::state::SaveRequest,
     needs_attention: bool,
+    around: impl FnOnce(
+        &mut dyn FnMut() -> Result<crate::services::SwitchResult, AppError>,
+    )
+        -> Result<(crate::services::SwitchResult, chatgpt_app::AroundOutcome), AppError>,
+) -> Result<(serde_json::Value, Option<String>), AppError> {
+    apply_requested_routing_locked_admitted(
+        state,
+        app,
+        change,
+        user_choice,
+        request,
+        needs_attention,
+        None,
+        around,
+    )
+}
+
+#[cfg(feature = "gui")]
+#[allow(clippy::too_many_arguments)]
+fn apply_requested_routing_locked_admitted(
+    state: &AppState,
+    app: &AppType,
+    change: &ApplicationRoutingChange,
+    user_choice: Option<bool>,
+    request: &crate::mode::state::SaveRequest,
+    needs_attention: bool,
+    admission: Option<RoutingAdmission>,
     around: impl FnOnce(
         &mut dyn FnMut() -> Result<crate::services::SwitchResult, AppError>,
     )
@@ -754,6 +841,9 @@ pub(crate) fn apply_requested_routing_locked(
                 .map_err(|error| AppError::Message(error.to_string()))?,
             None,
         ));
+    }
+    if let Some(admit) = admission {
+        admit(state)?;
     }
     let result = if let Some(selection) = &change.selection {
         let mut action = || {
@@ -843,15 +933,112 @@ pub async fn apply_requested_application_routing(
     .await
     .map_err(|error| AppError::Message(error.to_string()))??;
     if let Some(id) = selected {
-        crate::services::application_overview::record_successful_selection(
-            &app_handle.state::<AppState>().db,
-            &event_app,
-            &id,
-        );
-        emit_provider_switched(app_handle, &event_app, &id);
-        crate::tray::refresh_tray_menu(app_handle);
+        publish_routing_selection(app_handle, &event_app, &id);
     }
     Ok(response)
+}
+
+#[cfg(feature = "gui")]
+fn publish_routing_selection(app_handle: &tauri::AppHandle, app: &AppType, id: &str) {
+    crate::services::application_overview::record_successful_selection(
+        &app_handle.state::<AppState>().db,
+        app,
+        id,
+    );
+    emit_provider_switched(app_handle, app, id);
+    crate::tray::refresh_tray_menu(app_handle);
+}
+
+#[cfg(feature = "gui")]
+type RoutingSelectionPublished = Box<dyn FnOnce(&AppType, &str) + Send>;
+
+/// Setup reuses the existing lifecycle lease and original locked writers. The
+/// worker owns the lease and acknowledgement: cancelling its IPC waiter cannot
+/// release storage protection while a synchronous writer is still running.
+#[cfg(feature = "gui")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_prepared_routing_with_admission(
+    app_handle: &tauri::AppHandle,
+    app: AppType,
+    change: ApplicationRoutingChange,
+    user_choice: Option<bool>,
+    prepared: PreparedRoutingRequest,
+    admission: RoutingAdmission,
+    acknowledge: RoutingAcknowledgement,
+) -> Result<serde_json::Value, AppError> {
+    let state = app_handle.state::<AppState>().inner().clone();
+    let handle = app_handle.clone();
+    run_prepared_routing_owned(
+        state,
+        app,
+        change,
+        user_choice,
+        prepared,
+        admission,
+        acknowledge,
+        Box::new(move |app, id| publish_routing_selection(&handle, app, id)),
+    )
+    .await
+}
+
+/// The same worker serves IPC and tests; only the UI notification is injected.
+/// Both original routing writers and the lifecycle/app leases remain real.
+#[cfg(feature = "gui")]
+#[allow(clippy::too_many_arguments)]
+async fn run_prepared_routing_owned(
+    state: AppState,
+    app: AppType,
+    change: ApplicationRoutingChange,
+    user_choice: Option<bool>,
+    prepared: PreparedRoutingRequest,
+    admission: RoutingAdmission,
+    acknowledge: RoutingAcknowledgement,
+    selected: RoutingSelectionPublished,
+) -> Result<serde_json::Value, AppError> {
+    let sync_guard = crate::services::sync_protocol::sync_mutex().lock().await;
+    crate::services::sync_protocol::ensure_upgrade_sync_admitted()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _sync_guard = sync_guard;
+        let outcome = {
+            let _switch =
+                futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.as_str()));
+            match prepared {
+                PreparedRoutingRequest::Native { request } => {
+                    apply_requested_routing_locked_admitted(
+                        &state,
+                        &app,
+                        &change,
+                        user_choice,
+                        &request,
+                        chatgpt_app::needs_user_attention(),
+                        Some(admission),
+                        |action| chatgpt_app::around(false, action),
+                    )
+                }
+                PreparedRoutingRequest::Legacy { review } => apply_reviewed_legacy_routing_locked(
+                    &state,
+                    &app,
+                    &change,
+                    user_choice,
+                    &review,
+                    Some(admission),
+                )
+                .and_then(|(result, selected)| {
+                    serde_json::to_value(result)
+                        .map(|value| (value, selected))
+                        .map_err(|error| AppError::Message(error.to_string()))
+                }),
+            }
+        };
+        if let Ok((_, Some(id))) = &outcome {
+            selected(&app, id);
+        }
+        let result = outcome.map(|(value, _)| value);
+        acknowledge(&state, &result)?;
+        result
+    })
+    .await
+    .map_err(|error| AppError::Message(error.to_string()))?
 }
 
 /// Read-only admission and preview shared by the GUI and original service tests.
@@ -1569,3 +1756,306 @@ pub(crate) async fn initialize_manual_routing(
 #[cfg(test)]
 #[path = "application_selection_legacy_tests.rs"]
 mod legacy_routing_tests;
+
+#[cfg(test)]
+mod relay_connection_owner_tests {
+    use super::*;
+    #[cfg(feature = "gui")]
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
+    #[cfg(feature = "gui")]
+    fn image_fixture() -> (
+        crate::secrets::testing::TestHome,
+        AppState,
+        ApplicationRoutingChange,
+        PreparedRoutingRequest,
+    ) {
+        let home = crate::secrets::testing::TestHome::new().unwrap();
+        let db = Arc::new(crate::Database::memory().unwrap());
+        crate::settings::unlock_settings_for_test(db.secrets.clone()).unwrap();
+        let state = AppState::new(db.clone()).unwrap();
+        let provider = crate::provider::Provider::with_id(
+            "setup-owned".into(),
+            "Owned fixture".into(),
+            serde_json::json!({"auth":{"OPENAI_API_KEY":"fixture-only"},"config":"model = \"gpt-image-1\""}),
+            None,
+        );
+        db.save_provider("codex-image", &provider).unwrap();
+        let change = ApplicationRoutingChange {
+            order: None,
+            selection: Some(TierSelection {
+                provider_id: provider.id,
+                model: None,
+            }),
+            catalog_decision: None,
+            catalog_preview_only: false,
+        };
+        let prepared =
+            prepare_routing_strategy(&state, &AppType::CodexImage, &change, "owned-fixture")
+                .unwrap();
+        (home, state, change, prepared)
+    }
+    #[cfg(feature = "gui")]
+    async fn wait_for_sync_owner() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if crate::services::sync_protocol::sync_mutex()
+                    .try_lock()
+                    .is_err()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("routing worker never acquired the lifecycle lease");
+    }
+    #[cfg(feature = "gui")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
+    async fn setup_admission_runs_after_app_wait_and_before_original_image_write() {
+        let (_home, state, change, prepared) = image_fixture();
+        let lock = state.proxy_service.lock_switch_for_app("codex-image").await;
+        let valid = Arc::new(AtomicBool::new(true));
+        let checked = valid.clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let task = tokio::spawn(run_prepared_routing_owned(
+            state.clone(),
+            AppType::CodexImage,
+            change,
+            Some(false),
+            prepared,
+            Box::new(move |_| {
+                count.fetch_add(1, Ordering::SeqCst);
+                if checked.load(Ordering::SeqCst) {
+                    Ok(())
+                } else {
+                    Err(AppError::Config(
+                        "fixture authority expired while queued".into(),
+                    ))
+                }
+            }),
+            Box::new(|_, result| {
+                assert!(result.is_err());
+                Ok(())
+            }),
+            Box::new(|_, _| panic!("rejected request published a selection")),
+        ));
+        wait_for_sync_owner().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        valid.store(false, Ordering::SeqCst);
+        drop(lock);
+        assert!(task.await.unwrap().is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(state
+            .db
+            .get_current_provider("codex-image")
+            .unwrap()
+            .is_none());
+    }
+    #[cfg(feature = "gui")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
+    async fn setup_admission_runs_after_lifecycle_wait_not_before_it() {
+        let (_home, state, change, prepared) = image_fixture();
+        let lease = crate::services::sync_protocol::sync_mutex().lock().await;
+        let valid = Arc::new(AtomicBool::new(true));
+        let checked = valid.clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let task = run_prepared_routing_owned(
+            state.clone(),
+            AppType::CodexImage,
+            change,
+            Some(false),
+            prepared,
+            Box::new(move |_| {
+                count.fetch_add(1, Ordering::SeqCst);
+                if checked.load(Ordering::SeqCst) {
+                    Ok(())
+                } else {
+                    Err(AppError::Config(
+                        "fixture authority expired while lifecycle was held".into(),
+                    ))
+                }
+            }),
+            Box::new(|_, result| {
+                assert!(result.is_err());
+                Ok(())
+            }),
+            Box::new(|_, _| panic!("rejected request published a selection")),
+        );
+        futures::pin_mut!(task);
+        assert!(futures::poll!(task.as_mut()).is_pending());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        valid.store(false, Ordering::SeqCst);
+        drop(lease);
+        assert!(task.await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(state
+            .db
+            .get_current_provider("codex-image")
+            .unwrap()
+            .is_none());
+    }
+    // ACK is a condition, not a latency guarantee for the original OS writer.
+    #[cfg(feature = "gui")]
+    async fn await_setup_ack_entered(
+        entered: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<(), tokio::sync::oneshot::error::RecvError> {
+        entered.await
+    }
+
+    #[cfg(feature = "gui")]
+    #[tokio::test(start_paused = true)]
+    async fn setup_ack_wait_tracks_the_condition_not_elapsed_scheduling_time() {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let waiting = await_setup_ack_entered(entered_rx);
+        futures::pin_mut!(waiting);
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        tokio::time::advance(std::time::Duration::from_secs(6)).await;
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        entered_tx.send(()).unwrap();
+        waiting.await.unwrap();
+    }
+
+    #[cfg(feature = "gui")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
+    async fn cancelled_setup_waiter_keeps_lifecycle_lease_until_original_ack_finishes() {
+        let (_home, state, change, prepared) = image_fixture();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let task = tokio::spawn(run_prepared_routing_owned(
+            state.clone(),
+            AppType::CodexImage,
+            change,
+            Some(false),
+            prepared,
+            Box::new(|_| Ok(())),
+            Box::new(move |state, result| {
+                assert!(result.is_ok());
+                assert_eq!(
+                    state.db.get_current_provider("codex-image")?.as_deref(),
+                    Some("setup-owned")
+                );
+                count.fetch_add(1, Ordering::SeqCst);
+                if entered_tx.send(()).is_err() {
+                    return Err(AppError::Message("test ACK observer was dropped".into()));
+                }
+                // Only the caller's release (or sender drop on failure) ends
+                // this ACK. Scheduler delay must never release the lease.
+                release_rx
+                    .recv()
+                    .map_err(|_| AppError::Message("test ACK release sender was dropped".into()))
+            }),
+            Box::new(|_, _| {}),
+        ));
+        if await_setup_ack_entered(entered_rx).await.is_err() {
+            // Join a failed original worker before TestHome can be destroyed.
+            panic!("original worker ended before ACK: {:?}", task.await);
+        }
+        task.abort();
+        let cancelled = task.await;
+        let held_during_ack = crate::services::sync_protocol::sync_mutex()
+            .try_lock()
+            .is_err();
+        let released = release_tx.send(());
+        // Acquiring the original owner proves the real worker finished ACK.
+        // The existing CI job watchdog bounds deadlocks; there is deliberately
+        // no per-phase performance deadline for OS probing or thread scheduling.
+        let lease = crate::services::sync_protocol::sync_mutex().lock().await;
+        drop(lease);
+        // Fail only after releasing and joining the worker's protected phase.
+        assert!(cancelled.unwrap_err().is_cancelled());
+        assert!(
+            held_during_ack,
+            "cancelled IPC must not unblock restore while ACK runs"
+        );
+        released.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            state
+                .db
+                .get_current_provider("codex-image")
+                .unwrap()
+                .as_deref(),
+            Some("setup-owned")
+        );
+    }
+    #[test]
+    #[serial_test::serial]
+    fn image_review_uses_existing_selection_owner_and_rejects_stale_and_other_nonproxy() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let db = std::sync::Arc::new(crate::Database::memory().unwrap());
+        crate::settings::unlock_settings_for_test(db.secrets.clone()).unwrap();
+        let state = AppState::new(db.clone()).unwrap();
+        let mut provider = crate::provider::Provider::with_id(
+            "setup-image".into(),
+            "Setup image".into(),
+            serde_json::json!({"auth":{"OPENAI_API_KEY":"fixture-only"},"config":"base_url = \"https://fixture.invalid/v1\"\nmodel = \"gpt-image-1\""}),
+            None,
+        );
+        db.save_provider("codex-image", &provider).unwrap();
+        let change = ApplicationRoutingChange {
+            order: None,
+            selection: Some(TierSelection {
+                provider_id: provider.id.clone(),
+                model: None,
+            }),
+            catalog_decision: None,
+            catalog_preview_only: false,
+        };
+        let prepared =
+            prepare_routing_strategy(&state, &AppType::CodexImage, &change, "request-image")
+                .unwrap();
+        let PreparedRoutingRequest::Legacy { review } = prepared else {
+            panic!("Image cannot manufacture a native request")
+        };
+        assert!(db.get_current_provider("codex-image").unwrap().is_none());
+        let lock =
+            futures::executor::block_on(state.proxy_service.lock_switch_for_app("codex-image"));
+        provider.name = "Edited after review".into();
+        db.save_provider("codex-image", &provider).unwrap();
+        assert!(
+            apply_legacy_routing_locked(&state, &AppType::CodexImage, &change, &review).is_err()
+        );
+        assert!(db.get_current_provider("codex-image").unwrap().is_none());
+        drop(lock);
+        let PreparedRoutingRequest::Legacy { review } =
+            prepare_routing_strategy(&state, &AppType::CodexImage, &change, "request-image-2")
+                .unwrap()
+        else {
+            panic!("Image must retain compatibility review")
+        };
+        let lock =
+            futures::executor::block_on(state.proxy_service.lock_switch_for_app("codex-image"));
+        apply_legacy_routing_locked(&state, &AppType::CodexImage, &change, &review).unwrap();
+        assert_eq!(
+            db.get_current_provider("codex-image").unwrap().as_deref(),
+            Some("setup-image")
+        );
+        assert!(
+            apply_legacy_routing_locked(&state, &AppType::CodexImage, &change, &review).is_err()
+        );
+        drop(lock);
+        for app in [
+            AppType::OpenCode,
+            AppType::OpenClaw,
+            AppType::Hermes,
+            AppType::Mcode,
+            AppType::Pi,
+            AppType::ClaudeDesktop,
+        ] {
+            assert!(prepare_routing_strategy(&state, &app, &change, "unsupported").is_err());
+        }
+        // The old public API still delegates to the same existing Image owner.
+        ProviderService::switch(&state, AppType::CodexImage, &provider.id).unwrap();
+    }
+}

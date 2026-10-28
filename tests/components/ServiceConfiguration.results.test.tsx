@@ -32,31 +32,48 @@ vi.mock("@/lib/api/serviceOnboarding", () => ({
     complete: mocks.complete,
   },
 }));
-vi.mock("@/lib/api/relay", () => ({
-  relayApi: {
-    listRelays: async (app: string) =>
-      ["claude", "codex"].includes(app)
-        ? [{ id: 7, tiers: [{ providerId: app, displayName: app }] }]
-        : [],
-    switchTier: mocks.switch,
-  },
-}));
+// Preserve all old vendor result/consent regressions; relay no longer enters
+// this transient switch loop and has its own native-operation consumer tests.
 vi.mock("@/lib/api/vendor", () => ({
   vendorApi: {
     list: async (app: string) => ({
-      accounts:
-        app === "claude"
+      accounts: [
+        ...(["claude", "codex"].includes(app)
+          ? [
+              {
+                id: 7,
+                plans: [
+                  {
+                    planId: app,
+                    providerId: app,
+                    planName: app,
+                    canSwitch: true,
+                  },
+                ],
+              },
+            ]
+          : []),
+        ...(app === "claude"
           ? [
               {
                 id: 9,
                 plans: [
-                  { planId: "standard", planName: "Standard", canSwitch: true },
+                  {
+                    planId: "standard",
+                    providerId: "vendor-generated-provider",
+                    planName: "Standard",
+                    canSwitch: true,
+                  },
                 ],
               },
             ]
-          : [],
+          : []),
+      ],
     }),
-    switch: mocks.vendorSwitch,
+    switch: (rowId: number, id: string, app: string, quit?: boolean) =>
+      rowId === 7
+        ? mocks.switch(id, app, quit)
+        : mocks.vendorSwitch(rowId, id, app, quit),
   },
 }));
 function snapshot(app: string, revision = "written", current = true) {
@@ -65,6 +82,7 @@ function snapshot(app: string, revision = "written", current = true) {
     configurations: [
       {
         providerId: app,
+        selection: { kind: "vendor", rowId: 7, planId: app },
         presentation: { isCurrent: current, isInConfig: current },
       },
     ],
@@ -76,7 +94,7 @@ function mount() {
   const view = render(
     <QueryClientProvider client={createTestQueryClient()}>
       <ServiceConfiguration
-        account={{ kind: "relay", rowId: 7, name: "Example" }}
+        account={{ kind: "vendor", rowId: 7, name: "Example" }}
         sourceAppId="claude"
         onBack={vi.fn()}
         onDone={onDone}

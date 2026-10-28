@@ -8,9 +8,31 @@ import { isTextEditableTarget } from "@/utils/domUtils";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { SwitchTierConfirmDialog } from "../SwitchTierConfirmDialog";
 import type { ConnectedService } from "./useServiceOnboarding";
-import { useServiceConfiguration } from "./useServiceConfiguration";
+import { useVendorServiceConfiguration } from "./useServiceConfiguration";
+import { RelaySetupConfiguration } from "./RelaySetupConfiguration";
 
-export function ServiceConfiguration({
+type ServiceConfigurationProps = {
+  account: ConnectedService;
+  sourceAppId: AppId;
+  onBack: () => void;
+  onDone: () => void;
+};
+
+export function ServiceConfiguration(props: ServiceConfigurationProps) {
+  return props.account.kind === "relay" ? (
+    <RelaySetupConfiguration
+      key={props.account.rowId}
+      account={props.account}
+      sourceAppId={props.sourceAppId}
+      onBack={props.onBack}
+      onDone={props.onDone}
+    />
+  ) : (
+    <VendorServiceConfiguration {...props} />
+  );
+}
+
+function VendorServiceConfiguration({
   account,
   sourceAppId,
   onBack,
@@ -39,7 +61,7 @@ export function ServiceConfiguration({
     selectFor,
     resolveConfirmation,
     finish,
-  } = useServiceConfiguration(account, sourceAppId, onDone);
+  } = useVendorServiceConfiguration(account, sourceAppId, onDone);
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (

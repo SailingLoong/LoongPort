@@ -1,6 +1,7 @@
 //! Narrow debug/test-hook fixtures exercising the production relay boundary.
 //! Only loopback HTTP and an in-memory provider database are used.
 use super::*;
+use crate::relay::setup_journal::test_support::ConfirmedJournal;
 use axum::{body::Body, extract::Request, routing::any, Json, Router};
 use serde_json::{json, Value};
 
@@ -184,6 +185,7 @@ fn verify_persistence() {
         &account,
         batch(&account, "old"),
         ProvisionPersistenceIntent::SelectedPrepare,
+        None,
     )
     .unwrap();
     let old_id = managed::newapi_provider_id_for(&account.site_origin, 7, "old");
@@ -201,6 +203,7 @@ fn verify_persistence() {
         &account,
         next,
         ProvisionPersistenceIntent::SelectedPrepare,
+        None,
     )
     .unwrap();
     assert_eq!(summary.tiers.len(), 1);
@@ -256,6 +259,7 @@ fn verify_selected_isolation() {
         &account,
         selected,
         ProvisionPersistenceIntent::SelectedPrepare,
+        None,
     )
     .unwrap();
     let after = db.get_provider_by_id(&id, "codex").unwrap().unwrap();
@@ -370,6 +374,7 @@ fn verify_selected_new_projection_isolation() {
         &account,
         selected,
         ProvisionPersistenceIntent::SelectedPrepare,
+        None,
     )
     .unwrap();
     assert!(summary.failures.is_empty(), "{:?}", summary.failures);
@@ -466,6 +471,7 @@ fn verify_selected_metadata_rollback_with_chain(initial_chain: Option<&str>) {
         &account,
         selected,
         ProvisionPersistenceIntent::SelectedPrepare,
+        None,
     )
     .unwrap();
     assert_eq!(summary.failures.len(), 1);
@@ -547,10 +553,11 @@ async fn verify_sub2api(inactive: bool) {
         .iter()
         .all(|(method, _)| method == "GET"));
     fixture.state.lock().unwrap().keys = [2, 99].into_iter().map(|id| json!({"id":id,"key":format!("fixture-old-{id}"),"name":format!("LoongPort/a7/anthropic/{id}"),"status":"active"})).collect();
-    let first = provision::provision_selected(&client, &tables, &[1, 1])
+    let journal = ConfirmedJournal::new(&["1", "3"]);
+    let first = provision::provision_selected_recorded(&client, &tables, &[1, 1], &journal)
         .await
         .unwrap();
-    let repeated = provision::provision_selected(&client, &tables, &[1])
+    let repeated = provision::provision_selected_recorded(&client, &tables, &[1], &journal)
         .await
         .unwrap();
     assert_eq!(first.tiers.len(), 1);
@@ -568,7 +575,7 @@ async fn verify_sub2api(inactive: bool) {
         .keys
         .iter()
         .any(|key| key["id"] == 3));
-    let composite = provision::provision_selected(&client, &tables, &[3, 3])
+    let composite = provision::provision_selected_recorded(&client, &tables, &[3, 3], &journal)
         .await
         .unwrap();
     assert_eq!(composite.tiers.len(), 2);
@@ -625,10 +632,11 @@ async fn verify_newapi() {
         .iter()
         .all(|(method, _)| method == "GET"));
     fixture.state.lock().unwrap().tokens = ["beta", "removed"].into_iter().enumerate().map(|(id, group)| json!({"id":id+10,"key":"masked","name":if group == "beta" { "LoongPort/napi/a7/9E5k5185SOn3P436lHIcTOjLtPJlxHkM" } else { "LoongPort/napi/a7/4feXWMxC5v5gN5QSBdH7w39XgPE6oHfQ" },"group":group,"status":1})).collect();
-    let first = newapi_provision::reconcile_selected_for_account(&client, 7, &selected)
+    let journal = ConfirmedJournal::new(&["alpha"]);
+    let first = newapi_provision::reconcile_selected_recorded(&client, 7, &selected, &journal)
         .await
         .unwrap();
-    let second = newapi_provision::reconcile_selected_for_account(&client, 7, &selected)
+    let second = newapi_provision::reconcile_selected_recorded(&client, 7, &selected, &journal)
         .await
         .unwrap();
     assert_eq!(first.tokens_created, 1);
@@ -734,10 +742,12 @@ async fn verify_capabilities() {
             }];
             let db = Arc::new(crate::database::Database::memory().unwrap());
             let state = Arc::new(AppState::new(db.clone()).unwrap());
+            let journal = ConfirmedJournal::for_app(&[group], selected_app);
             for expected_created in [1, 0] {
-                let batch = provision_backend_scope(&account, None, Some(&selected))
-                    .await
-                    .unwrap();
+                let batch =
+                    provision_backend_scope(&account, None, Some(&selected), Some(&journal))
+                        .await
+                        .unwrap();
                 assert_eq!(batch.keys_created, expected_created);
                 assert_eq!(batch.candidates.len(), usize::from(expected_success));
                 assert!(batch
@@ -750,7 +760,7 @@ async fn verify_capabilities() {
                 let persist_account = account.clone();
                 let persist_state = state.clone();
                 let summary = tokio::task::spawn_blocking(move || {
-                    persist_provision_batch_scope(&persist_state, &persist_account, batch, ProvisionPersistenceIntent::SelectedPrepare)
+                    persist_provision_batch_scope(&persist_state, &persist_account, batch, ProvisionPersistenceIntent::SelectedPrepare, None)
                 }).await.unwrap().expect("selected partial creation must return a structured receipt, not erase progress as an error");
                 assert_eq!(summary.keys_created, expected_created);
                 assert_eq!(summary.tiers.len(), usize::from(expected_success));
@@ -794,8 +804,9 @@ async fn verify_composite_partial() {
         }];
         let db = Arc::new(crate::database::Database::memory().unwrap());
         let state = Arc::new(AppState::new(db.clone()).unwrap());
+        let journal = ConfirmedJournal::new(&["3"]);
         for expected_created in [1, 0] {
-            let batch = provision_backend_scope(&account, None, Some(&selected))
+            let batch = provision_backend_scope(&account, None, Some(&selected), Some(&journal))
                 .await
                 .expect(
                     "a post-create composite catalog failure must preserve the partial receipt",
@@ -811,6 +822,7 @@ async fn verify_composite_partial() {
                     &persist_account,
                     batch,
                     ProvisionPersistenceIntent::SelectedPrepare,
+                    None,
                 )
             })
             .await
@@ -839,8 +851,185 @@ async fn verify_composite_partial() {
 }
 
 /// Invoked only through the existing integration-test support boundary.
+fn save_setup_account(state: &AppState, fixture: &Fixture) -> creds::RelayAccount {
+    with_conn(state, |conn, vault| {
+        let id = creds::save_authenticated_relay(
+            conn,
+            vault,
+            creds::AuthenticatedRelay {
+                site: creds::RelaySite {
+                    site_origin: &fixture.origin,
+                    site_name: "Fixture",
+                    api_base_url: "",
+                    backend_kind: discovery::BackendKind::Sub2Api,
+                },
+                account: creds::AccountIdentity {
+                    id: 7,
+                    label: "Fixture",
+                    login_identifier: "fixture",
+                },
+                auth_token: "fixture-session",
+                refresh_token: None,
+                token_expires_at: None,
+                session: Default::default(),
+            },
+        )?;
+        creds::get(conn, vault, id)?
+            .ok_or_else(|| AppError::Config("missing fixture account".into()))
+    })
+    .unwrap()
+}
+async fn verify_setup_preflight_and_journal() {
+    use crate::relay::setup_contract::{
+        ConfigurationState, KeyState, PreparationErrorOutcome, RelayPrepareRequest, RelaySelection,
+    };
+    let fixture = Fixture::start().await;
+    let db = Arc::new(crate::database::Database::memory().unwrap());
+    let state = AppState::new(db.clone()).unwrap();
+    let account = save_setup_account(&state, &fixture);
+    let discovery = super::setup::discover(&state, &account, None)
+        .await
+        .unwrap();
+    let operation_id = "f8d02319-67c1-426b-a931-c836de11320e";
+    let request = RelayPrepareRequest::Start {
+        operation_id: operation_id.into(),
+        relay_id: account.id,
+        discovery_revision: discovery.revision.clone(),
+        selections: vec![
+            RelaySelection {
+                app: "codex".into(),
+                group_id: "3".into(),
+            },
+            RelaySelection {
+                app: "claude".into(),
+                group_id: "3".into(),
+            },
+        ],
+    };
+    let mut stale = request.clone();
+    if let RelayPrepareRequest::Start {
+        discovery_revision, ..
+    } = &mut stale
+    {
+        *discovery_revision = "stale".into();
+    }
+    let error = super::setup::prepare(&state, stale, None)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.outcome,
+        PreparationErrorOutcome::RejectedBeforeOperation
+    );
+    assert_eq!(error.operation_id.as_deref(), Some(operation_id));
+    assert!(crate::database::relay_setup_operations::read_on(
+        &db.conn.lock().unwrap(),
+        operation_id
+    )
+    .unwrap()
+    .is_none());
+    assert!(fixture
+        .state
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .all(|(method, _)| method == "GET"));
+    let receipt = super::setup::prepare(&state, request.clone(), None)
+        .await
+        .unwrap();
+    assert_eq!(receipt.created_key_count, 1);
+    assert_eq!(receipt.groups[0].state, KeyState::Ready);
+    assert_eq!(receipt.targets.len(), 2);
+    assert!(receipt
+        .targets
+        .iter()
+        .all(|target| target.configuration == ConfigurationState::Prepared));
+    let before = fixture.state.lock().unwrap().requests.len();
+    assert_eq!(
+        super::setup::prepare(&state, request, None).await.unwrap(),
+        receipt
+    );
+    assert_eq!(
+        fixture.state.lock().unwrap().requests.len(),
+        before,
+        "same operation is a read-only receipt lookup"
+    );
+    let storage = db.secrets.read().unwrap();
+    let restored = crate::database::relay_setup_operations::query_account_on(
+        &db.conn.lock().unwrap(),
+        storage.identity().store_id(),
+        account.id,
+        &receipt.account_identity,
+        None,
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        restored, receipt,
+        "no frontend UUID is needed to recover the persisted operation"
+    );
+}
+async fn verify_setup_auth_invalidated_while_waiting() {
+    use crate::relay::setup_contract::{
+        PreparationErrorOutcome, RelayPrepareRequest, RelaySelection,
+    };
+    let fixture = Fixture::start().await;
+    let db = Arc::new(crate::database::Database::memory().unwrap());
+    let state = Arc::new(AppState::new(db.clone()).unwrap());
+    let account = save_setup_account(&state, &fixture);
+    let discovery = super::setup::discover(&state, &account, None)
+        .await
+        .unwrap();
+    fixture.state.lock().unwrap().requests.clear();
+    let lock = relay_provision_lock(&account).unwrap();
+    let guard = lock.lock().await;
+    let task_state = state.clone();
+    let relay_id = account.id;
+    let task = tokio::spawn(async move {
+        super::setup::prepare(
+            &task_state,
+            RelayPrepareRequest::Start {
+                operation_id: "95fc0852-e7f3-4d3d-bd83-5e333fa49ec4".into(),
+                relay_id,
+                discovery_revision: discovery.revision,
+                selections: vec![RelaySelection {
+                    app: "codex".into(),
+                    group_id: "3".into(),
+                }],
+            },
+            None,
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while Arc::strong_count(&lock) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    db.conn
+        .lock()
+        .unwrap()
+        .execute("DELETE FROM loongport_relay WHERE id=?1", [account.id])
+        .unwrap();
+    drop(guard);
+    let error = task.await.unwrap().unwrap_err();
+    assert_eq!(
+        error.outcome,
+        PreparationErrorOutcome::RejectedBeforeOperation
+    );
+    assert!(
+        fixture.state.lock().unwrap().requests.is_empty(),
+        "stale pre-lock credentials cannot make even a discovery request"
+    );
+}
+
 pub(crate) async fn verify(case: &str) {
     match case {
+        "setup_preflight_journal" => verify_setup_preflight_and_journal().await,
+        "setup_auth_lock" => verify_setup_auth_invalidated_while_waiting().await,
         "composite_partial" => verify_composite_partial().await,
         "capabilities" => verify_capabilities().await,
         "sub2api_selected" => verify_sub2api(false).await,

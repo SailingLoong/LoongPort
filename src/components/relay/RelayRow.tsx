@@ -102,6 +102,8 @@ export interface RelayRowProps {
   busy: ReadonlySet<string>;
   onLogin: () => void;
   onProvision: () => void | Promise<void>;
+  /** Opens the reviewed preparation owner; never falls back to maintenance. */
+  onConfigure?: () => void;
   onSwitchTier: (tier: TierInfo) => void;
   onSelectTierModel: (tier: TierInfo, model: string) => void;
   /** 带登录态开这一行的充值页（钱包按钮，低余额时换琥珀叹号）。 */
@@ -155,6 +157,7 @@ export function RelayRow({
   busy,
   onLogin,
   onProvision,
+  onConfigure,
   onSwitchTier,
   onSelectTierModel,
   onPurchase,
@@ -359,7 +362,7 @@ export function RelayRow({
             relay={relay}
             busy={busy}
             onLogin={onLogin}
-            onProvision={onProvision}
+            onConfigure={onConfigure}
           />
         </div>
 
@@ -503,12 +506,12 @@ function RowStatus({
   relay,
   busy,
   onLogin,
-  onProvision,
+  onConfigure,
 }: {
   relay: RelayRowData;
   busy: ReadonlySet<string>;
   onLogin: () => void;
-  onProvision: () => void | Promise<void>;
+  onConfigure?: () => void;
 }) {
   const { t } = useTranslation();
   const loggingIn = busy.has(`login:${relay.id}`);
@@ -573,8 +576,8 @@ function RowStatus({
         hint={t("loongport.row.noTiers")}
         label={t("loongport.row.getKeys")}
         loading={provisioning}
-        disabled={provisioning}
-        onClick={onProvision}
+        disabled={provisioning || !onConfigure}
+        onClick={() => onConfigure?.()}
       />
     );
   }

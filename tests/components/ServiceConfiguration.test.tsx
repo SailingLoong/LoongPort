@@ -17,7 +17,13 @@ vi.mock("@/lib/api/applicationOverview", () => ({
   applicationOverviewApi: {
     state: async () => ({
       configurationRevision: "fixture-revision",
-      configurations: [{ providerId: "p1", presentation: { isCurrent: true } }],
+      configurations: [
+        {
+          providerId: "p1",
+          selection: { kind: "vendor", rowId: 7, planId: "p1" },
+          presentation: { isCurrent: true },
+        },
+      ],
       isAdditive: false,
     }),
   },
@@ -28,20 +34,30 @@ vi.mock("@/lib/api/serviceOnboarding", () => ({
     complete: (...args: unknown[]) => complete(...args),
   },
 }));
-vi.mock("@/lib/api/relay", () => ({
-  relayApi: {
-    listRelays: async (app: string) =>
-      app === "codex"
-        ? [
-            {
-              id: 7,
-              tiers: [
-                { providerId: "p1", displayName: "Standard", appId: "codex" },
-              ],
-            },
-          ]
-        : [],
-    switchTier: (...args: unknown[]) => switchTier(...args),
+// The original transient configuration owner is now vendor-only. Relay's
+// durable preparation/application coverage lives in RelaySetupConfiguration.
+vi.mock("@/lib/api/vendor", () => ({
+  vendorApi: {
+    list: async (app: string) => ({
+      accounts:
+        app === "codex"
+          ? [
+              {
+                id: 7,
+                plans: [
+                  {
+                    planId: "p1",
+                    providerId: "p1",
+                    planName: "Standard",
+                    canSwitch: true,
+                  },
+                ],
+              },
+            ]
+          : [],
+    }),
+    switch: (_rowId: number, id: string, app: string, quit?: boolean) =>
+      switchTier(id, app, quit),
   },
 }));
 vi.mock("react-i18next", () => ({
@@ -54,7 +70,7 @@ function renderConfiguration() {
   render(
     <QueryClientProvider client={createTestQueryClient()}>
       <ServiceConfiguration
-        account={{ kind: "relay", rowId: 7, name: "Example" }}
+        account={{ kind: "vendor", rowId: 7, name: "Example" }}
         sourceAppId="codex"
         onBack={onBack}
         onDone={onDone}
@@ -160,7 +176,7 @@ describe("ServiceConfiguration", () => {
     render(
       <QueryClientProvider client={client}>
         <ServiceConfiguration
-          account={{ kind: "relay", rowId: 7, name: "Example" }}
+          account={{ kind: "vendor", rowId: 7, name: "Example" }}
           sourceAppId="codex"
           onBack={vi.fn()}
           onDone={onDone}
@@ -199,7 +215,7 @@ it("does not resume an abandoned finish operation after returning to the page", 
     <QueryClientProvider client={client}>
       <PreservedView active={active}>
         <ServiceConfiguration
-          account={{ kind: "relay", rowId: 7, name: "Example" }}
+          account={{ kind: "vendor", rowId: 7, name: "Example" }}
           sourceAppId="codex"
           onBack={vi.fn()}
           onDone={onDone}

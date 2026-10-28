@@ -3,6 +3,8 @@
 
 use super::*;
 use crate::relay::provision;
+use crate::relay::setup_contract::ConfigurationState;
+use crate::relay::setup_journal::{KeyPreparationJournal, PreparationIssue};
 use crate::relay::site_config;
 use crate::relay::{managed, model_selection, provider_config};
 
@@ -242,7 +244,7 @@ fn sub2api_discovery_choices(
 }
 
 /// Group discovery never claims, reveals, creates or deletes a key, and never persists a provider.
-async fn discover_backend_choices(
+pub(super) async fn discover_backend_choices(
     account: &creds::RelayAccount,
     fallback: Option<sub2api::BrowserApiFallback>,
 ) -> Result<Vec<RelayDiscoveredTier>, AppError> {
@@ -313,31 +315,6 @@ async fn discover_backend_choices(
     }
 }
 
-#[tauri::command]
-pub async fn relay_discover_tiers(
-    app: tauri::AppHandle,
-    relay_id: i64,
-) -> Result<Vec<RelayDiscoveredTier>, String> {
-    let account = usable_relay(&app, relay_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut choices = discover_backend_choices(&account, Some(browser_api_fallback(&app)))
-        .await
-        .map_err(|e| e.to_string())?;
-    let state = app.state::<AppState>();
-    for choice in &mut choices {
-        choice.prepared = state
-            .db
-            .get_provider_by_id(&choice.provider_id, &choice.app)
-            .map_err(|e| e.to_string())?
-            .is_some();
-        if choice.prepared {
-            choice.compatibility = "configured";
-        }
-    }
-    Ok(choices)
-}
-
 fn restrict_batch_to_selection(
     batch: &mut ManagedProvisionBatch,
     selections: &[RelayTierSelection],
@@ -359,23 +336,9 @@ fn restrict_batch_to_selection(
     }
 }
 
-#[tauri::command]
-pub async fn relay_prepare_tiers(
-    app: tauri::AppHandle,
-    relay_id: i64,
-    selections: Vec<RelayTierSelection>,
-) -> Result<ProvisionSummary, String> {
-    let account = usable_relay(&app, relay_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    prepare_relay_selection(&app, &account, &selections)
-        .await
-        .map_err(|e| e.to_string())
-}
-
 // Same account, different app/window: share the claim/create critical section.
 // Weak entries do not retain credentials or an ever-growing lock inventory.
-fn relay_provision_lock(
+pub(super) fn relay_provision_lock(
     account: &creds::RelayAccount,
 ) -> Result<Arc<tokio::sync::Mutex<()>>, AppError> {
     use std::collections::HashMap;
@@ -422,95 +385,19 @@ fn configured_selection(
         .collect()
 }
 
-async fn prepare_relay_selection(
-    app: &tauri::AppHandle,
-    account: &creds::RelayAccount,
-    selections: &[RelayTierSelection],
-) -> Result<ProvisionSummary, AppError> {
-    let mut selected_apps = std::collections::HashSet::new();
-    if selections.is_empty()
-        || selections
-            .iter()
-            .any(|selection| !selected_apps.insert(selection.app.as_str()))
-    {
-        return Err(AppError::Config(
-            "Select exactly one group for each chosen application".into(),
-        ));
-    }
-    // Validate the complete confirmation before provisioning any resource. Re-read
-    // upstream availability rather than trusting a potentially stale UI snapshot.
-    let lock = relay_provision_lock(account)?;
-    let _guard = lock.lock().await;
-    let choices = discover_backend_choices(account, Some(browser_api_fallback(app))).await?;
-    if selections.iter().any(|selection| {
-        !choices
-            .iter()
-            .any(|choice| choice.app == selection.app && choice.group_id == selection.group_id)
-    }) {
-        return Err(AppError::Config(
-            "Selected configuration is no longer available; refresh choices".into(),
-        ));
-    }
-    let state = app.state::<AppState>().inner().clone();
-    let mut existing_tiers = Vec::new();
-    let mut missing = Vec::new();
-    for selection in selections {
-        let choice = choices
-            .iter()
-            .find(|choice| choice.app == selection.app && choice.group_id == selection.group_id)
-            .expect("complete selection was validated before any resource write");
-        let app_type = AppType::from_str(&selection.app)?;
-        match state
-            .db
-            .get_provider_by_id(&choice.provider_id, &selection.app)?
-        {
-            Some(provider) => existing_tiers.push(selected_local_tier(
-                &state,
-                account,
-                &app_type,
-                &selection.group_id,
-                &provider,
-            )?),
-            None => missing.push(selection.clone()),
-        }
-    }
-    if missing.is_empty() {
-        return Ok(ProvisionSummary {
-            tiers: existing_tiers,
-            failures: Vec::new(),
-            keys_created: 0,
-            merged_providers: Vec::new(),
-        });
-    }
-    let batch =
-        provision_backend_scope(account, Some(browser_api_fallback(app)), Some(&missing)).await?;
-    let account = account.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut summary = persist_provision_batch_scope(
-            &state,
-            &account,
-            batch,
-            ProvisionPersistenceIntent::SelectedPrepare,
-        )?;
-        summary.tiers.extend(existing_tiers);
-        Ok(summary)
-    })
-    .await
-    .map_err(|e| AppError::Message(format!("保存托管档位失败: {e}")))?
-}
-
 #[cfg(test)]
 pub(crate) async fn provision_backend(
     site_account: &creds::RelayAccount,
     browser_fallback: Option<sub2api::BrowserApiFallback>,
 ) -> Result<ManagedProvisionBatch, AppError> {
-    provision_backend_scope(site_account, browser_fallback, None).await
+    provision_backend_scope(site_account, browser_fallback, None, None).await
 }
 
-async fn provision_backend_scope(
+pub(super) async fn provision_backend_scope(
     site_account: &creds::RelayAccount,
     browser_fallback: Option<sub2api::BrowserApiFallback>,
     selections: Option<&[RelayTierSelection]>,
+    journal: Option<&dyn KeyPreparationJournal>,
 ) -> Result<ManagedProvisionBatch, AppError> {
     // 一次 provision 解析一次选型表（内置 + 远端覆盖），两个 backend 共用 ——
     // sub2api 与 newapi 的选型纪律必须来自同一份数据（尺子 1.4：一个事实一个 owner）。
@@ -551,7 +438,13 @@ async fn provision_backend_scope(
                                 .map_err(|_| AppError::Config("Invalid group identity".into()))
                         })
                         .collect::<Result<Vec<_>, _>>()?;
-                    provision::provision_selected(&client, &tables, &ids).await?
+                    match journal {
+                        Some(journal) => {
+                            provision::provision_selected_recorded(&client, &tables, &ids, journal)
+                                .await?
+                        }
+                        None => provision::provision_selected(&client, &tables, &ids).await?,
+                    }
                 }
             };
             provision::sort_tiers(&mut result.tiers);
@@ -615,12 +508,25 @@ async fn provision_backend_scope(
                         .iter()
                         .map(|s| newapi::GroupIdentity(s.group_id.clone()))
                         .collect::<Vec<_>>();
-                    newapi_provision::reconcile_selected_for_account(
-                        &client,
-                        account.id,
-                        &identities,
-                    )
-                    .await?
+                    match journal {
+                        Some(journal) => {
+                            newapi_provision::reconcile_selected_recorded(
+                                &client,
+                                account.id,
+                                &identities,
+                                journal,
+                            )
+                            .await?
+                        }
+                        None => {
+                            newapi_provision::reconcile_selected_for_account(
+                                &client,
+                                account.id,
+                                &identities,
+                            )
+                            .await?
+                        }
+                    }
                 }
             };
 
@@ -674,6 +580,13 @@ async fn provision_backend_scope(
                         Ok(models) => match normalize_newapi_model_catalog(models) {
                             Some(models) => models,
                             None => {
+                                if let Some(journal) = journal {
+                                    journal.record_issue(
+                                        &group.identity.0,
+                                        None,
+                                        PreparationIssue::ModelCatalogUnavailable,
+                                    )?;
+                                }
                                 batch.failures.push(FailureInfo {
                                     group_name: group.name,
                                     reason: "model_catalog: /v1/models 未返回可用模型目录".into(),
@@ -690,6 +603,13 @@ async fn provision_backend_scope(
                             }
                         },
                         Err(error) => {
+                            if let Some(journal) = journal {
+                                journal.record_issue(
+                                    &group.identity.0,
+                                    None,
+                                    PreparationIssue::ModelCatalogUnavailable,
+                                )?;
+                            }
                             batch.failures.push(FailureInfo {
                                 group_name: group.name,
                                 reason: format!("model_catalog: {error}"),
@@ -711,13 +631,23 @@ async fn provision_backend_scope(
                     &group.identity,
                     Some(&models),
                 );
-                batch.candidates.extend(newapi_candidates_for_group(
+                let candidates = newapi_candidates_for_group(
                     &site_account.site_origin,
                     result.account_id,
                     &group,
                     &models,
                     &tables,
-                ));
+                );
+                if let Some(journal) = journal {
+                    journal.record_model_support(
+                        &group.identity.0,
+                        &candidates
+                            .iter()
+                            .map(|candidate| candidate.app_type.as_str().to_string())
+                            .collect::<Vec<_>>(),
+                    )?;
+                }
+                batch.candidates.extend(candidates);
             }
             Ok(batch)
         }
@@ -788,6 +718,7 @@ async fn provision_relay(
         site_account,
         Some(browser_api_fallback(app_handle)),
         Some(&selections),
+        None,
     )
     .await?;
     batch.failures.extend(missing);
@@ -802,6 +733,7 @@ async fn provision_relay(
             &persist_account,
             batch,
             ProvisionPersistenceIntent::RefreshExisting,
+            None,
         )
     })
     .await
@@ -838,11 +770,12 @@ pub(crate) fn persist_provision_batch(
         site_account,
         batch,
         ProvisionPersistenceIntent::FullMaintenance,
+        None,
     )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ProvisionPersistenceIntent {
+pub(super) enum ProvisionPersistenceIntent {
     SelectedPrepare,
     RefreshExisting,
     FullMaintenance,
@@ -850,13 +783,11 @@ enum ProvisionPersistenceIntent {
 
 /// Read the existing provider as evidence, without the current-provider service's
 /// legacy cleanup and without refreshing its key, models or routing metadata.
-fn selected_local_tier(
-    state: &AppState,
+pub(super) fn validate_selected_provider_identity(
     account: &creds::RelayAccount,
-    app: &AppType,
     group_id: &str,
     provider: &Provider,
-) -> Result<TierInfo, AppError> {
+) -> Result<(), AppError> {
     if !belongs_to_relay(provider, &account.site_origin, account.account_id)
         || provider
             .meta
@@ -868,6 +799,17 @@ fn selected_local_tier(
             "Existing configuration has a different account or group identity".into(),
         ));
     }
+    Ok(())
+}
+
+pub(super) fn selected_local_tier(
+    state: &AppState,
+    account: &creds::RelayAccount,
+    app: &AppType,
+    group_id: &str,
+    provider: &Provider,
+) -> Result<TierInfo, AppError> {
+    validate_selected_provider_identity(account, group_id, provider)?;
     let subscription_windows =
         crate::relay::tier_windows::subscription_windows_from_settings(&provider.settings_config);
     Ok(TierInfo {
@@ -899,11 +841,12 @@ fn selected_local_tier(
     })
 }
 
-fn persist_provision_batch_scope(
+pub(super) fn persist_provision_batch_scope(
     state: &AppState,
     site_account: &creds::RelayAccount,
     mut batch: ManagedProvisionBatch,
     intent: ProvisionPersistenceIntent,
+    journal: Option<&dyn KeyPreparationJournal>,
 ) -> Result<ProvisionSummary, AppError> {
     let prune = intent == ProvisionPersistenceIntent::FullMaintenance;
     let mut tiers = Vec::new();
@@ -925,13 +868,28 @@ fn persist_provision_batch_scope(
         if intent == ProvisionPersistenceIntent::SelectedPrepare {
             match state.db.get_provider_by_id(&provider_id, app_type.as_str()) {
                 Ok(Some(existing)) => {
-                    match selected_local_tier(
-                        state,
-                        site_account,
-                        app_type,
-                        &candidate.group_id,
-                        &existing,
-                    ) {
+                    let reuse = (|| {
+                        validate_selected_provider_identity(
+                            site_account,
+                            &candidate.group_id,
+                            &existing,
+                        )?;
+                        if let Some(journal) = journal {
+                            journal.record_local(
+                                app_type.as_str(),
+                                &provider_id,
+                                ConfigurationState::Existing,
+                            )?;
+                        }
+                        selected_local_tier(
+                            state,
+                            site_account,
+                            app_type,
+                            &candidate.group_id,
+                            &existing,
+                        )
+                    })();
+                    match reuse {
                         Ok(tier) => tiers.push(tier),
                         Err(error) => batch.failures.push(FailureInfo {
                             group_name: candidate.group_name,
@@ -1123,11 +1081,28 @@ fn persist_provision_batch_scope(
                     &generated,
                     &mut provider,
                 )?;
-                state.db.prepare_provider_if_absent(
+                let authority = journal
+                    .map(|journal| journal.local_authority())
+                    .transpose()?;
+                let inserted = match state.db.prepare_provider_if_absent(
                     app_type.as_str(),
                     &provider,
                     rate_multiplier,
-                )?;
+                    authority.as_ref(),
+                ) {
+                    Ok(inserted) => inserted,
+                    Err(error) => {
+                        // This is the actual atomic DAO attempt, not a remote or catalog failure.
+                        if let Some(journal) = journal {
+                            journal.record_issue(
+                                &candidate.group_id,
+                                Some(app_type.as_str()),
+                                PreparationIssue::LocalSaveFailed,
+                            )?;
+                        }
+                        return Err(error);
+                    }
+                };
                 let stored = state
                     .db
                     .get_provider_by_id(&provider_id, app_type.as_str())?
@@ -1136,6 +1111,16 @@ fn persist_provision_batch_scope(
                             "Prepared configuration disappeared; recheck before continuing".into(),
                         )
                     })?;
+                validate_selected_provider_identity(site_account, &candidate.group_id, &stored)?;
+                if !inserted {
+                    if let Some(journal) = journal {
+                        journal.record_local(
+                            app_type.as_str(),
+                            &provider_id,
+                            ConfigurationState::Existing,
+                        )?;
+                    }
+                }
                 selected_local_tier(state, site_account, app_type, &candidate.group_id, &stored)
             })();
             drop(settings_guard);
@@ -1995,6 +1980,7 @@ mod tests {
             &account,
             batch,
             ProvisionPersistenceIntent::SelectedPrepare,
+            None,
         )
         .unwrap();
         assert_eq!(summary.tiers.len(), 1);
