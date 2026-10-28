@@ -3912,6 +3912,18 @@ impl RequestForwarder {
                 let mut response = self
                     .prepare_success_response_for_failover(response, request_is_streaming)
                     .await?;
+                // Chat gateways may carry an explicit error in HTTP 200. Classify
+                // only complete non-streaming error-only bodies before success is
+                // recorded; the original retry/denial/budget owner remains in charge.
+                if status == http::StatusCode::OK
+                    && !request_is_streaming
+                    && matches!(
+                        split_endpoint_and_query(&effective_endpoint).0,
+                        "/chat/completions" | "/v1/chat/completions"
+                    )
+                {
+                    response = self.validate_chat_success_response(response).await?;
+                }
                 // Streaming requests normally return SSE. If a compatible gateway
                 // explicitly returns JSON instead, buffer and validate it inside the retry
                 // loop as well so a 2xx Anthropic error envelope can still fail over. Do
@@ -4025,6 +4037,26 @@ impl RequestForwarder {
         })??;
 
         Ok(ProxyResponse::buffered(status, headers, body))
+    }
+
+    async fn validate_chat_success_response(
+        &self,
+        response: ProxyResponse,
+    ) -> Result<ProxyResponse, ProxyError> {
+        let status = response.status();
+        let headers = response.headers().clone();
+        let raw = response.bytes_with_limit(MAX_RESPONSE_BODY_BYTES).await?;
+        let decoded = match get_content_encoding(&headers) {
+            Some(encoding) => decompress_body_with_limit(&encoding, &raw, MAX_RESPONSE_BODY_BYTES)
+                .ok()
+                .flatten(),
+            None => None,
+        };
+        if let Some(error) = chat_error_only(decoded.as_deref().unwrap_or(&raw)) {
+            return Err(error);
+        }
+        // Preserve the original bytes and encoding for the actual consumer.
+        Ok(ProxyResponse::buffered(status, headers, raw))
     }
 
     /// Some Anthropic-compatible gateways return an Anthropic error envelope with
@@ -4478,6 +4510,58 @@ fn ensure_budgeted_native_path(
         ));
     }
     Ok(())
+}
+
+/// Conservative Chat error envelope recognition, not an empty-output heuristic.
+/// Content-bearing or unfamiliar siblings make the document ambiguous, so leave
+/// them to the original consumer. Error message text never establishes billing.
+fn chat_error_only(bytes: &[u8]) -> Option<ProxyError> {
+    let value: Value = serde_json::from_slice(bytes).ok()?;
+    let object = value.as_object()?;
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "error" | "type" | "id" | "object" | "created" | "model" | "request_id"
+        )
+    }) {
+        return None;
+    }
+    let error = object.get("error")?.as_object()?;
+    if !["type", "code", "message"].into_iter().any(|field| {
+        error
+            .get(field)
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty())
+    }) {
+        return None;
+    }
+    let has_category = |category: &str| {
+        ["type", "code"]
+            .into_iter()
+            .any(|field| error.get(field).and_then(Value::as_str) == Some(category))
+    };
+    let mut failure = ProxyError::UpstreamError {
+        status: 502,
+        body: Some(value.to_string()),
+    };
+    // Reuse the exact refusal boundary, with precedence over quota/rate types.
+    let status = if is_explicit_upstream_denial(&failure) {
+        403
+    } else if has_category("insufficient_quota") {
+        402
+    } else if has_category("rate_limit_error") || has_category("rate_limit_exceeded") {
+        429
+    } else {
+        502
+    };
+    if let ProxyError::UpstreamError {
+        status: effective_status,
+        ..
+    } = &mut failure
+    {
+        *effective_status = status;
+    }
+    Some(failure)
 }
 
 /// Only structured, exact denial categories establish this boundary. Message text
