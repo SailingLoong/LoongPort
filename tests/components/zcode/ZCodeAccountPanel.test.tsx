@@ -13,6 +13,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ZCodeAccountPanel } from "@/components/zcode/ZCodeAccountPanel";
 import {
   zcodeAccountsApi,
+  ConfirmedSwitchFailure,
   type CatalogStatus,
   type RecoveryStatus,
   type SessionCheckDisplay,
@@ -54,6 +55,7 @@ vi.mock("@/lib/api/zcodeAccounts", async (importOriginal) => ({
     checkConnections: vi.fn(),
     cancelConnectionCheck: vi.fn(),
     queryLastOperation: vi.fn().mockResolvedValue(null),
+    queryLastOperationState: vi.fn(),
     openForLogin: vi.fn(),
     latestVersion: vi.fn(),
     discover: vi.fn(),
@@ -226,6 +228,12 @@ function confirm(name: string) {
   );
 }
 beforeEach(() => {
+  vi.mocked(zcodeAccountsApi.queryLastOperationState)
+    .mockReset()
+    .mockImplementation(async (selection, revision) => ({
+      operation: await zcodeAccountsApi.queryLastOperation(selection, revision),
+      request: null,
+    }));
   vi.mocked(zcodeAccountsApi.checkConnections)
     .mockReset()
     .mockResolvedValue({ ...catalog, revision: "checked-revision" });
@@ -280,7 +288,19 @@ beforeEach(() => {
   vi.mocked(zcodeAccountsApi.commitCapture)
     .mockReset()
     .mockResolvedValue("saved");
-  vi.mocked(zcodeAccountsApi.switch).mockReset().mockResolvedValue("switched");
+  vi.mocked(zcodeAccountsApi.switch)
+    .mockReset()
+    .mockImplementation(
+      async (selection, revision, id, _catalog, onRequest) => {
+        onRequest?.({
+          source: selection,
+          contextRevision: revision,
+          requestId: "fixture-request",
+          target: id,
+        });
+        return "switched";
+      },
+    );
   vi.mocked(zcodeAccountsApi.archive).mockReset().mockResolvedValue("archived");
   vi.mocked(zcodeAccountsApi.confirmRecovery)
     .mockReset()
@@ -908,16 +928,16 @@ describe("ZCode saved accounts", () => {
     await inspect();
     expect(zcodeAccountsApi.readCurrentIdentity).not.toHaveBeenCalled();
     fireEvent.click(
-      screen.getByRole("button", { name: "Read current native identity" }),
+      screen.getByRole("button", { name: "Read local identity" }),
     );
-    await screen.findByText(/Current native account: p…/);
+    await screen.findByText(/Local identity \(last read\): p…/);
     expect(
       zcodeAccountsApi.readCurrentIdentity,
     ).toHaveBeenCalledExactlyOnceWith(source, context.contextRevision);
     fireEvent(window, new Event("blur"));
-    expect(screen.getByText("Current account: unknown")).toBeInTheDocument();
+    expect(screen.getByText("Local identity: unknown")).toBeInTheDocument();
     expect(
-      screen.queryByText(/Current native account:/),
+      screen.queryByText(/Local identity \(last read\):/),
     ).not.toBeInTheDocument();
   });
   it("ignores a native identity read that finishes after the observation is invalidated", async () => {
@@ -932,7 +952,7 @@ describe("ZCode saved accounts", () => {
     mount();
     await inspect();
     const button = screen.getByRole("button", {
-      name: "Read current native identity",
+      name: "Read local identity",
     });
     fireEvent.click(button);
     fireEvent.click(button);
@@ -960,22 +980,24 @@ describe("ZCode saved accounts", () => {
     mount();
     await inspect();
     fireEvent.click(
-      screen.getByRole("button", { name: "Read current native identity" }),
+      screen.getByRole("button", { name: "Read local identity" }),
     );
-    await screen.findByText(/Current native account: Previous native account/);
+    await screen.findByText(
+      /Local identity \(last read\): Previous native account/,
+    );
     fireEvent.click(
       within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
         "button",
-        { name: "Switch saved account" },
+        { name: "Switch to this account" },
       ),
     );
     confirm("Switch to this account");
     await screen.findByText(
       `Switched ${source.dataRoot} locally. Start official ZCode and verify the account there.`,
     );
-    expect(screen.getByText("Current account: unknown")).toBeInTheDocument();
+    expect(screen.getByText("Local identity: unknown")).toBeInTheDocument();
     expect(
-      screen.queryByText(/Current native account:/),
+      screen.queryByText(/Local identity \(last read\):/),
     ).not.toBeInTheDocument();
     expect(zcodeAccountsApi.readCurrentIdentity).toHaveBeenCalledTimes(1);
     expect(zcodeAccountsApi.switch).toHaveBeenCalledExactlyOnceWith(
@@ -983,6 +1005,7 @@ describe("ZCode saved accounts", () => {
       context.contextRevision,
       "opaque-zai",
       catalog.revision,
+      expect.any(Function),
     );
   });
   it("ignores a pre-switch native identity read that returns after switching", async () => {
@@ -997,12 +1020,12 @@ describe("ZCode saved accounts", () => {
     mount();
     await inspect();
     fireEvent.click(
-      screen.getByRole("button", { name: "Read current native identity" }),
+      screen.getByRole("button", { name: "Read local identity" }),
     );
     fireEvent.click(
       within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
         "button",
-        { name: "Switch saved account" },
+        { name: "Switch to this account" },
       ),
     );
     confirm("Switch to this account");
@@ -1018,14 +1041,14 @@ describe("ZCode saved accounts", () => {
         readAt: 1_800_000_000_000,
       }),
     );
-    expect(screen.getByText("Current account: unknown")).toBeInTheDocument();
+    expect(screen.getByText("Local identity: unknown")).toBeInTheDocument();
     expect(
       screen.queryByText(/Late pre-switch account/),
     ).not.toBeInTheDocument();
     expect(zcodeAccountsApi.readCurrentIdentity).toHaveBeenCalledTimes(1);
     await waitFor(() =>
       expect(
-        screen.getByRole("button", { name: "Read current native identity" }),
+        screen.getByRole("button", { name: "Read local identity" }),
       ).toBeEnabled(),
     );
   });
@@ -1038,23 +1061,23 @@ describe("ZCode saved accounts", () => {
     mount();
     await inspect();
     fireEvent.click(
-      screen.getByRole("button", { name: "Read current native identity" }),
+      screen.getByRole("button", { name: "Read local identity" }),
     );
-    await screen.findByText(/Current native account: p…/);
+    await screen.findByText(/Local identity \(last read\): p…/);
     expect(
       screen.getByText("Current native identity at last explicit read"),
     ).toBeInTheDocument();
     fireEvent.click(
       within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
         "button",
-        { name: "Switch saved account" },
+        { name: "Switch to this account" },
       ),
     );
     confirm("Switch to this account");
     await screen.findByRole("alert");
-    expect(screen.getByText("Current account: unknown")).toBeInTheDocument();
+    expect(screen.getByText("Local identity: unknown")).toBeInTheDocument();
     expect(
-      screen.queryByText(/Current native account:/),
+      screen.queryByText(/Local identity \(last read\):/),
     ).not.toBeInTheDocument();
     expect(
       screen.queryByText("Current native identity at last explicit read"),
@@ -1077,7 +1100,7 @@ describe("ZCode saved accounts", () => {
     mount();
     await inspect();
     expect(
-      screen.getByRole("button", { name: "Switch saved account" }),
+      screen.getByRole("button", { name: "Switch to this account" }),
     ).toBeEnabled();
   });
   it("shows independent credential checks and separate quota instances with authoritative units and times", async () => {
@@ -1274,7 +1297,7 @@ describe("ZCode saved accounts", () => {
       screen.queryByText(/Source unverified\. Sign in/),
     ).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Switch saved account" }),
+      screen.getByRole("button", { name: "Switch to this account" }),
     ).toBeDisabled();
     expect(
       screen.getByRole("button", { name: "Save current account" }),
@@ -1632,11 +1655,15 @@ describe("ZCode saved accounts", () => {
       name: "BigModel accounts",
     });
     expect(
-      within(otherFamily).getByRole("button", { name: "Switch saved account" }),
+      within(otherFamily).getByRole("button", {
+        name: "Switch to this account",
+      }),
     ).toBeDisabled();
     const sameFamily = screen.getByRole("region", { name: "Z.ai accounts" });
     fireEvent.click(
-      within(sameFamily).getByRole("button", { name: "Switch saved account" }),
+      within(sameFamily).getByRole("button", {
+        name: "Switch to this account",
+      }),
     );
     confirm("Switch to this account");
     await waitFor(() =>
@@ -1645,9 +1672,10 @@ describe("ZCode saved accounts", () => {
         "context-revision",
         "opaque-zai",
         "catalog-one",
+        expect.any(Function),
       ),
     );
-    expect(screen.getByText("Current account: unknown")).toBeInTheDocument();
+    expect(screen.getByText("Local identity: unknown")).toBeInTheDocument();
   });
   it("invalidates inspected context when source selection changes", async () => {
     mount();
@@ -1734,7 +1762,7 @@ describe("ZCode saved accounts", () => {
     fireEvent.click(
       within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
         "button",
-        { name: "Switch saved account" },
+        { name: "Switch to this account" },
       ),
     );
     confirm("Switch to this account");
@@ -1985,7 +2013,7 @@ describe("ZCode saved accounts", () => {
     ).toBeDisabled();
     expect(
       screen
-        .getAllByRole("button", { name: "Switch saved account" })
+        .getAllByRole("button", { name: "Switch to this account" })
         .every((button) => button.hasAttribute("disabled")),
     ).toBe(true);
     expect(
@@ -2086,17 +2114,19 @@ describe("ZCode saved accounts", () => {
     fireEvent.click(
       within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
         "button",
-        { name: "Switch saved account" },
+        { name: "Switch to this account" },
       ),
     );
     confirm("Switch to this account");
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "refreshing its status failed",
     );
-    expect(screen.getByRole("status")).toHaveTextContent(
-      `Switched ${source.dataRoot} locally. Start official ZCode and verify the account there.`,
-    );
-    expect(screen.getByText("Current account: unknown")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        `Switched ${source.dataRoot} locally. Start official ZCode and verify the account there.`,
+      ),
+    ).toHaveAttribute("role", "status");
+    expect(screen.getByText("Local identity: unknown")).toBeInTheDocument();
     expect(zcodeAccountsApi.switch).toHaveBeenCalledTimes(1);
     expect(zcodeAccountsApi.commitCapture).not.toHaveBeenCalled();
   });
@@ -2127,9 +2157,9 @@ describe("ZCode saved accounts", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "refreshing its status failed",
     );
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "Selected recovery record permanently deleted.",
-    );
+    expect(
+      screen.getByText("Selected recovery record permanently deleted."),
+    ).toHaveAttribute("role", "status");
     expect(zcodeAccountsApi.deleteRecovery).toHaveBeenCalledTimes(1);
     expect(zcodeAccountsApi.commitCapture).not.toHaveBeenCalled();
   });
@@ -2165,7 +2195,7 @@ describe("ZCode saved accounts", () => {
     fireEvent.click(
       within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
         "button",
-        { name: "Switch saved account" },
+        { name: "Switch to this account" },
       ),
     );
     await act(async () => {
@@ -2206,7 +2236,7 @@ describe("ZCode saved accounts", () => {
     expect(
       within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
         "button",
-        { name: "Switch saved account" },
+        { name: "Switch to this account" },
       ),
     ).toBeDisabled();
     expect(
@@ -2385,7 +2415,7 @@ describe("ZCode account command bindings", () => {
     const auth = await screen.findByRole("region", { name: "授权状态" });
     expect(auth).toHaveTextContent("Business session");
     expect(
-      within(auth).getByRole("button", { name: "Switch saved account" }),
+      within(auth).getByRole("button", { name: "Switch to this account" }),
     ).toBeInTheDocument();
     expect(auth).not.toHaveTextContent("Start quota");
     expect(
@@ -2464,3 +2494,1425 @@ it("preserves native source edits across unified disclosure toggles without insp
   expect(zcodeAccountsApi.inspect).not.toHaveBeenCalled();
   expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
 });
+
+describe("ZCode native switch owner", () => {
+  const original = (
+    phase:
+      | "restartVerified"
+      | "restartFailed"
+      | "transactionUncertain" = "transactionUncertain",
+  ) => ({
+    requestId: "original-request",
+    target: "removed-opaque-id",
+    phase,
+    refreshed: false,
+    restartRequested: true,
+  });
+  const native = () =>
+    within(screen.getByRole("region", { name: "Official client" }));
+  const switchButton = () =>
+    within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
+      "button",
+      { name: "Switch to this account" },
+    );
+  it("reviews the exact target and inspected source, and cancel never dispatches", async () => {
+    mount();
+    await inspect();
+    fireEvent.click(switchButton());
+    const dialog = screen.getByRole("dialog");
+    for (const text of [
+      "Personal Z.ai",
+      "opaque-zai",
+      "zai",
+      source.installPath,
+      source.dataRoot,
+      "1.0",
+      "fixture",
+    ])
+      expect(dialog).toHaveTextContent(text);
+    expect(dialog).toHaveTextContent(
+      "The existing safe process handles a running client; it will not continue if it cannot exit safely.",
+    );
+    expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Cancel account action" }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+  });
+  it("queries only the original request and retains its opaque target when labels disappear", async () => {
+    mount();
+    await inspect();
+    vi.mocked(zcodeAccountsApi.queryLastOperation).mockResolvedValue(
+      original(),
+    );
+    fireEvent.click(
+      native().getByRole("button", { name: "Query original operation" }),
+    );
+    await native().findByText(/removed-opaque-id/);
+    expect(zcodeAccountsApi.queryLastOperation).toHaveBeenLastCalledWith(
+      source,
+      context.contextRevision,
+    );
+    expect(switchButton()).toBeDisabled();
+    expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+    expect(native().getByText("Local identity: unknown")).toBeInTheDocument();
+  });
+  it.each(["error", "null"])(
+    "does not clear unresolved evidence or allow a fresh switch after query %s",
+    async (outcome) => {
+      vi.mocked(zcodeAccountsApi.queryLastOperation).mockResolvedValue(
+        original(),
+      );
+      mount();
+      await inspect();
+      if (outcome === "error")
+        vi.mocked(zcodeAccountsApi.queryLastOperation).mockRejectedValueOnce(
+          new Error("private payload"),
+        );
+      else
+        vi.mocked(zcodeAccountsApi.queryLastOperation).mockResolvedValueOnce(
+          null,
+        );
+      fireEvent.click(
+        native().getByRole("button", { name: "Query original operation" }),
+      );
+      await native().findByText(/Unable to refresh the original operation/);
+      expect(native().getByText(/removed-opaque-id/)).toBeInTheDocument();
+      expect(switchButton()).toBeDisabled();
+      fireEvent.click(switchButton());
+      expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+      expect(screen.queryByText(/private payload/)).not.toBeInTheDocument();
+    },
+  );
+  it("does not unlock restartFailed after an independent identity read or ordinary refresh", async () => {
+    vi.mocked(zcodeAccountsApi.queryLastOperation).mockResolvedValue(
+      original("restartFailed"),
+    );
+    mount();
+    await inspect();
+    expect(
+      native().getByText(
+        "Local write committed; client reopening was not verified.",
+      ),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      native().getByRole("button", { name: "Read local identity" }),
+    );
+    await native().findByText(/Local identity \(last read\): p…/);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh account status" }),
+    );
+    await waitFor(() =>
+      expect(zcodeAccountsApi.queryLastOperation).toHaveBeenCalledTimes(2),
+    );
+    expect(switchButton()).toBeDisabled();
+    expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+  });
+  it("runs one confirmed switch and queries only after settlement, with no cancellation or progress fiction", async () => {
+    let resolve!: (value: "switched") => void;
+    vi.mocked(zcodeAccountsApi.switch).mockImplementationOnce(
+      (_source, revision, id, _catalog, onRequest) => {
+        onRequest?.({
+          source: _source,
+          contextRevision: revision,
+          requestId: "original-request",
+          target: id,
+        });
+        return new Promise((r) => {
+          resolve = r;
+        });
+      },
+    );
+    mount();
+    await inspect();
+    fireEvent.click(switchButton());
+    const dialog = screen.getByRole("dialog");
+    const confirmButton = within(dialog).getByRole("button", {
+      name: "Switch to this account",
+    });
+    fireEvent.click(confirmButton);
+    fireEvent.click(confirmButton);
+    expect(zcodeAccountsApi.switch).toHaveBeenCalledExactlyOnceWith(
+      source,
+      context.contextRevision,
+      "opaque-zai",
+      catalog.revision,
+      expect.any(Function),
+    );
+    expect(zcodeAccountsApi.queryLastOperation).toHaveBeenCalledTimes(1);
+    expect(
+      within(dialog).getByRole("button", { name: "Cancel account action" }),
+    ).toBeDisabled();
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(
+      screen.getByText("Operation in progress. Do not repeat it."),
+    ).toBeInTheDocument();
+    vi.mocked(zcodeAccountsApi.queryLastOperation).mockResolvedValueOnce({
+      ...original("restartVerified"),
+      target: "opaque-zai",
+    });
+    await act(async () => resolve("switched"));
+    await native().findByText(
+      /Local write committed and client process reopened/,
+    );
+    expect(zcodeAccountsApi.queryLastOperation).toHaveBeenCalledTimes(2);
+    expect(zcodeAccountsApi.readCurrentIdentity).not.toHaveBeenCalled();
+  });
+  it("preserves local completion when the settled original-operation query fails", async () => {
+    mount();
+    await inspect();
+    vi.mocked(zcodeAccountsApi.queryLastOperation).mockRejectedValueOnce(
+      new Error("secret"),
+    );
+    fireEvent.click(switchButton());
+    confirm("Switch to this account");
+    await native().findByText(/Unable to refresh the original operation/);
+    expect(
+      screen.getByText(
+        `Switched ${source.dataRoot} locally. Start official ZCode and verify the account there.`,
+      ),
+    ).toBeInTheDocument();
+    expect(zcodeAccountsApi.switch).toHaveBeenCalledTimes(1);
+    expect(switchButton()).toBeDisabled();
+  });
+  it("invalidates operation evidence on source change and discards a late query from an unmounted owner", async () => {
+    vi.mocked(zcodeAccountsApi.queryLastOperation).mockResolvedValue(
+      original("restartVerified"),
+    );
+    mount();
+    await inspect();
+    fireEvent.change(screen.getByLabelText("ZCode data directory"), {
+      target: { value: "/example/other/v2" },
+    });
+    expect(screen.queryByText(/removed-opaque-id/)).not.toBeInTheDocument();
+    expect(
+      native().getByRole("button", { name: "Query original operation" }),
+    ).toBeDisabled();
+    cleanup();
+    let resolve!: (value: ReturnType<typeof original>) => void;
+    vi.mocked(zcodeAccountsApi.queryLastOperation).mockResolvedValue(null);
+    mount();
+    await inspect();
+    vi.mocked(zcodeAccountsApi.queryLastOperation).mockReturnValueOnce(
+      new Promise((r) => {
+        resolve = r;
+      }),
+    );
+    fireEvent.click(
+      native().getByRole("button", { name: "Query original operation" }),
+    );
+    cleanup();
+    vi.mocked(zcodeAccountsApi.queryLastOperation).mockResolvedValue(null);
+    mount();
+    await inspect();
+    await act(async () => resolve(original()));
+    expect(screen.queryByText(/removed-opaque-id/)).not.toBeInTheDocument();
+  });
+  it("navigates to the existing recovery section without executing a recovery action", async () => {
+    mount();
+    await inspect();
+    fireEvent.click(
+      native().getByRole("button", { name: "View recovery records" }),
+    );
+    expect(
+      screen.getByRole("region", { name: "Local account recovery" }),
+    ).toHaveFocus();
+    expect(zcodeAccountsApi.archive).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.recapture).not.toHaveBeenCalled();
+    expect(zcodeAccountsApi.openForLogin).not.toHaveBeenCalled();
+  });
+});
+
+describe("ZCode native switch evidence retention", () => {
+  const original = {
+    requestId: "retained-request",
+    target: "opaque-zai",
+    phase: "transactionUncertain" as const,
+    refreshed: false,
+    restartRequested: true,
+  };
+  const native = () =>
+    within(screen.getByRole("region", { name: "Official client" }));
+  const switchButton = () =>
+    within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
+      "button",
+      { name: "Switch to this account" },
+    );
+  it.each(["null", "error"])(
+    "retains the same-source blocker across a deferred reinspection and query %s",
+    async (outcome) => {
+      vi.mocked(zcodeAccountsApi.queryLastOperation).mockResolvedValue(
+        original,
+      );
+      mount();
+      await inspect();
+      let resolve!: (value: typeof context) => void;
+      vi.mocked(zcodeAccountsApi.inspect).mockReturnValueOnce(
+        new Promise((r) => {
+          resolve = r;
+        }),
+      );
+      if (outcome === "null")
+        vi.mocked(zcodeAccountsApi.queryLastOperation).mockResolvedValueOnce(
+          null,
+        );
+      else
+        vi.mocked(zcodeAccountsApi.queryLastOperation).mockRejectedValueOnce(
+          new Error("unknown"),
+        );
+      fireEvent.click(
+        screen.getByRole("button", { name: "Inspect selected source" }),
+      );
+      await waitFor(() =>
+        expect(screen.queryByText(/Inspected:/)).not.toBeInTheDocument(),
+      );
+      await act(async () => resolve(context));
+      await native().findByText(/Unable to refresh the original operation/);
+      expect(switchButton()).toBeDisabled();
+      expect(native().getByText(/retained-request/)).toBeInTheDocument();
+      fireEvent.click(switchButton());
+      expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+    },
+  );
+  it("retains the source-specific blocker when returning to that source", async () => {
+    vi.mocked(zcodeAccountsApi.queryLastOperation).mockResolvedValue(original);
+    mount();
+    await inspect();
+    fireEvent.change(screen.getByLabelText("ZCode data directory"), {
+      target: { value: "/example/other/v2" },
+    });
+    expect(screen.queryByText(/retained-request/)).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("ZCode data directory"), {
+      target: { value: source.dataRoot },
+    });
+    vi.mocked(zcodeAccountsApi.queryLastOperation).mockResolvedValueOnce(null);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Inspect selected source" }),
+    );
+    await native().findByText(/Unable to refresh the original operation/);
+    expect(switchButton()).toBeDisabled();
+    expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+  });
+  it("requires and explains catalog review after an original operation becomes terminal", async () => {
+    vi.mocked(zcodeAccountsApi.queryLastOperation).mockResolvedValue(original);
+    mount();
+    await inspect();
+    vi.mocked(zcodeAccountsApi.queryLastOperation).mockResolvedValue({
+      ...original,
+      phase: "restartVerified",
+    });
+    fireEvent.click(
+      native().getByRole("button", { name: "Query original operation" }),
+    );
+    await native().findByText(/client process reopened/);
+    expect(switchButton()).toBeDisabled();
+    expect(
+      screen.getAllByText(
+        "Refresh account status before reviewing a new switch.",
+      ).length,
+    ).toBeGreaterThan(0);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh account status" }),
+    );
+    await waitFor(() => expect(switchButton()).toBeEnabled());
+    expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+    fireEvent.click(switchButton());
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+  it("retains completed local action evidence across a later explicit refresh failure", async () => {
+    mount();
+    await inspect();
+    fireEvent.click(switchButton());
+    confirm("Switch to this account");
+    const completed = `Switched ${source.dataRoot} locally. Start official ZCode and verify the account there.`;
+    await screen.findByText(completed);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Refresh account status" }),
+      ).toBeEnabled(),
+    );
+    vi.mocked(zcodeAccountsApi.status).mockRejectedValueOnce(
+      new Error("refresh unknown"),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh account status" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Refresh account status" }),
+      ).toBeEnabled(),
+    );
+    expect(screen.getByText(completed)).toBeInTheDocument();
+    expect(zcodeAccountsApi.switch).toHaveBeenCalledTimes(1);
+  });
+  it("keeps duplicate long labels separate by opaque ID and never switches on label click", async () => {
+    const label = "Account".repeat(35);
+    vi.mocked(zcodeAccountsApi.status).mockResolvedValue({
+      ...catalog,
+      profiles: [
+        { ...catalog.profiles[0], id: "first-opaque", label },
+        { ...catalog.profiles[0], id: "second-opaque", label },
+      ],
+    });
+    mount();
+    await inspect();
+    fireEvent.click(screen.getAllByText(label)[1]);
+    expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Switch to this account" })[1],
+    );
+    expect(screen.getByRole("dialog")).toHaveTextContent("second-opaque");
+    confirm("Switch to this account");
+    await waitFor(() =>
+      expect(zcodeAccountsApi.switch).toHaveBeenCalledExactlyOnceWith(
+        source,
+        context.contextRevision,
+        "second-opaque",
+        catalog.revision,
+        expect.any(Function),
+      ),
+    );
+  });
+  it("shows why a missing backend activation grant cannot be clicked", async () => {
+    vi.mocked(zcodeAccountsApi.status).mockResolvedValue({
+      ...catalog,
+      profiles: [
+        {
+          ...catalog.profiles[0],
+          canActivate: false,
+          activationBlockedReason: null,
+        },
+      ],
+    });
+    mount();
+    await inspect();
+    expect(switchButton()).toBeDisabled();
+    expect(
+      screen.getByText(
+        "The backend has not granted native activation for this account.",
+      ),
+    ).toBeInTheDocument();
+    fireEvent.click(switchButton());
+    expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+  });
+});
+
+it("does not reshow the previous operation after a new switch settles while status refresh is delayed", async () => {
+  vi.mocked(zcodeAccountsApi.queryLastOperation).mockResolvedValueOnce({
+    requestId: "previous-operation",
+    target: "old-target",
+    phase: "restartVerified",
+    refreshed: false,
+    restartRequested: true,
+  });
+  mount();
+  await inspect();
+  expect(screen.getByText(/previous-operation/)).toBeInTheDocument();
+  let resolve!: (value: CatalogStatus) => void;
+  vi.mocked(zcodeAccountsApi.status).mockReturnValueOnce(
+    new Promise((r) => {
+      resolve = r;
+    }),
+  );
+  fireEvent.click(
+    within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
+      "button",
+      { name: "Switch to this account" },
+    ),
+  );
+  confirm("Switch to this account");
+  await screen.findByText(
+    `Switched ${source.dataRoot} locally. Start official ZCode and verify the account there.`,
+  );
+  expect(screen.queryByText(/previous-operation/)).not.toBeInTheDocument();
+  expect(
+    screen.queryByText(/Local write committed and client process reopened/),
+  ).not.toBeInTheDocument();
+  await act(async () => resolve(catalog));
+  expect(zcodeAccountsApi.switch).toHaveBeenCalledTimes(1);
+});
+
+it("permits a fresh reviewed switch only after real wrapper verified failed evidence", async () => {
+  const { zcodeAccountsApi: realApi } = await vi.importActual<
+    typeof import("@/lib/api/zcodeAccounts")
+  >("@/lib/api/zcodeAccounts");
+  vi.mocked(zcodeAccountsApi.switch).mockImplementation(realApi.switch);
+  vi.mocked(zcodeAccountsApi.queryLastOperation).mockImplementation(
+    realApi.queryLastOperation,
+  );
+  vi.mocked(zcodeAccountsApi.queryLastOperationState).mockImplementation(
+    realApi.queryLastOperationState,
+  );
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "switch_zcode_saved_account")
+      throw {
+        code: "zcode.account.operation_failed",
+        remedy: "refreshContext",
+        committed: false,
+      };
+    if (command === "get_zcode_switch_operation")
+      return {
+        requestId: (args as { requestId: string }).requestId,
+        target: "opaque-zai",
+        phase: "failed",
+        refreshed: false,
+        restartRequested: false,
+      };
+    throw new Error(`Unexpected fixture command: ${command}`);
+  });
+  mount();
+  await inspect();
+  const switchButton = () =>
+    within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
+      "button",
+      { name: "Switch to this account" },
+    );
+  fireEvent.click(switchButton());
+  confirm("Switch to this account");
+  await screen.findByText(
+    /The original operation ended without a confirmed commit/,
+  );
+  expect(
+    await realApi.queryLastOperation(source, context.contextRevision),
+  ).toBeNull();
+  expect(switchButton()).toBeDisabled();
+  fireEvent.click(
+    screen.getByRole("button", { name: "Refresh account status" }),
+  );
+  await waitFor(() => expect(switchButton()).toBeEnabled());
+  expect(zcodeAccountsApi.switch).toHaveBeenCalledTimes(1);
+  fireEvent.click(switchButton());
+  expect(screen.getByRole("dialog")).toBeInTheDocument();
+  expect(zcodeAccountsApi.switch).toHaveBeenCalledTimes(1);
+  expect(
+    vi
+      .mocked(invoke)
+      .mock.calls.filter(
+        ([command]) => command === "switch_zcode_saved_account",
+      ),
+  ).toHaveLength(1);
+});
+
+it("keeps a real unknown request blocked when reopening finds no operation record", async () => {
+  const { zcodeAccountsApi: realApi } = await vi.importActual<
+    typeof import("@/lib/api/zcodeAccounts")
+  >("@/lib/api/zcodeAccounts");
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "switch_zcode_saved_account") throw {};
+    return null;
+  });
+  await expect(
+    realApi.switch(
+      source,
+      context.contextRevision,
+      "opaque-zai",
+      catalog.revision,
+    ),
+  ).rejects.toMatchObject({ code: "zcode.account.operation_failed" });
+  vi.mocked(zcodeAccountsApi.queryLastOperationState).mockImplementation(
+    realApi.queryLastOperationState,
+  );
+  mount();
+  await inspect();
+  expect(
+    screen.getByText(/Unable to refresh the original operation/),
+  ).toBeInTheDocument();
+  const button = within(
+    screen.getByRole("region", { name: "Z.ai accounts" }),
+  ).getByRole("button", { name: "Switch to this account" });
+  expect(button).toBeDisabled();
+  fireEvent.click(button);
+  expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+  expect(
+    vi
+      .mocked(invoke)
+      .mock.calls.filter(([cmd]) => cmd === "switch_zcode_saved_account"),
+  ).toHaveLength(1);
+});
+
+it.each(["source", "context", "target"])(
+  "does not unlock from confirmed failure metadata bound to another %s",
+  async (mismatch) => {
+    const failure = new ConfirmedSwitchFailure(
+      { code: "zcode.account.operation_failed", committed: false },
+      mismatch === "source" ? { ...source, dataRoot: "/other" } : source,
+      mismatch === "context" ? "other-context" : context.contextRevision,
+      {
+        requestId: "other-request",
+        target: mismatch === "target" ? "other-target" : "opaque-zai",
+        phase: "failed",
+        refreshed: false,
+        restartRequested: false,
+      },
+    );
+    vi.mocked(zcodeAccountsApi.switch).mockRejectedValueOnce(failure);
+    mount();
+    await inspect();
+    const button = () =>
+      within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
+        "button",
+        { name: "Switch to this account" },
+      );
+    fireEvent.click(button());
+    confirm("Switch to this account");
+    await screen.findByText(/Unable to refresh the original operation/);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh account status" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Refresh account status" }),
+      ).toBeEnabled(),
+    );
+    expect(button()).toBeDisabled();
+    expect(zcodeAccountsApi.switch).toHaveBeenCalledTimes(1);
+  },
+);
+
+it.each(["restartVerified", "failed"] as const)(
+  "does not clear unresolved A with a different same-source request B in phase %s",
+  async (phase) => {
+    const operationA = {
+      requestId: "unresolved-A",
+      target: "opaque-zai",
+      phase: "transactionUncertain" as const,
+      refreshed: false,
+      restartRequested: true,
+    };
+    vi.mocked(zcodeAccountsApi.queryLastOperation).mockResolvedValueOnce(
+      operationA,
+    );
+    mount();
+    await inspect();
+    vi.mocked(zcodeAccountsApi.queryLastOperationState).mockResolvedValueOnce({
+      operation: { ...operationA, requestId: "unrelated-B", phase },
+      request: {
+        requestId: "unrelated-B",
+        target: "opaque-zai",
+        contextRevision: context.contextRevision,
+      },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Query original operation" }),
+    );
+    await screen.findByText(
+      "The original request changed. Earlier unresolved evidence is retained; verify the original operation before switching again.",
+    );
+    expect(screen.getByText(/unresolved-A/)).toBeInTheDocument();
+    expect(screen.queryByText(/unrelated-B/)).not.toBeInTheDocument();
+    expect(
+      within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
+        "button",
+        { name: "Switch to this account" },
+      ),
+    ).toBeDisabled();
+    expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+  },
+);
+
+it.each(["absent", "retained"])(
+  "preserves this invocation's verified failed evidence, not an older success, when the next query fails and the pointer is %s",
+  async (pointer) => {
+    vi.mocked(zcodeAccountsApi.queryLastOperation).mockResolvedValueOnce({
+      requestId: "old-completed",
+      target: "opaque-zai",
+      phase: "restartVerified",
+      refreshed: false,
+      restartRequested: true,
+    });
+    mount();
+    await inspect();
+    const failed = {
+      requestId: "new-failed",
+      target: "opaque-zai",
+      phase: "failed" as const,
+      refreshed: false,
+      restartRequested: false,
+    };
+    vi.mocked(zcodeAccountsApi.switch).mockImplementationOnce(
+      async (_source, revision, id, _catalog, onRequest) => {
+        onRequest?.({
+          source: _source,
+          contextRevision: revision,
+          requestId: failed.requestId,
+          target: id,
+        });
+        throw new ConfirmedSwitchFailure(
+          { code: "zcode.account.operation_failed", committed: false },
+          source,
+          context.contextRevision,
+          failed,
+        );
+      },
+    );
+    vi.mocked(zcodeAccountsApi.queryLastOperationState).mockRejectedValueOnce(
+      new Error("status transport unavailable"),
+    );
+    const button = () =>
+      within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
+        "button",
+        { name: "Switch to this account" },
+      );
+    fireEvent.click(button());
+    confirm("Switch to this account");
+    await screen.findByText(/Unable to refresh the original operation/);
+    vi.mocked(zcodeAccountsApi.queryLastOperationState).mockResolvedValue(
+      pointer === "retained"
+        ? {
+            operation: failed,
+            request: {
+              requestId: failed.requestId,
+              target: failed.target,
+              contextRevision: context.contextRevision,
+            },
+          }
+        : { operation: null, request: null },
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh account status" }),
+    );
+    await waitFor(() => expect(button()).toBeEnabled());
+    expect(screen.queryByText(/old-completed/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/The original request changed/),
+    ).not.toBeInTheDocument();
+    expect(zcodeAccountsApi.switch).toHaveBeenCalledTimes(1);
+  },
+);
+
+it.each(["restartVerified", "failed"] as const)(
+  "keeps unknown pointer A blocked after unrelated B %s and refresh",
+  async (phase) => {
+    vi.mocked(zcodeAccountsApi.queryLastOperationState).mockResolvedValue({
+      operation: null,
+      request: {
+        requestId: "unknown-A",
+        target: "opaque-zai",
+        contextRevision: context.contextRevision,
+      },
+    });
+    mount();
+    await inspect();
+    const button = () =>
+      within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
+        "button",
+        { name: "Switch to this account" },
+      );
+    expect(button()).toBeDisabled();
+    vi.mocked(zcodeAccountsApi.queryLastOperationState).mockResolvedValue({
+      operation: {
+        requestId: "unrelated-B",
+        target: "opaque-zai",
+        phase,
+        refreshed: false,
+        restartRequested: true,
+      },
+      request: {
+        requestId: "unrelated-B",
+        target: "opaque-zai",
+        contextRevision: context.contextRevision,
+      },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh account status" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Refresh account status" }),
+      ).toBeEnabled(),
+    );
+    expect(button()).toBeDisabled();
+    expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+  },
+);
+
+it.each(["restartVerified", "failed"] as const)(
+  "real query retains unknown A against B %s",
+  async (phase) => {
+    const { zcodeAccountsApi: realApi } = await vi.importActual<
+      typeof import("@/lib/api/zcodeAccounts")
+    >("@/lib/api/zcodeAccounts");
+    vi.mocked(zcodeAccountsApi.queryLastOperationState).mockImplementation(
+      realApi.queryLastOperationState,
+    );
+    const pointer = (requestId: string) => ({
+      requestId,
+      sourceKey: JSON.stringify([
+        source.installPath,
+        source.dataRoot,
+        source.keyMode,
+      ]),
+      contextRevision: context.contextRevision,
+      target: "opaque-zai",
+      catalogRevision: catalog.revision,
+    });
+    localStorage.setItem(
+      "loongport:zcode-switch-request-v1",
+      JSON.stringify([pointer("unknown-A")]),
+    );
+    vi.mocked(invoke).mockResolvedValue(null);
+    mount();
+    await inspect();
+    const button = () =>
+      within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
+        "button",
+        { name: "Switch to this account" },
+      );
+    expect(button()).toBeDisabled();
+    localStorage.setItem(
+      "loongport:zcode-switch-request-v1",
+      JSON.stringify([pointer("unrelated-B")]),
+    );
+    vi.mocked(invoke).mockResolvedValue({
+      requestId: "unrelated-B",
+      target: "opaque-zai",
+      phase,
+      refreshed: false,
+      restartRequested: true,
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh account status" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Refresh account status" }),
+      ).toBeEnabled(),
+    );
+    expect(button()).toBeDisabled();
+    expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+  },
+);
+
+it.each(["restartVerified", "failed"] as const)(
+  "permits same unknown A once matching terminal %s is returned",
+  async (phase) => {
+    const request = {
+      requestId: "unknown-A",
+      target: "opaque-zai",
+      contextRevision: context.contextRevision,
+    };
+    vi.mocked(zcodeAccountsApi.queryLastOperationState).mockResolvedValue({
+      operation: null,
+      request,
+    });
+    mount();
+    await inspect();
+    const button = () =>
+      within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
+        "button",
+        { name: "Switch to this account" },
+      );
+    expect(button()).toBeDisabled();
+    vi.mocked(zcodeAccountsApi.queryLastOperationState).mockResolvedValue({
+      operation: {
+        requestId: request.requestId,
+        target: request.target,
+        phase,
+        refreshed: false,
+        restartRequested: true,
+      },
+      request,
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh account status" }),
+    );
+    await waitFor(() => expect(button()).toBeEnabled());
+    expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+  },
+);
+
+const originalOperationPhases = [
+  { phase: "accepted" as const, restartRequested: false, terminal: false },
+  { phase: "exited" as const, restartRequested: false, terminal: false },
+  {
+    phase: "transactionUncertain" as const,
+    restartRequested: false,
+    terminal: false,
+  },
+  { phase: "committed" as const, restartRequested: false, terminal: true },
+  { phase: "committed" as const, restartRequested: true, terminal: false },
+  { phase: "restartVerified" as const, restartRequested: true, terminal: true },
+  { phase: "restartFailed" as const, restartRequested: true, terminal: false },
+  { phase: "failed" as const, restartRequested: false, terminal: true },
+];
+const originalOperationMatrix = (["null", "error", "storage"] as const).flatMap(
+  (initial) =>
+    (["same", "request", "target", "source", "deleted"] as const).flatMap(
+      (binding) =>
+        originalOperationPhases.map((p) => ({ initial, binding, ...p })),
+    ),
+);
+it.each(originalOperationMatrix)(
+  "retains original request after $initial -> $binding $phase restart=$restartRequested",
+  async ({ initial, binding, phase, restartRequested, terminal }) => {
+    const { zcodeAccountsApi: realApi } = await vi.importActual<
+      typeof import("@/lib/api/zcodeAccounts")
+    >("@/lib/api/zcodeAccounts");
+    vi.mocked(zcodeAccountsApi.queryLastOperationState).mockImplementation(
+      realApi.queryLastOperationState,
+    );
+    const originalPointer = {
+      requestId: "unknown-A",
+      sourceKey: JSON.stringify([
+        source.installPath,
+        source.dataRoot,
+        source.keyMode,
+      ]),
+      contextRevision: context.contextRevision,
+      target: "opaque-zai",
+      catalogRevision: catalog.revision,
+    };
+    localStorage.setItem(
+      "loongport:zcode-switch-request-v1",
+      initial === "storage" ? "{" : JSON.stringify([originalPointer]),
+    );
+    if (initial === "error")
+      vi.mocked(invoke).mockRejectedValue(new Error("read unavailable"));
+    else vi.mocked(invoke).mockResolvedValue(null);
+    mount();
+    await inspect();
+    const button = () =>
+      within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
+        "button",
+        { name: "Switch to this account" },
+      );
+    expect(button()).toBeDisabled();
+    const nextPointer = {
+      ...originalPointer,
+      ...(binding === "request" ? { requestId: "other-B" } : {}),
+      ...(binding === "target" ? { target: "other-target" } : {}),
+      ...(binding === "source"
+        ? {
+            sourceKey: JSON.stringify([
+              source.installPath,
+              "/other/v2",
+              source.keyMode,
+            ]),
+          }
+        : {}),
+    };
+    localStorage.setItem(
+      "loongport:zcode-switch-request-v1",
+      JSON.stringify(binding === "deleted" ? [] : [nextPointer]),
+    );
+    vi.mocked(invoke).mockResolvedValue({
+      requestId: nextPointer.requestId,
+      target: nextPointer.target,
+      phase,
+      refreshed: false,
+      restartRequested,
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh account status" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Refresh account status" }),
+      ).toBeEnabled(),
+    );
+    if (
+      initial !== "storage" &&
+      ["same", "source", "deleted"].includes(binding) &&
+      terminal
+    )
+      expect(button()).toBeEnabled();
+    else expect(button()).toBeDisabled();
+    expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+    if (initial !== "storage")
+      expect(
+        vi
+          .mocked(invoke)
+          .mock.calls.every(
+            ([, args]) =>
+              (args as { requestId: string }).requestId ===
+              originalPointer.requestId,
+          ),
+      ).toBe(true);
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.every(
+          ([command]) => command === "get_zcode_switch_operation",
+        ),
+    ).toBe(true);
+  },
+);
+
+it.each(["null", "error", "storage"] as const)(
+  "retains original %s evidence after visiting a different source and returning",
+  async (initial) => {
+    const { zcodeAccountsApi: realApi } = await vi.importActual<
+      typeof import("@/lib/api/zcodeAccounts")
+    >("@/lib/api/zcodeAccounts");
+    vi.mocked(zcodeAccountsApi.queryLastOperationState).mockImplementation(
+      realApi.queryLastOperationState,
+    );
+    const pointer = {
+      requestId: "original-A",
+      target: "opaque-zai",
+      sourceKey: JSON.stringify([
+        source.installPath,
+        source.dataRoot,
+        source.keyMode,
+      ]),
+      contextRevision: context.contextRevision,
+      catalogRevision: catalog.revision,
+    };
+    localStorage.setItem(
+      "loongport:zcode-switch-request-v1",
+      initial === "storage" ? "{" : JSON.stringify([pointer]),
+    );
+    if (initial === "error")
+      vi.mocked(invoke).mockRejectedValue(new Error("query unavailable"));
+    else vi.mocked(invoke).mockResolvedValue(null);
+    mount();
+    await inspect();
+    const button = () =>
+      within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
+        "button",
+        { name: "Switch to this account" },
+      );
+    expect(button()).toBeDisabled();
+    localStorage.setItem(
+      "loongport:zcode-switch-request-v1",
+      JSON.stringify([{ ...pointer, requestId: "replacement-B" }]),
+    );
+    fireEvent.change(screen.getByLabelText("ZCode data directory"), {
+      target: { value: "/example/other/v2" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Inspect selected source" }),
+    );
+    await waitFor(() => expect(button()).toBeEnabled());
+    fireEvent.change(screen.getByLabelText("ZCode data directory"), {
+      target: { value: source.dataRoot },
+    });
+    vi.mocked(invoke).mockResolvedValue({
+      requestId: "replacement-B",
+      target: pointer.target,
+      phase: "restartVerified",
+      refreshed: false,
+      restartRequested: true,
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Inspect selected source" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Inspect selected source" }),
+      ).toBeEnabled(),
+    );
+    expect(button()).toBeDisabled();
+    expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.every(
+          ([command]) => command === "get_zcode_switch_operation",
+        ),
+    ).toBe(true);
+  },
+);
+
+it.each(
+  (["replaced", "deleted"] as const).flatMap((change) =>
+    (["lost", "success"] as const).map((outcome) => ({ change, outcome })),
+  ),
+)(
+  "keeps actual dispatched A bound after $outcome when its pointer is $change",
+  async ({ change, outcome }) => {
+    const { zcodeAccountsApi: realApi } = await vi.importActual<
+      typeof import("@/lib/api/zcodeAccounts")
+    >("@/lib/api/zcodeAccounts");
+    vi.mocked(zcodeAccountsApi.switch).mockImplementation(realApi.switch);
+    vi.mocked(zcodeAccountsApi.queryLastOperationState).mockImplementation(
+      realApi.queryLastOperationState,
+    );
+    let reject!: (error: unknown) => void;
+    let resolve!: (result: "switched") => void;
+    let originalId = "";
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      const requestId = (args as { requestId: string }).requestId;
+      if (command === "switch_zcode_saved_account") {
+        originalId = requestId;
+        return new Promise((done, fail) => {
+          resolve = done;
+          reject = fail;
+        });
+      }
+      expect(command).toBe("get_zcode_switch_operation");
+      return {
+        requestId,
+        target: "opaque-zai",
+        phase:
+          requestId === originalId ? "transactionUncertain" : "restartVerified",
+        refreshed: false,
+        restartRequested: true,
+      };
+    });
+    mount();
+    await inspect();
+    const button = () =>
+      within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
+        "button",
+        { name: "Switch to this account" },
+      );
+    fireEvent.click(button());
+    confirm("Switch to this account");
+    await waitFor(() => expect(originalId).not.toBe(""));
+    const replacement = {
+      requestId: "unrelated-B",
+      sourceKey: JSON.stringify([
+        source.installPath,
+        source.dataRoot,
+        source.keyMode,
+      ]),
+      contextRevision: context.contextRevision,
+      target: "opaque-zai",
+      catalogRevision: catalog.revision,
+    };
+    localStorage.setItem(
+      "loongport:zcode-switch-request-v1",
+      JSON.stringify(change === "deleted" ? [] : [replacement]),
+    );
+    await act(async () =>
+      outcome === "lost"
+        ? reject(new Error("reply unavailable"))
+        : resolve("switched"),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Refresh account status" }),
+      ).toBeEnabled(),
+    );
+    localStorage.setItem(
+      "loongport:zcode-switch-request-v1",
+      JSON.stringify([replacement]),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh account status" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Refresh account status" }),
+      ).toBeEnabled(),
+    );
+    expect(button()).toBeDisabled();
+    expect(
+      screen.queryByText(/Original request: unrelated-B/),
+    ).not.toBeInTheDocument();
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.filter(
+          ([command]) => command === "switch_zcode_saved_account",
+        ),
+    ).toHaveLength(1);
+  },
+);
+
+it("retains previous A when its preflight read fails and latest becomes B", async () => {
+  const { zcodeAccountsApi: realApi } = await vi.importActual<
+    typeof import("@/lib/api/zcodeAccounts")
+  >("@/lib/api/zcodeAccounts");
+  vi.mocked(zcodeAccountsApi.switch).mockImplementation(realApi.switch);
+  vi.mocked(zcodeAccountsApi.queryLastOperationState).mockImplementation(
+    realApi.queryLastOperationState,
+  );
+  const pointer = (requestId: string) => ({
+    requestId,
+    sourceKey: JSON.stringify([
+      source.installPath,
+      source.dataRoot,
+      source.keyMode,
+    ]),
+    contextRevision: context.contextRevision,
+    target: "opaque-zai",
+    catalogRevision: catalog.revision,
+  });
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command !== "get_zcode_switch_operation")
+      throw new Error("Must not dispatch a write");
+    if ((args as { requestId: string }).requestId === "previous-A") {
+      localStorage.setItem(
+        "loongport:zcode-switch-request-v1",
+        JSON.stringify([pointer("unrelated-B")]),
+      );
+      throw new Error("A preflight unreadable");
+    }
+    return {
+      requestId: "unrelated-B",
+      target: "opaque-zai",
+      phase: "restartVerified",
+      refreshed: false,
+      restartRequested: true,
+    };
+  });
+  mount();
+  await inspect();
+  const button = () =>
+    within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
+      "button",
+      { name: "Switch to this account" },
+    );
+  fireEvent.click(button());
+  localStorage.setItem(
+    "loongport:zcode-switch-request-v1",
+    JSON.stringify([pointer("previous-A")]),
+  );
+  confirm("Switch to this account");
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Refresh account status" }),
+    ).toBeEnabled(),
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "Refresh account status" }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Refresh account status" }),
+    ).toBeEnabled(),
+  );
+  expect(button()).toBeDisabled();
+  expect(
+    vi
+      .mocked(invoke)
+      .mock.calls.every(
+        ([command]) => command === "get_zcode_switch_operation",
+      ),
+  ).toBe(true);
+});
+
+it.each(
+  (["replaced", "deleted"] as const).flatMap((change) =>
+    (["failed", "restartVerified"] as const).map((phase) => ({
+      change,
+      phase,
+    })),
+  ),
+)(
+  "queries captured dispatch A to its true $phase after its pointer is $change",
+  async ({ change, phase }) => {
+    const { zcodeAccountsApi: realApi } = await vi.importActual<
+      typeof import("@/lib/api/zcodeAccounts")
+    >("@/lib/api/zcodeAccounts");
+    vi.mocked(zcodeAccountsApi.switch).mockImplementation(realApi.switch);
+    vi.mocked(zcodeAccountsApi.queryLastOperationState).mockImplementation(
+      realApi.queryLastOperationState,
+    );
+    let originalId = "";
+    let settled = false;
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      const requestId = (args as { requestId: string }).requestId;
+      if (command === "switch_zcode_saved_account") {
+        originalId = requestId;
+        localStorage.setItem(
+          "loongport:zcode-switch-request-v1",
+          JSON.stringify(
+            change === "deleted"
+              ? []
+              : [
+                  {
+                    requestId: "unrelated-B",
+                    target: "opaque-zai",
+                    sourceKey: JSON.stringify([
+                      source.installPath,
+                      source.dataRoot,
+                      source.keyMode,
+                    ]),
+                    contextRevision: context.contextRevision,
+                    catalogRevision: catalog.revision,
+                  },
+                ],
+          ),
+        );
+        throw {};
+      }
+      expect(command).toBe("get_zcode_switch_operation");
+      return settled
+        ? {
+            requestId,
+            target: "opaque-zai",
+            phase,
+            refreshed: false,
+            restartRequested: true,
+          }
+        : null;
+    });
+    mount();
+    await inspect();
+    const button = () =>
+      within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
+        "button",
+        { name: "Switch to this account" },
+      );
+    fireEvent.click(button());
+    confirm("Switch to this account");
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Refresh account status" }),
+      ).toBeEnabled(),
+    );
+    expect(button()).toBeDisabled();
+    settled = true;
+    vi.mocked(invoke).mockClear();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Query original operation" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Query original operation" }),
+      ).toBeEnabled(),
+    );
+    expect(invoke).toHaveBeenCalledExactlyOnceWith(
+      "get_zcode_switch_operation",
+      {
+        source,
+        contextRevision: context.contextRevision,
+        requestId: originalId,
+      },
+    );
+    expect(button()).toBeDisabled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh account status" }),
+    );
+    await waitFor(() => expect(button()).toBeEnabled());
+    expect(zcodeAccountsApi.switch).toHaveBeenCalledTimes(1);
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.every(
+          ([command]) => command === "get_zcode_switch_operation",
+        ),
+    ).toBe(true);
+  },
+);
+
+it.each(["replaced", "deleted"] as const)(
+  "shows this invocation's verified failure when its pointer was %s, not a different success",
+  async (change) => {
+    const { zcodeAccountsApi: realApi } = await vi.importActual<
+      typeof import("@/lib/api/zcodeAccounts")
+    >("@/lib/api/zcodeAccounts");
+    vi.mocked(zcodeAccountsApi.switch).mockImplementation(realApi.switch);
+    vi.mocked(zcodeAccountsApi.queryLastOperationState).mockImplementation(
+      realApi.queryLastOperationState,
+    );
+    let originalId = "";
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      const requestId = (args as { requestId: string }).requestId;
+      if (command === "switch_zcode_saved_account") {
+        originalId = requestId;
+        localStorage.setItem(
+          "loongport:zcode-switch-request-v1",
+          JSON.stringify(
+            change === "deleted"
+              ? []
+              : [
+                  {
+                    requestId: "unrelated-B",
+                    target: "opaque-zai",
+                    sourceKey: JSON.stringify([
+                      source.installPath,
+                      source.dataRoot,
+                      source.keyMode,
+                    ]),
+                    contextRevision: context.contextRevision,
+                    catalogRevision: catalog.revision,
+                  },
+                ],
+          ),
+        );
+        throw {};
+      }
+      return {
+        requestId,
+        target: "opaque-zai",
+        phase: requestId === originalId ? "failed" : "restartVerified",
+        refreshed: false,
+        restartRequested: true,
+      };
+    });
+    mount();
+    await inspect();
+    fireEvent.click(
+      within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
+        "button",
+        { name: "Switch to this account" },
+      ),
+    );
+    confirm("Switch to this account");
+    await screen.findByText(
+      /The original operation ended without a confirmed commit/,
+    );
+    expect(screen.queryByText(/unrelated-B/)).not.toBeInTheDocument();
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.every(
+          ([, args]) =>
+            (args as { requestId: string }).requestId === originalId,
+        ),
+    ).toBe(true);
+    expect(zcodeAccountsApi.switch).toHaveBeenCalledTimes(1);
+  },
+);
+
+it.each(["success", "error"] as const)(
+  "does not infer a dispatch identity from latest state after an unobserved %s",
+  async (outcome) => {
+    if (outcome === "success")
+      vi.mocked(zcodeAccountsApi.switch).mockResolvedValueOnce("switched");
+    else
+      vi.mocked(zcodeAccountsApi.switch).mockRejectedValueOnce(
+        new Error("unbound"),
+      );
+    mount();
+    await inspect();
+    vi.mocked(zcodeAccountsApi.queryLastOperationState).mockResolvedValue({
+      operation: {
+        requestId: "unrelated-B",
+        target: "opaque-zai",
+        phase: "restartVerified",
+        refreshed: false,
+        restartRequested: true,
+      },
+      request: {
+        requestId: "unrelated-B",
+        target: "opaque-zai",
+        contextRevision: context.contextRevision,
+      },
+    });
+    const button = () =>
+      within(screen.getByRole("region", { name: "Z.ai accounts" })).getByRole(
+        "button",
+        { name: "Switch to this account" },
+      );
+    fireEvent.click(button());
+    confirm("Switch to this account");
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Refresh account status" }),
+      ).toBeEnabled(),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh account status" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Refresh account status" }),
+      ).toBeEnabled(),
+    );
+    expect(button()).toBeDisabled();
+    expect(screen.queryByText(/unrelated-B/)).not.toBeInTheDocument();
+    expect(zcodeAccountsApi.switch).toHaveBeenCalledTimes(1);
+  },
+);
