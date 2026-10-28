@@ -24,6 +24,19 @@ const progress: LoginProgress = {
 };
 
 describe("ZCode official login IPC", () => {
+  it("passes the selected device identity to the official login owner", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(progress);
+    const device = "11111111-2222-4333-8444-555555555555";
+    await zcodeLoginApi.begin("bigmodel", "/synthetic/library", device);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith(
+      "begin_zcode_official_login",
+      {
+        family: "bigmodel",
+        dataRoot: "/synthetic/library",
+        deviceMid: device,
+      },
+    );
+  });
   it.each([
     "oauth_init_unavailable",
     "oauth_poll_unavailable",

@@ -135,6 +135,7 @@ export interface SavedAccount {
   sourceVerified: boolean;
   identitySource: "nativeCapture" | "officialLogin" | "packageDeclared" | null;
   officialLabel: string | null;
+  deviceMid?: string | null;
   capabilities: SessionCheckDisplay | null;
   canActivate: boolean;
   activationBlockedReason: AccountError | null;
@@ -500,6 +501,10 @@ export const accountErrorText = {
     "Recovery storage is full. Confirm or recapture an older record, then permanently clean up that selected record.",
   resource_limit:
     "The local account store reached its limit. Review local recovery and saved data before continuing.",
+  device_taken:
+    "This device ID is already bound to another account. Start sign-in again with a different device ID.",
+  device_mismatch:
+    "This account has a different device ID. Start sign-in again and select its existing device ID or explicitly choose a new one.",
   recovery_unconfirmed:
     "This recovery record is not confirmed and cannot be deleted. Confirm or explicitly recapture it first.",
   recovery_changed:
@@ -698,6 +703,7 @@ function publicCatalog(result: CatalogStatus): CatalogStatus {
       sourceVerified: profile.sourceVerified === true,
       identitySource: profile.identitySource ?? null,
       officialLabel: profile.officialLabel ?? null,
+      deviceMid: profile.deviceMid ?? null,
       capabilities: profile.capabilities
         ? publicCapabilities(profile.capabilities)
         : null,

@@ -175,6 +175,7 @@ struct Prepared {
     storage: crate::secrets::storage::StorageIdentity,
     jwt: StartJwt,
     version: String,
+    device_mid: Option<String>,
 }
 async fn prepare(
     db: Arc<Database>,
@@ -186,6 +187,8 @@ async fn prepare(
             #[cfg(feature = "test-hooks")]
             test_support::prepared(&id);
             let ctx = context(root.as_deref())?;
+            let fallback_device =
+                super::device_settings::current(db, &ctx).map_err(|_| "unavailable")?;
             let vault = db.secret_session().read().map_err(|_| "locked")?;
             let store = VaultAccountStore::new(db.secret_session().root(), &vault)
                 .map_err(|_| "unavailable")?;
@@ -200,6 +203,10 @@ async fn prepare(
                 .ok_or("changed")?;
             let jwt =
                 super::session_checks::claim_jwt(&native, snapshot).map_err(|_| "loginExpired")?;
+            let device_mid = catalog
+                .details(snapshot, &native)
+                .device_mid
+                .or(fallback_device);
             #[cfg(not(feature = "test-hooks"))]
             let version = super::native_context::library_app_version(ctx.data_root())
                 .ok_or("appVersionUnknown")?;
@@ -218,6 +225,7 @@ async fn prepare(
                 storage: vault.identity(),
                 jwt,
                 version,
+                device_mid,
             })
         })();
         Ok(result)
@@ -393,12 +401,11 @@ async fn one(
     preview_only: bool,
     automatic: bool,
 ) -> Result<(), &'static str> {
-    let device_mid = super::device_settings::current(&db, &p.ctx)?;
     let client = Client(
         Http::new()
             .map_err(|_| "network")?
             .with_data_root(p.ctx.data_root())
-            .with_device_mid(device_mid.as_deref()),
+            .with_device_mid(p.device_mid.as_deref()),
     );
     let checked = || check(&db, p, lease, automatic);
     let mut r = previous(db.clone(), p).await?;
@@ -1040,6 +1047,7 @@ mod tests {
             storage,
             jwt: StartJwt::new("synthetic-jwt").unwrap(),
             version: "3.11.2".into(),
+            device_mid: None,
         };
         let owner = Jobs::default();
         let lease = owner.begin().unwrap();

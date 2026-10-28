@@ -123,10 +123,11 @@ export const zcodeLoginApi = {
       throw { ...safeAccountError(cause), remedy: "queryOriginal" };
     }
   },
-  begin: (family: LoginFamily, dataRoot?: string) =>
+  begin: (family: LoginFamily, dataRoot?: string, deviceMid?: string) =>
     call("begin_zcode_official_login", {
       family,
       ...(dataRoot === undefined ? {} : { dataRoot }),
+      ...(deviceMid === undefined ? {} : { deviceMid }),
     }),
   progress: (flowId: string) => call("get_zcode_login_progress", { flowId }),
   confirmKey: (flowId: string, organizationId: string, projectId: string) =>

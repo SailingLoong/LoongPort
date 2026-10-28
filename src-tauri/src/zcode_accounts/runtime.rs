@@ -962,62 +962,77 @@ pub(super) async fn check_library_bundle(
         return Err(TransactionError::NotAdmitted.into());
     }
     let id = preview_id.clone();
-    let (context, lease, guard, app_version) = run_owned(Arc::clone(&db), move |db| {
-        let (binding, context) = {
-            let mut reviews = import_reviews()
+    let (context, lease, guard, app_version, bound_devices) =
+        run_owned(Arc::clone(&db), move |db| {
+            let (binding, context) = {
+                let mut reviews = import_reviews()
+                    .lock()
+                    .map_err(|_| RuntimeError::TaskFailed)?;
+                let now = std::time::Instant::now();
+                (
+                    reviews
+                        .review_binding(&id, now)
+                        .ok_or(TransactionError::SourceChanged)?,
+                    reviews
+                        .review_context(&id, now)
+                        .ok_or(TransactionError::SourceChanged)?,
+                )
+            };
+            require_library_binding(db, &context, &binding)?;
+            let session = db.secret_session();
+            let vault = session.read().map_err(|_| RuntimeError::VaultUnavailable)?;
+            let native = context.cipher()?;
+            let catalog = VaultAccountStore::new(session.root(), &vault)?
+                .import_catalog(&native, &binding.catalog_revision)?;
+            let lease = import_reviews()
                 .lock()
-                .map_err(|_| RuntimeError::TaskFailed)?;
-            let now = std::time::Instant::now();
-            (
-                reviews
-                    .review_binding(&id, now)
-                    .ok_or(TransactionError::SourceChanged)?,
-                reviews
-                    .review_context(&id, now)
-                    .ok_or(TransactionError::SourceChanged)?,
-            )
-        };
-        require_library_binding(db, &context, &binding)?;
-        let session = db.secret_session();
-        let vault = session.read().map_err(|_| RuntimeError::VaultUnavailable)?;
-        VaultAccountStore::new(session.root(), &vault)?
-            .import_catalog(&context.cipher()?, &binding.catalog_revision)?;
-        let lease = import_reviews()
-            .lock()
-            .map_err(|_| RuntimeError::TaskFailed)?
-            .begin_check(&id, &binding, selected, std::time::Instant::now())
-            .map_err(|_| TransactionError::SourceChanged)?;
-        let guard = BundleCheckGuard {
-            preview_id: lease.preview_id.clone(),
-            generation: lease.generation,
-        };
-        let app_version = super::native_context::library_app_version(context.data_root());
-        Ok((context, lease, guard, app_version))
-    })
-    .await?;
+                .map_err(|_| RuntimeError::TaskFailed)?
+                .begin_check(&id, &binding, selected, std::time::Instant::now())
+                .map_err(|_| TransactionError::SourceChanged)?;
+            let guard = BundleCheckGuard {
+                preview_id: lease.preview_id.clone(),
+                generation: lease.generation,
+            };
+            let app_version = super::native_context::library_app_version(context.data_root());
+            let mut bound_devices = std::collections::BTreeMap::new();
+            for (index, candidate) in &lease.accounts {
+                if let Some(saved) = catalog.get(candidate.identity()) {
+                    if let Some(device) = catalog.details(saved, &native).device_mid {
+                        bound_devices.insert(*index, device);
+                    }
+                }
+            }
+            Ok((context, lease, guard, app_version, bound_devices))
+        })
+        .await?;
     let worker_db = Arc::clone(&db);
     tokio::spawn(async move {
         let _guard = guard;
         let Ok(native) = context.cipher() else {
             return;
         };
-        let Ok(transport) = super::official_http::ReqwestOfficialTransport::new() else {
-            return;
-        };
         let Ok(device_mid) = super::device_settings::current(&worker_db, &context) else {
             return;
         };
-        let client = super::official::OfficialClient::new(
-            transport
-                .with_context(context.data_root(), app_version.as_deref())
-                .with_device_mid(device_mid.as_deref()),
-        );
         let check = || {
             lease.check()?;
             require_library_binding(&worker_db, &context, &lease.binding)
                 .map_err(|_| super::official::OfficialError::Cancelled)
         };
         for (index, snapshot) in &lease.accounts {
+            let Ok(transport) = super::official_http::ReqwestOfficialTransport::new() else {
+                return;
+            };
+            let client = super::official::OfficialClient::new(
+                transport
+                    .with_context(context.data_root(), app_version.as_deref())
+                    .with_device_mid(
+                        bound_devices
+                            .get(index)
+                            .map(String::as_str)
+                            .or(device_mid.as_deref()),
+                    ),
+            );
             let report = match super::session_checks::check_session(
                 &client,
                 &native,
@@ -1170,7 +1185,7 @@ pub(super) async fn check_saved_connections(
     let lease = connection_requests()
         .begin(request_id, std::time::Instant::now())
         .map_err(|_| RuntimeError::TaskFailed)?;
-    let (context, bound, snapshot, version) = run_owned(Arc::clone(&db), move |db| {
+    let (context, bound, snapshot, version, bound_device) = run_owned(Arc::clone(&db), move |db| {
         let context = super::native_context::library_context(data_root.as_deref())?;
         let bound = library_binding(db, &context, revision.clone())?;
         let session = db.secret_session();
@@ -1183,7 +1198,8 @@ pub(super) async fn check_saved_connections(
             .ok_or(TransactionError::SourceChanged)?
             .clone();
         let version = super::native_context::library_app_version(context.data_root());
-        Ok((context, bound, snapshot, version))
+        let bound_device = catalog.details(&snapshot, &context.cipher()?).device_mid;
+        Ok((context, bound, snapshot, version, bound_device))
     })
     .await?;
     lease
@@ -1196,8 +1212,12 @@ pub(super) async fn check_saved_connections(
         ))
         .map_err(|_| RuntimeError::TaskFailed)?;
     let native = context.cipher()?;
-    let device_mid =
-        super::device_settings::current(&db, &context).map_err(|_| RuntimeError::TaskFailed)?;
+    let device_mid = match bound_device {
+        Some(id) => Some(id),
+        None => {
+            super::device_settings::current(&db, &context).map_err(|_| RuntimeError::TaskFailed)?
+        }
+    };
     let client = super::official::OfficialClient::new(
         super::official_http::ReqwestOfficialTransport::new()
             .map_err(|_| RuntimeError::TaskFailed)?
