@@ -1,4 +1,5 @@
 //! Same-machine native auth snapshot core. No IO, process, IPC, or token conversion.
+use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::Value;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -225,14 +226,29 @@ fn text(v: &Value) -> Option<&str> {
     v.as_str()
         .filter(|s| !s.trim().is_empty() && !s.chars().any(char::is_control))
 }
-// Presence/admission only, NOT a validity or decryptability check. Upstream
-// identifies opaque envelopes by marker-key presence; marker value and envelope
-// internals have no independently verified crypto contract here. Capture never
-// grants activation readiness, and retains the original object without rewriting.
+// Presence only, NOT validity, decryptability, or activation readiness. Preserve
+// the legacy upstream object-envelope admission without interpreting its crypto.
+// WorkBuddy 5.9.3 additionally uses exact standard/asym-v1 wrappers containing
+// canonical base64. Only that outer format is checked; original bytes are kept.
 fn native_access_present(v: &Value) -> bool {
     text(v).is_some()
         || v.as_object().is_some_and(|o| {
-            o.contains_key("$wbEncrypted") && o.get("envelope").is_some_and(Value::is_object)
+            if o.contains_key("$wbEncrypted") && o.get("envelope").is_some_and(Value::is_object) {
+                return true;
+            }
+            if o.get("$wbEncrypted").and_then(Value::as_u64) != Some(1)
+                || !(o.len() == 2
+                    || (o.len() == 3 && o.get("scheme").and_then(Value::as_str) == Some("asym-v1")))
+            {
+                return false;
+            }
+            let Some(envelope) = o.get("envelope").and_then(Value::as_str) else {
+                return false;
+            };
+            let Ok(decoded) = STANDARD.decode(envelope).map(Zeroizing::new) else {
+                return false;
+            };
+            !decoded.is_empty() && STANDARD.encode(decoded.as_slice()) == envelope
         })
 }
 
@@ -689,5 +705,44 @@ mod tests {
         assert!(matches!(prepare(&a, &b), Err(NativeError::OutputTooLarge)));
         assert_eq!(a.bytes.as_slice(), before_a);
         assert_eq!(b.bytes.as_slice(), before_b);
+    }
+    #[test]
+    fn official_593_string_envelopes_are_opaque_and_preserve_exact_bytes() {
+        for wrapper in [
+            r#"{"$wbEncrypted":1,"envelope":"b3BhcXVlLWNpcGhlcnRleHQ="}"#,
+            r#"{"$wbEncrypted":1,"scheme":"asym-v1","envelope":"b3BhcXVlLWNpcGhlcnRleHQ="}"#,
+        ] {
+            // Synthetic bytes test format presence only, NOT a valid crypto envelope.
+            let bytes = String::from_utf8(A.to_vec())
+                .unwrap()
+                .replace("\"synthetic-access\"", wrapper);
+            let snapshot = capture(bytes.as_bytes(), &context()).unwrap();
+            assert_eq!(snapshot.bytes.as_slice(), bytes.as_bytes());
+            assert_eq!(observe(bytes.as_bytes()).unwrap(), "www.workbuddy.cn");
+        }
+    }
+    #[test]
+    fn official_string_wrapper_rejects_noncanonical_or_unknown_shapes() {
+        for wrapper in [
+            r#"{"$wbEncrypted":0,"envelope":"YQ=="}"#,
+            r#"{"$wbEncrypted":true,"envelope":"YQ=="}"#,
+            r#"{"$wbEncrypted":null,"envelope":"YQ=="}"#,
+            r#"{"$wbEncrypted":1,"envelope":""}"#,
+            r#"{"$wbEncrypted":1,"envelope":" "}"#,
+            r#"{"$wbEncrypted":1,"envelope":"YQ"}"#,
+            r#"{"$wbEncrypted":1,"envelope":"YR=="}"#,
+            r#"{"$wbEncrypted":1,"envelope":"YQ==\n"}"#,
+            r#"{"$wbEncrypted":1,"envelope":"-w=="}"#,
+            r#"{"$wbEncrypted":1,"envelope":"YQ==","extra":"unknown"}"#,
+            r#"{"$wbEncrypted":1,"scheme":"unknown","envelope":"YQ=="}"#,
+            r#"{"$wbEncrypted":1,"scheme":null,"envelope":"YQ=="}"#,
+            r#"{"$wbEncrypted":1,"scheme":"asym-v1","envelope":"YQ==","extra":true}"#,
+        ] {
+            let bytes = String::from_utf8(A.to_vec())
+                .unwrap()
+                .replace("\"synthetic-access\"", wrapper);
+            assert!(capture(bytes.as_bytes(), &context()).is_err());
+            assert!(observe(bytes.as_bytes()).is_err());
+        }
     }
 }
