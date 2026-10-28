@@ -435,7 +435,7 @@ pub(super) async fn prepare(
             discovery_revision,
             selections,
         } => {
-            let journal = Journal::new(&state, &operation_id)?;
+            let journal = Journal::new(state, &operation_id)?;
             if let Some(receipt) = journal.with(|conn| ledger::read_on(conn, &operation_id))? {
                 validate_repeat_start(&receipt, relay_id, &discovery_revision, &selections)
                     .map_err(setup_error)?;
@@ -495,12 +495,12 @@ pub(super) async fn prepare(
             expected_receipt_revision,
             apps,
         } => {
-            let journal = Journal::new(&state, &operation_id)?;
+            let journal = Journal::new(state, &operation_id)?;
             let prior = journal.receipt()?;
-            let account = read_account(&state, prior.relay_id)?;
+            let account = read_account(state, prior.relay_id)?;
             let lock = provision::relay_provision_lock(&account)?;
             let _guard = lock.lock().await;
-            let fresh = read_account(&state, account.id)?;
+            let fresh = read_account(state, account.id)?;
             if account_identity(&fresh)? != account_identity(&account)? {
                 return Err(setup_error("accountChanged").into());
             }
@@ -511,7 +511,7 @@ pub(super) async fn prepare(
             }
             let selections =
                 validate_resume(&receipt, expected_receipt_revision, &apps).map_err(setup_error)?;
-            let discovered = discover(&state, &account, fallback.clone()).await?;
+            let discovered = discover(state, &account, fallback.clone()).await?;
             if selections.iter().any(|s| {
                 !discovered
                     .choices
