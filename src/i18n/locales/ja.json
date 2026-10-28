@@ -1454,6 +1454,21 @@
     "enterpriseDomainPlaceholder": "例: company.ghe.com"
   },
   "codexOauth": {
+    "nativeSwitchEntry": {
+      "title": "Codex 公式クライアント",
+      "boundary": "このページからネイティブアカウントを直接切り替えることはできません。「デフォルトに設定」は LoongPort の管理対象認証の既定アカウントだけを変更し、公式クライアントのアカウントは切り替えません。",
+      "reauth": "このアカウントを使用する前に再認証が必要です。アプリページへの移動では認証は更新されません。",
+      "loading": "紐付けられた Codex 設定を読み込み中…",
+      "readError": "紐付けられた設定を読み取れませんでした。この読み取り操作ではアカウントは切り替わりません。",
+      "retry": "設定を再読み込み",
+      "linkedTitle": "紐付けられた Codex 公式設定",
+      "selectedConfiguration": "アプリで選択中の設定",
+      "empty": "このアカウントに明示的に紐付けられた Codex 公式設定は見つかりませんでした。",
+      "nativeSwitch": "公式クライアントのアカウントを切り替え",
+      "openApp": "Codex アプリページへ",
+      "navigationUnavailable": "この画面にはアプリページへの移動機能がありません。",
+      "hint": "LoongPort の Codex アプリページで対応する設定を選び、既存の切り替え確認に従ってください。設定の状態はクライアントのオンライン上の認証状態を示すものではありません。"
+    },
     "authStatus": "認証状態",
     "notAuthenticated": "未認証",
     "loginWithChatGPT": "ChatGPT でログイン",

@@ -261,7 +261,7 @@ export function ServicesPage(props: ServicesPageProps) {
   }, [viewActive, active]);
   return (
     <AccountApplicationNavigation.Provider
-      value={() => props.onOpenApp(props.appId)}
+      value={(targetApp = props.appId) => props.onOpenApp(targetApp)}
     >
       <Tabs
         value={section}
