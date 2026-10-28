@@ -180,6 +180,73 @@ describe("ZCode official login dialog", () => {
     );
   });
 
+  it("disables occupied IDs including the current environment", async () => {
+    const used = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const free = "11111111-2222-4333-8444-555555555555";
+    vi.mocked(zcodeDeviceApi.state).mockResolvedValue({
+      devices: [used, free],
+      selectedDeviceMid: used,
+      effectiveDeviceMid: used.toUpperCase(),
+      restartRequired: false,
+      revision: 1,
+    });
+    render(
+      <ZCodeOAuthAdd
+        open
+        onClose={vi.fn()}
+        onSaved={vi.fn(async () => {})}
+        boundDeviceMids={[used]}
+      />,
+    );
+    const selector = await screen.findByRole("combobox", {
+      name: "Account device ID",
+    });
+    expect(
+      screen.getByRole("button", { name: "Continue official sign-in" }),
+    ).toBeDisabled();
+    fireEvent.keyDown(selector, { key: "ArrowDown" });
+    expect(
+      await screen.findByRole("option", { name: `${used} · Bound` }),
+    ).toHaveAttribute("aria-disabled", "true");
+    expect(
+      screen.getByRole("option", { name: "Use current environment" }),
+    ).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(screen.getByRole("option", { name: free }));
+    await begin();
+    expect(zcodeLoginApi.begin).toHaveBeenCalledWith(
+      "bigmodel",
+      undefined,
+      free,
+    );
+  });
+
+  it("explains why sign-in is unavailable when only the occupied default exists", async () => {
+    const used = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    vi.mocked(zcodeDeviceApi.state).mockResolvedValue({
+      devices: [],
+      selectedDeviceMid: null,
+      effectiveDeviceMid: used,
+      restartRequired: false,
+      revision: 1,
+    });
+    render(
+      <ZCodeOAuthAdd
+        open
+        onClose={vi.fn()}
+        onSaved={vi.fn(async () => {})}
+        boundDeviceMids={[used]}
+      />,
+    );
+    expect(
+      await screen.findByText(
+        "The current device ID is already bound. Import another device ID before continuing.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Continue official sign-in" }),
+    ).toBeDisabled();
+  });
+
   it("does not start with an unreviewed default when device IDs cannot load", async () => {
     vi.mocked(zcodeDeviceApi.state).mockRejectedValueOnce("unavailable");
     mount();

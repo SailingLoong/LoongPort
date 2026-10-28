@@ -4584,8 +4584,9 @@
       "localLabelReset": "空欄にするとアカウントの公式表示名を使用します。",
       "saveDisplayName": "表示名を保存",
       "login": {
-        "deviceHint": "再認証時は、このアカウントに割り当てられた ID または新しい ID を明示的に選択してください。",
+        "deviceHint": "アカウントの追加や再認証時は、未割り当てのデバイス ID を選択してください。",
         "deviceBound": "割り当て済み",
+        "deviceTakenNoAvailable": "現在のデバイス ID は割り当て済みです。別のデバイス ID をインポートしてください。",
         "deviceLoadFailed": "デバイス ID を読み込めません。",
         "retryDevices": "再試行",
         "device": "アカウントのデバイス ID",
