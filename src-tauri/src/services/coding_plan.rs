@@ -639,8 +639,9 @@ async fn query_zenmux(base_url: &str, api_key: &str) -> Result<SubscriptionQuota
 /// `model_remains` 数组里有 `general`(编程套餐)和 `video` 等其他模型,
 /// 这里只取 `general`,跳过 video。
 ///
-/// 5h 桶始终存在;周桶并非所有套餐都有,靠 `current_weekly_status == 1`
-/// 判定激活(无周限额套餐该字段为 3,`remaining_percent` 恒为 100,不应展示)。
+/// 5h 桶始终存在;周桶并非所有套餐都有,靠 `current_weekly_status` 区分:
+/// 1 = 正常计时,2 = 周额度已耗尽(照常展示),3 = 无周限额
+/// (该字段为 3 时 `remaining_percent` 恒为 100,不应展示)。
 fn parse_minimax_tiers(body: &serde_json::Value) -> Vec<QuotaTier> {
     let mut tiers = Vec::new();
 
@@ -676,8 +677,10 @@ fn parse_minimax_tiers(body: &serde_json::Value) -> Vec<QuotaTier> {
         });
     }
 
-    // 周桶:仅当 status=1 时激活;status=3 等表示该套餐无周限额,跳过
-    if item.get("current_weekly_status").and_then(|v| v.as_i64()) == Some(1) {
+    // 周桶:status=1 正常计时;status=2 周额度已耗尽,仍展示额度与重置时间。
+    // status=3 表示该套餐无周限额(remaining_percent 恒为 100),跳过。
+    let weekly_status = item.get("current_weekly_status").and_then(|v| v.as_i64());
+    if weekly_status == Some(1) || weekly_status == Some(2) {
         if let Some(remain_pct) = item
             .get("current_weekly_remaining_percent")
             .and_then(|v| v.as_f64())
@@ -1724,20 +1727,59 @@ mod tests {
     }
 
     #[test]
-    fn minimax_weekly_status_2_also_skips_weekly_tier() {
-        // 防御性:除 1 之外的 status 都视为周桶未激活,跳过
+    fn minimax_weekly_status_2_keeps_exhausted_weekly_tier() {
+        // 5h 窗口重置不代表周额度恢复；耗尽的周桶及其重置时间仍须展示。
         let body = json!({
             "model_remains": [{
                 "model_name": "general",
-                "current_interval_remaining_percent": 80.0,
-                "current_weekly_remaining_percent": 50.0,
-                "current_weekly_status": 2
+                "current_interval_remaining_percent": 100.0,
+                "current_weekly_remaining_percent": 0.0,
+                "current_weekly_status": 2,
+                "weekly_end_time": 1_893_456_000_000_i64
+            }]
+        });
+        let tiers = parse_minimax_tiers(&body);
+        assert_eq!(tiers.len(), 2);
+        assert_eq!(tiers[0].name, TIER_FIVE_HOUR);
+        assert_eq!(tiers[0].utilization, 0.0);
+        assert_eq!(tiers[1].name, TIER_WEEKLY_LIMIT);
+        assert_eq!(tiers[1].utilization, 100.0);
+        assert_eq!(
+            tiers[1].resets_at.as_deref(),
+            Some("2030-01-01T00:00:00+00:00")
+        );
+    }
+
+    #[test]
+    fn minimax_exhausted_weekly_missing_percent_does_not_invent_usage() {
+        let body = json!({
+            "model_remains": [{
+                "model_name": "general",
+                "current_interval_remaining_percent": 100.0,
+                "current_weekly_status": 2,
+                "weekly_end_time": 1_893_456_000_000_i64
             }]
         });
         let tiers = parse_minimax_tiers(&body);
         assert_eq!(tiers.len(), 1);
         assert_eq!(tiers[0].name, TIER_FIVE_HOUR);
-        assert_eq!(tiers[0].utilization, 20.0);
+        assert_eq!(tiers[0].utilization, 0.0);
+    }
+
+    #[test]
+    fn minimax_exhausted_weekly_missing_reset_keeps_usage_without_countdown() {
+        let body = json!({
+            "model_remains": [{
+                "model_name": "general",
+                "current_weekly_remaining_percent": 0.0,
+                "current_weekly_status": 2
+            }]
+        });
+        let tiers = parse_minimax_tiers(&body);
+        assert_eq!(tiers.len(), 1);
+        assert_eq!(tiers[0].name, TIER_WEEKLY_LIMIT);
+        assert_eq!(tiers[0].utilization, 100.0);
+        assert!(tiers[0].resets_at.is_none());
     }
 
     #[test]
