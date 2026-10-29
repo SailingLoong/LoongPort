@@ -1,4 +1,5 @@
 import { QoderAccountPanel } from "./accounts/QoderAccountPanel";
+import { AccountApplicationNavigation } from "./accounts/AccountWorkspace";
 import {
   accountPlatforms,
   accountPlatformLabel,
@@ -35,6 +36,7 @@ export function AddHubPage({
   sourceAppId,
   initialTab = "accounts",
   onOpenPlatform,
+  onOpenApp,
   onBack,
   onAddProvider,
   firstVisit = false,
@@ -42,6 +44,7 @@ export function AddHubPage({
 }: {
   sourceAppId: AppId;
   onOpenPlatform?: (platform: AccountPlatform) => void;
+  onOpenApp?: (app: AppId) => void;
   /** 统一添加默认先选平台；首启与旧直达入口显式指定原标签。 */
   initialTab?: AddHubTab;
   onBack: () => void;
@@ -133,7 +136,13 @@ export function AddHubPage({
             返回平台列表
           </Button>
           {sourceIntent.kind === "account-boundary" ? (
-            <QoderAccountPanel />
+            <AccountApplicationNavigation.Provider
+              value={
+                onOpenApp ? (app = sourceAppId) => onOpenApp(app) : undefined
+              }
+            >
+              <QoderAccountPanel />
+            </AccountApplicationNavigation.Provider>
           ) : sourceIntent.kind === "vendor" ? (
             <OfficialApiPage
               key={`source-${sourceRevision}`}
