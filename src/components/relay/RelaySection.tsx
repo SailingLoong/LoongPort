@@ -47,6 +47,7 @@ import { getAppLabel } from "@/config/appConfig";
 import { useStreamCheck } from "@/hooks/useStreamCheck";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
 
+import { ServiceConfiguration } from "./onboarding/ServiceConfiguration";
 import { ImageTabNotice } from "./ImageTabNotice";
 import { SiteConfigDialog } from "./SiteConfigDialog";
 import { RelayTierList } from "./RelayTierList";
@@ -145,6 +146,11 @@ export function RelaySection({
    * 一对命令 + 一个 settings 键，那些现在全删了。
    */
   const isImageTab = appId === "codex-image";
+  const [setupTarget, setSetupTarget] = useState<{
+    rowId: number;
+    name: string;
+    appId: AppId;
+  } | null>(null);
   const [localRelays, setRelays] = useState<RelayRowData[]>([]);
   const relays = useMemo(
     () =>
@@ -502,37 +508,15 @@ export function RelaySection({
     void reloadVendors();
   });
 
-  /**
-   * 新人引导注册窗里注册成功（凭据已由后端入库）。收尾对齐目录页手动导入成功的
-   * 那一串（`RelayDirectoryPage.authenticate`）：toast + 给当前 app 预配档位 +
-   * 整区刷新 —— 用户关掉注册窗回到主界面时，「注册即用」已经成立。
-   */
+  // Registration only updates account facts. Configuration preparation must
+  // follow the same explicit selection and confirmation as directory imports.
   useTauriEvent<OnboardingRegisterCompleted>(
     ONBOARDING_REGISTER_COMPLETED,
-    async (payload) => {
+    (payload) => {
       if (accountFilter || renderAccounts) return;
       toast.success(
         t("loongport.addSite.connected", { name: payload.siteName }),
       );
-      // 挂上 busy（模块级 store）：用户此刻切到「服务与账号」也能看到
-      // 「正在获取密钥并导入档位」，而不是一张和没登录时一模一样的卡。
-      await run(`provision:${payload.relayId}`, async () => {
-        try {
-          presentRefreshResult(await relayApi.refresh(payload.relayId, appId));
-        } catch (reason) {
-          fail(
-            `provision:${payload.relayId}`,
-            t("loongport.directory.provisionFailed", {
-              reason: String(reason),
-            }),
-          );
-          toast.error(
-            t("loongport.directory.provisionFailed", {
-              reason: String(reason),
-            }),
-          );
-        }
-      });
       void reload();
     },
   );
@@ -680,7 +664,6 @@ export function RelaySection({
         if (result) {
           // 登录窗不会自动关闭（它已跳到 dashboard，用户可能要在那儿充值或看用量）。
           toast.success(t("loongport.session.connected"));
-          presentRefreshResult(result);
         }
         // ok === false 是用户自己关了窗口，不出提示（他知道自己干了什么）。
         await reload();
@@ -1052,6 +1035,24 @@ export function RelaySection({
         >
           {t("common.refresh")}
         </Button>
+        {target.kind === "relay" &&
+          row.status !== "notLoggedIn" &&
+          row.status !== "sessionExpired" && (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={provisionBusy || loginBusy}
+              onClick={() =>
+                setSetupTarget({
+                  rowId: row.id,
+                  name: `${target.row.siteName} · ${target.row.accountLabel}`,
+                  appId: target.appId,
+                })
+              }
+            >
+              {t("loongport.setup.entry", { defaultValue: "创建接入配置" })}
+            </Button>
+          )}
         {target.kind === "relay" && (
           <Button
             variant="outline"
@@ -1103,6 +1104,25 @@ export function RelaySection({
       </Button>
     );
   };
+
+  if (setupTarget) {
+    const returnToAccount = () => {
+      setSetupTarget(null);
+      void reload(true);
+    };
+    return (
+      <ServiceConfiguration
+        account={{
+          kind: "relay",
+          rowId: setupTarget.rowId,
+          name: setupTarget.name,
+        }}
+        sourceAppId={setupTarget.appId}
+        onBack={returnToAccount}
+        onDone={returnToAccount}
+      />
+    );
+  }
 
   if (!renderAccounts && !accountFilter && isImageTab && bothEmpty) {
     return <ImageTabNotice empty />;
@@ -1170,6 +1190,15 @@ export function RelaySection({
               onAddSite={() => onOpenAddHub("directory")}
               onLogin={(relayId) => void handleLogin(relayId)}
               onProvision={handleProvision}
+              onConfigure={(relayId) => {
+                const row = relays.find((item) => item.id === relayId);
+                if (row)
+                  setSetupTarget({
+                    rowId: row.id,
+                    name: `${row.siteName} · ${row.accountLabel}`,
+                    appId,
+                  });
+              }}
               onSiteConfigApplied={() => reload(true)}
               onReorder={(ids) => void handleReorder(ids)}
               onSwitchTier={(relayId, tier) =>

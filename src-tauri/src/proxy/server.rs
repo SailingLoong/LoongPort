@@ -191,7 +191,7 @@ impl ProxyServer {
         // 更新状态
         let mut status = self.state.status.write().await;
         status.running = true;
-        status.address = self.config.listen_address.clone();
+        status.address = local_addr.ip().to_string();
         status.port = actual_port;
         drop(status);
 
@@ -930,3 +930,7 @@ mod opencode_personal_session_tests;
 pub(crate) async fn verify_qoder_shared_flow(case: &str) {
     qoder_http_pool_tests::verify_shared(case).await;
 }
+
+#[cfg(test)]
+#[path = "server_loopback_tests.rs"]
+mod loopback_tests;

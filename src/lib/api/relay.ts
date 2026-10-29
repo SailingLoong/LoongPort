@@ -1,10 +1,27 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { CatalogPreview } from "./providers";
+import type { CatalogPreview, ProviderCatalogDecision } from "./providers";
 import type { SubscriptionWindow } from "@/lib/api/applicationRouting";
 
 import type { UsageResult } from "@/types";
 
 import type { AppId } from "./types";
+
+import type {
+  RelayDiscovery,
+  RelayPrepareRequest,
+  RelaySetupReceipt,
+  RelayConnectionReview,
+  RelayConnectionOutcome,
+} from "./relaySetup";
+export type {
+  RelayDiscovery,
+  RelayTierChoice,
+  RelayTierSelection,
+  RelayPrepareRequest,
+  RelaySetupReceipt,
+  RelayKeyFact,
+  RelayTargetFact,
+} from "./relaySetup";
 
 export interface RelayStatus {
   /** 域名输入框的底纹词。 */
@@ -142,22 +159,6 @@ export interface RelayDirectoryListing {
   items: RelayDirectoryItem[];
   /** 实测快照的数据时间（Unix 秒）；0 = 没有快照，前端不显示时间戳。 */
   syncedAt: number;
-}
-
-/** Read-only group discovery; no access key or provider is created. */
-export interface RelayTierChoice {
-  app: AppId;
-  id: string;
-  providerId: string;
-  name: string;
-  groupId: string;
-  prepared?: boolean;
-  compatibility?: "unknown" | "configured";
-}
-
-export interface RelayTierSelection {
-  app: AppId;
-  groupId: string;
 }
 
 export interface ProvisionSummary {
@@ -483,13 +484,13 @@ export const relayApi = {
    * **每次都是全新登录态**（登录窗用 incognito，见后端注释）：同一个站可以
    * 挂多个账号，删掉再加也不会复用旧 token。
    */
-  login: (relayId: number, app: AppId): Promise<RefreshResult | null> =>
+  login: (relayId: number, app: AppId): Promise<boolean> =>
     invoke("relay_login", { relayId, app }),
 
   /**
    * 在默认浏览器中登录这一行（站点握手页接力）：发起即返回，登录在浏览器完成，
    * 凭据经 loongport://connect 深链回来落库，收尾由 ONBOARDING_REGISTER_COMPLETED
-   * 事件驱动（toast + 档位预配 + 列表刷新）。Err = 站点未部署握手页/网络问题。
+   * 事件驱动（toast + 只读账号列表刷新）。Err = 站点未部署握手页/网络问题。
    */
   browserLogin: (relayId: number): Promise<void> =>
     invoke("relay_browser_login", { relayId }),
@@ -597,14 +598,49 @@ export const relayApi = {
   balance: (relayId: number, force = false): Promise<RowBalanceResult> =>
     invoke("relay_balance", { relayId, force }),
 
-  discoverTiers: (relayId: number): Promise<RelayTierChoice[]> =>
+  discoverTiers: (relayId: number): Promise<RelayDiscovery> =>
     invoke("relay_discover_tiers", { relayId }),
 
-  prepareTiers: (
+  prepareTiers: (request: RelayPrepareRequest): Promise<RelaySetupReceipt> =>
+    invoke("relay_prepare_tiers", { request }),
+
+  getSetupOperation: (
     relayId: number,
-    selections: RelayTierSelection[],
-  ): Promise<ProvisionSummary> =>
-    invoke("relay_prepare_tiers", { relayId, selections }),
+    operationId?: string,
+    historyOffset?: number,
+  ): Promise<RelaySetupReceipt | null> =>
+    invoke("relay_get_setup_operation", {
+      relayId,
+      operationId,
+      historyOffset,
+    }),
+
+  prepareApplicationConnection: (
+    operationId: string,
+    targetApp: AppId,
+    expectedReceiptRevision: number,
+    catalogDecision?: ProviderCatalogDecision,
+  ): Promise<RelayConnectionReview> =>
+    invoke("relay_prepare_application_connection", {
+      operationId,
+      targetApp,
+      expectedReceiptRevision,
+      catalogDecision,
+    }),
+  applyPreparedTier: (
+    operationId: string,
+    targetApp: AppId,
+    expectedReceiptRevision: number,
+    quitChatgpt: boolean,
+  ): Promise<RelayConnectionOutcome> =>
+    invoke("relay_apply_prepared_tier", {
+      operationId,
+      targetApp,
+      expectedReceiptRevision,
+      quitChatgpt,
+    }),
+  reconcileSetupOperation: (operationId: string): Promise<RelaySetupReceipt> =>
+    invoke("relay_reconcile_setup_operation", { operationId }),
 
   refresh: (relayId: number, app: AppId): Promise<RefreshResult> =>
     invoke("relay_refresh", { relayId, app }),

@@ -62,6 +62,12 @@ impl Persistence {
             RuntimeError::Transaction(TransactionError::Checkpoint(
                 super::checkpoint::CheckpointError::ResourceLimit,
             )) => StoreFailure::Capacity,
+            RuntimeError::Transaction(TransactionError::Checkpoint(
+                super::checkpoint::CheckpointError::DuplicateIdentity,
+            )) => StoreFailure::DeviceTaken,
+            RuntimeError::Transaction(TransactionError::Checkpoint(
+                super::checkpoint::CheckpointError::DeviceMismatch,
+            )) => StoreFailure::DeviceMismatch,
             _ => StoreFailure::Unknown,
         })
     }
@@ -178,6 +184,9 @@ impl LoginPersistence for Persistence {
             evidence,
             update_duplicate,
             completion,
+            device_mid,
+            device_unique,
+            device_explicit,
         } = input;
         let context = context.clone();
         let revision = revision.to_owned();
@@ -185,6 +194,7 @@ impl LoginPersistence for Persistence {
         let snapshot = snapshot.clone();
         let evidence = evidence.cloned();
         let completion = completion.cloned();
+        let device_mid = device_mid.map(str::to_owned);
         Box::pin(async move {
             self.access(binding.clone(), move |store| {
                 store.save_login_profile_for(
@@ -196,6 +206,9 @@ impl LoginPersistence for Persistence {
                         evidence,
                         update_duplicate,
                         completion: completion.as_ref(),
+                        device_mid: device_mid.as_deref(),
+                        device_unique,
+                        device_explicit,
                     },
                 )
             })
@@ -211,18 +224,14 @@ fn flows() -> &'static LoginFlowStore {
 fn service(
     db: Arc<Database>,
     context: Option<(&super::library_context::LibraryContext, Option<&str>)>,
+    device_mid: Option<&str>,
 ) -> Result<Arc<Service>, PublicError> {
     let transport = ReqwestOfficialTransport::new()
         .map_err(|_| PublicError::new("zcode.account.official_unavailable", "queryOriginal"))?;
     let transport = match context {
-        Some((context, version)) => {
-            let device_mid = super::device_settings::current(&db, context).map_err(|_| {
-                PublicError::new("zcode.account.official_unavailable", "queryOriginal")
-            })?;
-            transport
-                .with_context(context.data_root(), version)
-                .with_device_mid(device_mid.as_deref())
-        }
+        Some((context, version)) => transport
+            .with_context(context.data_root(), version)
+            .with_device_mid(device_mid),
         None => transport,
     };
     let mut service = Service::new(transport, Persistence { db });
@@ -235,7 +244,10 @@ fn service_for_flow(db: Arc<Database>, id: &str) -> Result<Arc<Service>, PublicE
         db,
         context
             .as_ref()
-            .map(|(context, version)| (context, version.as_deref())),
+            .map(|request| (&request.context, request.app_version.as_deref())),
+        context
+            .as_ref()
+            .and_then(|request| request.device_mid.as_deref()),
     )
 }
 fn flow_error(_: FlowError) -> PublicError {
@@ -324,6 +336,7 @@ pub(crate) async fn begin(
     db: Arc<Database>,
     family: &str,
     data_root: Option<PathBuf>,
+    requested_device: Option<String>,
 ) -> Result<LoginProgress, PublicError> {
     let family = match family {
         "bigmodel" => OAuthFamily::BigModel,
@@ -346,7 +359,14 @@ pub(crate) async fn begin(
     })
     .await
     .map_err(PublicError::from)?;
-    let service = service(db, Some((&context, app_version.as_deref())))?;
+    let (device_mid, device_unique) =
+        super::device_settings::login_device(&db, &context, requested_device.as_deref())
+            .map_err(|_| PublicError::new("zcode.account.official_unavailable", "chooseContext"))?;
+    let service = service(
+        db,
+        Some((&context, app_version.as_deref())),
+        device_mid.as_deref(),
+    )?;
     let token = PollToken::generate().map_err(|_| flow_error(FlowError::Capacity))?;
     let id = service
         .flows
@@ -355,6 +375,10 @@ pub(crate) async fn begin(
     service
         .flows
         .bind_context(&id, context.context_id())
+        .map_err(flow_error)?;
+    service
+        .flows
+        .bind_device(&id, device_mid, device_unique, requested_device.is_some())
         .map_err(flow_error)?;
     // Acquire synchronously before handing any work to a task.
     let lease = service
@@ -484,11 +508,21 @@ pub(crate) async fn begin_saved(
     })
     .await
     .map_err(PublicError::from)?;
-    let (bound, input) = match selected {
+    let (bound, mut input) = match selected {
         Selection::Existing(id) => return query(db, id).await,
         Selection::Selected(bound, input) => (bound, *input),
     };
-    let service = service(db, Some((&input.context, input.app_version.as_deref())))?;
+    let device_mid = match input.target.details.device_mid.clone() {
+        Some(id) => Some(id),
+        None => super::device_settings::current(&db, &input.context)
+            .map_err(|_| PublicError::new("zcode.account.official_unavailable", "queryOriginal"))?,
+    };
+    input.target.details.device_mid = device_mid.clone();
+    let service = service(
+        db,
+        Some((&input.context, input.app_version.as_deref())),
+        device_mid.as_deref(),
+    )?;
     let begin = service
         .flows
         .begin_saved(bound, input, Instant::now())

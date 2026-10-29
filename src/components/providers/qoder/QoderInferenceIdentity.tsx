@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -29,6 +30,7 @@ export function QoderInferenceIdentity({
   disabled?: boolean;
 }) {
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const [declared, setDeclared] = useState(false);
   const [context, setContext] = useState<QoderHttpIdentityContext | null>(null);
@@ -162,6 +164,17 @@ export function QoderInferenceIdentity({
     try {
       // Recovery/rebind confirmation belongs to this one backend command.
       const value = await qoderHttpAuthApi.action(visibleContext, action);
+      // The original owner may complete after this view closes or switches.
+      // Re-read backend facts; never publish the old action context to another view.
+      if (
+        value.status === "completed" &&
+        value.context.providerId === visibleContext.providerId
+      ) {
+        void queryClient.invalidateQueries({
+          queryKey: ["applicationOverview", "codex"],
+        });
+        void queryClient.invalidateQueries({ queryKey: ["serviceSources"] });
+      }
       if (epoch.current !== current) return;
       setDeclared(false);
       if (value.status === "completed" || value.status === "changed") {

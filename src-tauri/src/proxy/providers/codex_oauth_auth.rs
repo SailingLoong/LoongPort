@@ -444,7 +444,7 @@ pub struct CodexOAuthManager {
     /// 需要它防止并发保存/清除交错，导致已删账号被旧快照复活。
     storage_lock: Arc<Mutex<()>>,
     #[cfg(any(test, feature = "test-hooks"))]
-    test_refresh_response: std::sync::Mutex<Option<OAuthTokenResponse>>,
+    test_refresh_response: std::sync::Mutex<Option<Result<OAuthTokenResponse, CodexOAuthError>>>,
     #[cfg(any(test, feature = "test-hooks"))]
     test_refresh_pause: std::sync::Mutex<Option<TestRefreshPause>>,
 }
@@ -733,7 +733,7 @@ impl CodexOAuthManager {
                         CodexOAuthError::TokenFetchFailed("synthetic refresh interrupted".into())
                     })?;
                 }
-                return Ok(response);
+                return response;
             }
         }
         #[cfg(any(test, feature = "test-hooks"))]
@@ -1573,12 +1573,25 @@ impl CodexOAuthManager {
             .get_mut(account)
             .expect("fixture account")
             .expires_at_ms = 0;
-        *self.test_refresh_response.lock().unwrap() = Some(OAuthTokenResponse {
+        *self.test_refresh_response.lock().unwrap() = Some(Ok(OAuthTokenResponse {
             access_token: access.into(),
             refresh_token: Some(refresh.into()),
             id_token: Some("synthetic-id-token".into()),
             expires_in: Some(3600),
-        });
+        }));
+    }
+
+    /// Inject only the refresh transport result. Account lookup, locking, pending
+    /// recovery checks, refresh recovery and the real proxy consumer still run.
+    #[cfg(test)]
+    pub(crate) async fn test_refresh_failure_next(&self, account: &str, error: CodexOAuthError) {
+        self.access_tokens
+            .write()
+            .await
+            .get_mut(account)
+            .expect("fixture account")
+            .expires_at_ms = 0;
+        *self.test_refresh_response.lock().unwrap() = Some(Err(error));
     }
 
     #[cfg(any(test, feature = "test-hooks"))]

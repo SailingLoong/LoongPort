@@ -68,6 +68,44 @@ fn reject(
     fixture::assert_unchanged(&local.conn.lock().unwrap(), &digest);
 }
 
+// Compare independently generated dumps without treating their export clock as data.
+fn sync_sql_matches_ignoring_generated_at(left: &str, right: &str) -> bool {
+    fn stable_parts(sql: &str) -> Option<(&str, &str)> {
+        let (title, rest) = sql.split_once('\n')?;
+        if title != "-- CC Switch SQLite 导出" {
+            return None;
+        }
+        let (generated, body) = rest.split_once('\n')?;
+        let timestamp = generated.strip_prefix("-- 生成时间: ")?;
+        if timestamp.len() != 19
+            || !timestamp
+                .bytes()
+                .enumerate()
+                .all(|(index, byte)| match index {
+                    4 | 7 => byte == b'-',
+                    10 => byte == b' ',
+                    13 | 16 => byte == b':',
+                    _ => byte.is_ascii_digit(),
+                })
+        {
+            return None;
+        }
+        let (version, _) = body.split_once('\n')?;
+        let version = version.strip_prefix("-- user_version: ")?;
+        if version.parse::<i64>().ok()?.to_string() != version {
+            return None;
+        }
+        // Keep the first line and every byte after the clock line, including
+        // embedded newlines, comments, identity metadata, and ciphertext.
+        Some((title, body))
+    }
+
+    match (stable_parts(left), stable_parts(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]
 fn storage_sync_plaintext_export_returns_actual_identity() {
@@ -104,7 +142,7 @@ fn storage_sync_encrypted_export_keeps_portable_ciphertext() {
     assert!(!output.contains(fixture::DERIVED));
     let (legacy, metadata) = source.export_sync_snapshot().unwrap();
     assert_eq!(identity, StorageIdentity::Encrypted(Box::new(metadata)));
-    assert_eq!(legacy, output);
+    assert!(sync_sql_matches_ignoring_generated_at(&legacy, &output));
     let image = Database::stage_import_sql(&output, true).unwrap();
     fixture::assert_values(&image, &context);
     assert_eq!(tree(home.path()), before);
@@ -463,5 +501,100 @@ pub(super) fn verify(case: &str) {
             storage_sync_encrypted_old_revision_keeps_original_admission()
         }
         _ => panic!("unknown remote storage snapshot case"),
+    }
+}
+
+#[cfg(test)]
+mod sync_sql_comparison_tests {
+    use super::sync_sql_matches_ignoring_generated_at;
+
+    const DUMP: &str = "-- CC Switch SQLite 导出\n\
+-- 生成时间: 2026-10-27 22:00:00\n\
+-- user_version: 17\n\
+PRAGMA user_version=17;\n\
+CREATE TABLE loongport_vault (metadata TEXT);\n\
+INSERT INTO loongport_vault VALUES ('{\"vaultId\":\"synthetic-vault\",\"keyId\":\"synthetic-key\"}');\n\
+INSERT INTO providers VALUES ('lpenc1.synthetic-ciphertext');\n\
+COMMIT;\n";
+
+    #[test]
+    fn independently_generated_sync_dumps_may_cross_a_second() {
+        let later = DUMP.replacen("2026-10-27 22:00:00", "2026-10-27 22:00:01", 1);
+        assert_ne!(DUMP, later);
+        assert!(sync_sql_matches_ignoring_generated_at(DUMP, &later));
+        assert!(sync_sql_matches_ignoring_generated_at(&later, DUMP));
+        assert!(sync_sql_matches_ignoring_generated_at(DUMP, DUMP));
+    }
+
+    #[test]
+    fn malformed_or_displaced_fixed_headers_are_not_ignored() {
+        for malformed in [
+            String::new(),
+            DUMP.replacen("-- CC Switch SQLite 导出", "-- other export", 1),
+            DUMP.replacen("-- 生成时间: ", "-- other clock: ", 1),
+            DUMP.replacen("2026-10-27 22:00:00", "", 1),
+            DUMP.replacen("2026-10-27 22:00:00", "2026-10-27T22:00:00", 1),
+            DUMP.replacen("2026-10-27 22:00:00", "202x-10-27 22:00:00", 1),
+            DUMP.replacen("2026-10-27 22:00:00", "2026-10-27 22:00:00 extra", 1),
+            DUMP.replacen("-- user_version: 17", "-- another field: 17", 1),
+            DUMP.replacen("-- user_version: 17", "-- user_version: invalid", 1),
+            DUMP.replacen("-- user_version: 17", "-- user_version: 017", 1),
+            format!("\n{DUMP}"),
+            DUMP.replace('\n', "\r\n"),
+        ] {
+            assert!(!sync_sql_matches_ignoring_generated_at(
+                &malformed, &malformed
+            ));
+            assert!(!sync_sql_matches_ignoring_generated_at(DUMP, &malformed));
+        }
+    }
+
+    #[test]
+    fn every_non_clock_character_remains_part_of_the_comparison() {
+        let clock_start = DUMP.find("2026-10-27 22:00:00").unwrap();
+        let clock_end = clock_start + "2026-10-27 22:00:00".len();
+        // Includes SQL, the schema version, vault/key identity, and ciphertext.
+        for (index, character) in DUMP.char_indices() {
+            if (clock_start..clock_end).contains(&index) {
+                continue;
+            }
+            let mut changed = DUMP.to_owned();
+            changed.replace_range(
+                index..index + character.len_utf8(),
+                if character == 'X' { "Y" } else { "X" },
+            );
+            assert!(
+                !sync_sql_matches_ignoring_generated_at(DUMP, &changed),
+                "changed byte {index}"
+            );
+        }
+        assert!(!sync_sql_matches_ignoring_generated_at(
+            DUMP,
+            DUMP.trim_end()
+        ));
+        assert!(!sync_sql_matches_ignoring_generated_at(
+            DUMP,
+            &format!("{DUMP}\n")
+        ));
+    }
+
+    #[test]
+    fn clock_like_text_inside_sql_is_never_filtered() {
+        let source = format!("{DUMP}INSERT INTO settings VALUES ('line one\n-- 生成时间: 2026-10-27 22:00:00\nline three');\n");
+        let changed_payload = source.replace("line three", "changed payload");
+        let changed_embedded_clock = source.replacen(
+            "\n-- 生成时间: 2026-10-27 22:00:00\nline three",
+            "\n-- 生成时间: 2026-10-27 22:00:01\nline three",
+            1,
+        );
+        assert!(sync_sql_matches_ignoring_generated_at(&source, &source));
+        assert!(!sync_sql_matches_ignoring_generated_at(
+            &source,
+            &changed_payload
+        ));
+        assert!(!sync_sql_matches_ignoring_generated_at(
+            &source,
+            &changed_embedded_clock
+        ));
     }
 }

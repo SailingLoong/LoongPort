@@ -7,6 +7,7 @@ use super::model_selection::{
     image_tier_app_type, is_pure_image_group, normalize_model_names, pick_tier_models_with,
     ClaudeRoleModels, ModelSelectionTables,
 };
+use super::setup_journal::{KeyEvent, KeyPreparationJournal, PreparationIssue};
 use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::relay::sub2api::{ApiKey, Client, Group};
@@ -98,23 +99,57 @@ pub async fn provision(
     client: &Client,
     tables: &ModelSelectionTables,
 ) -> Result<ProvisionResult, AppError> {
-    provision_scope(client, tables, None).await
+    provision_scope(client, tables, None, None).await
 }
 
-/// Prepare only explicitly confirmed upstream groups, sharing each group's key
-/// across its app projections. This additive operation never cleans up keys.
+/// Refresh only existing managed resources in these groups. Missing keys require
+/// the recorded selected-preparation owner; this path never creates or cleans up keys.
 pub async fn provision_selected(
     client: &Client,
     tables: &ModelSelectionTables,
     selected_group_ids: &[i64],
 ) -> Result<ProvisionResult, AppError> {
-    provision_scope(client, tables, Some(selected_group_ids)).await
+    provision_scope(client, tables, Some(selected_group_ids), None).await
+}
+
+/// Recorded setup delegates to the same protocol owner; no second key algorithm.
+pub(crate) async fn provision_selected_recorded(
+    client: &Client,
+    tables: &ModelSelectionTables,
+    selected_group_ids: &[i64],
+    journal: &dyn KeyPreparationJournal,
+) -> Result<ProvisionResult, AppError> {
+    provision_scope(client, tables, Some(selected_group_ids), Some(journal)).await
+}
+
+/// Read-only reconciliation uses the same managed-key matcher, never create/reveal.
+pub(crate) async fn observe_selected_keys(
+    client: &Client,
+    selected: &[i64],
+    journal: &dyn KeyPreparationJournal,
+) -> Result<(), AppError> {
+    if selected.is_empty() {
+        return Ok(());
+    }
+    let groups = client.list_groups().await?;
+    let keys = client.list_keys(MANAGED_PREFIX).await?;
+    for group in groups.iter().filter(|g| selected.contains(&g.id)) {
+        if let Some(key) = claim_key(&keys, client.account_id(), &group.platform, group.id) {
+            journal.record(
+                &group.id.to_string(),
+                KeyEvent::Observed(key.id.to_string()),
+            )?;
+        }
+    }
+    // No match is uncertainty, not proof that the previous POST did not commit.
+    Ok(())
 }
 
 async fn provision_scope(
     client: &Client,
     tables: &ModelSelectionTables,
     selected_group_ids: Option<&[i64]>,
+    journal: Option<&dyn KeyPreparationJournal>,
 ) -> Result<ProvisionResult, AppError> {
     if selected_group_ids.is_some_and(|ids| ids.is_empty()) {
         return Ok(ProvisionResult::default());
@@ -195,7 +230,10 @@ async fn provision_scope(
     for (group, app_type) in usable {
         match ensure_key_for(
             client,
-            &mut result.keys_created,
+            &mut KeyPreparation {
+                keys_created: &mut result.keys_created,
+                journal,
+            },
             &app_type,
             &group,
             &existing,
@@ -228,7 +266,10 @@ async fn provision_scope(
     for group in composite {
         match ensure_composite_tiers(
             client,
-            &mut result.keys_created,
+            &mut KeyPreparation {
+                keys_created: &mut result.keys_created,
+                journal,
+            },
             &group,
             &existing,
             tables,
@@ -299,9 +340,25 @@ async fn provision_scope(
     Ok(result)
 }
 
+struct KeyPreparation<'a> {
+    keys_created: &'a mut usize,
+    journal: Option<&'a dyn KeyPreparationJournal>,
+}
+impl KeyPreparation<'_> {
+    fn record(&self, group: &Group, event: KeyEvent) -> Result<(), AppError> {
+        match self.journal {
+            Some(journal) => journal.record(&group.id.to_string(), event),
+            None if matches!(event, KeyEvent::BeforeCreate) => {
+                Err(AppError::Config("relaySetup.confirmationRequired".into()))
+            }
+            None => Ok(()),
+        }
+    }
+}
+
 async fn claim_or_create_key(
     client: &Client,
-    keys_created: &mut usize,
+    preparation: &mut KeyPreparation<'_>,
     group: &Group,
     existing: &[ApiKey],
 ) -> Result<(String, bool, ApiKey), AppError> {
@@ -309,8 +366,14 @@ async fn claim_or_create_key(
     let account_id = client.account_id();
     match claim_key(existing, account_id, &group.platform, group.id) {
         // 正常路径：认领到了就直接用，不发任何写请求。
-        Some(k) => Ok((k.key.clone(), false, k.clone())),
+        Some(k) => {
+            preparation.record(group, KeyEvent::Reused(k.id.to_string()))?;
+            Ok((k.key.clone(), false, k.clone()))
+        }
         None => {
+            // This is the original creation boundary. Maintenance may reuse a
+            // managed key, but only a durable confirmed operation can create.
+            preparation.record(group, KeyEvent::BeforeCreate)?;
             let name = key_name_for(account_id, &group.platform, group.id);
             // ⚠️ **「为什么没认领到」必须落日志**（维护者实测抓出）。
             //
@@ -341,10 +404,19 @@ async fn claim_or_create_key(
                 same_prefix.len(),
                 same_prefix,
             );
-            let created = client.create_key(&name, group.id).await?;
+            let created = match client.create_key(&name, group.id).await {
+                Ok(created) => created,
+                Err(error) => {
+                    // The existing transport does not prove whether a failed
+                    // response preceded or followed the server-side mutation.
+                    preparation.record(group, KeyEvent::OutcomeUnknown)?;
+                    return Err(error);
+                }
+            };
+            preparation.record(group, KeyEvent::Created(Some(created.id.to_string())))?;
             // Keep the remote effect in the receipt even when later validation
             // or model discovery fails; a retry can claim this existing resource.
-            *keys_created += 1;
+            *preparation.keys_created += 1;
             if created.key.is_empty() {
                 return Err(AppError::Config("服务端返回的密钥是空的".into()));
             }
@@ -356,7 +428,7 @@ async fn claim_or_create_key(
 
 async fn ensure_key_for(
     client: &Client,
-    keys_created: &mut usize,
+    preparation: &mut KeyPreparation<'_>,
     app_type: &AppType,
     group: &Group,
     existing: &[ApiKey],
@@ -364,7 +436,7 @@ async fn ensure_key_for(
     subscriptions: &[super::sub2api::UserSubscription],
 ) -> Result<Tier, AppError> {
     let (api_key, created, key_meta) =
-        claim_or_create_key(client, keys_created, group, existing).await?;
+        claim_or_create_key(client, preparation, group, existing).await?;
 
     // 拉这个分组能调哪些模型 —— 只为决定写什么模型名（纯生图分组必须写它自己的
     // `gpt-image-*`，写文本模型会 404）。
@@ -384,6 +456,16 @@ async fn ensure_key_for(
         }
     };
     let picked = pick_tier_models_with(app_type, models.as_deref(), tables);
+    if models.as_ref().is_some_and(|models| !models.is_empty()) {
+        if let Some(journal) = preparation.journal {
+            journal.record_model_support(
+                &group.id.to_string(),
+                &[image_tier_app_type(app_type, &picked.main)
+                    .as_str()
+                    .to_owned()],
+            )?;
+        }
+    }
     if picked.main != tables.default_model {
         // 写了非默认模型是**要留痕的判断**：它决定这条档位能不能用，
         // 而判据（模型列表）是网络来的、事后无从复现。
@@ -436,22 +518,42 @@ fn composite_app_targets(models: &[String]) -> Vec<AppType> {
 
 async fn ensure_composite_tiers(
     client: &Client,
-    keys_created: &mut usize,
+    preparation: &mut KeyPreparation<'_>,
     group: &Group,
     existing: &[ApiKey],
     tables: &ModelSelectionTables,
     subscriptions: &[super::sub2api::UserSubscription],
 ) -> Result<Vec<TargetedTier>, AppError> {
     let (api_key, created, key_meta) =
-        claim_or_create_key(client, keys_created, group, existing).await?;
-    let models = super::sub2api::list_models(client.site_origin(), &api_key)
-        .await
-        .map_err(|e| AppError::Config(format!("拉不到模型目录，无法判定该落到哪些 CLI: {e}")))?
-        .map(normalize_model_names)
-        // 归一化后为空（全是空白 id）视同没有目录：空列表会让
-        // `is_pure_image_group` 真空真、误判成纯生图分组。
-        .filter(|models: &Vec<String>| !models.is_empty())
-        .ok_or_else(|| AppError::Config("模型目录为空，无法判定该落到哪些 CLI".into()))?;
+        claim_or_create_key(client, preparation, group, existing).await?;
+    let models = match super::sub2api::list_models(client.site_origin(), &api_key).await {
+        Ok(Some(models)) if !normalize_model_names(models.clone()).is_empty() => {
+            normalize_model_names(models)
+        }
+        result => {
+            if let Some(journal) = preparation.journal {
+                journal.record_issue(
+                    &group.id.to_string(),
+                    None,
+                    PreparationIssue::ModelCatalogUnavailable,
+                )?;
+            }
+            return Err(AppError::Config(match result {
+                Err(error) => format!("拉不到模型目录，无法判定该落到哪些 CLI: {error}"),
+                _ => "模型目录为空，无法判定该落到哪些 CLI".into(),
+            }));
+        }
+    };
+    let targets = composite_app_targets(&models);
+    if let Some(journal) = preparation.journal {
+        journal.record_model_support(
+            &group.id.to_string(),
+            &targets
+                .iter()
+                .map(|app| app.as_str().to_owned())
+                .collect::<Vec<_>>(),
+        )?;
+    }
 
     let windows = super::tier_windows::windows_for(
         group,
@@ -459,7 +561,7 @@ async fn ensure_composite_tiers(
         subscriptions.iter().find(|sub| sub.group_id == group.id),
     );
     let mut tiers = Vec::new();
-    for (index, app_type) in composite_app_targets(&models).into_iter().enumerate() {
+    for (index, app_type) in targets.into_iter().enumerate() {
         let picked = pick_tier_models_with(&app_type, Some(&models), tables);
         if picked.main != tables.default_model {
             log::info!(
@@ -504,6 +606,7 @@ pub fn sort_tiers(tiers: &mut [TargetedTier]) {
 mod tests {
     use super::*;
     use crate::relay::model_selection::DEFAULT_MODEL;
+    use crate::relay::setup_journal::test_support::ConfirmedJournal;
 
     // The fixture records actual HTTP writes: broadening the selected group filter
     // or enabling full-inventory cleanup must fail these assertions.
@@ -575,8 +678,13 @@ mod tests {
     async fn selected_provision_creates_only_selected_group_and_reuses_key() {
         let (client, state, server) = selection_fixture().await;
         let tables = ModelSelectionTables::builtin();
-        let first = provision_selected(&client, &tables, &[1, 1]).await.unwrap();
-        let second = provision_selected(&client, &tables, &[1]).await.unwrap();
+        let journal = ConfirmedJournal::new(&["1"]);
+        let first = provision_selected_recorded(&client, &tables, &[1, 1], &journal)
+            .await
+            .unwrap();
+        let second = provision_selected_recorded(&client, &tables, &[1], &journal)
+            .await
+            .unwrap();
         assert_eq!(first.tiers.len(), 1);
         assert_eq!(first.tiers[0].tier.group_id, 1);
         assert!(first.tiers[0].tier.key_was_created);
@@ -631,9 +739,14 @@ mod tests {
         state.lock().unwrap().keys = [2, 99].into_iter().map(|id| serde_json::json!({
             "id": id, "key": format!("fixture-key-{id}"), "name": key_name_for(Some(7), "anthropic", id), "status": "active"
         })).collect();
-        provision_selected(&client, &ModelSelectionTables::builtin(), &[1])
-            .await
-            .unwrap();
+        provision_selected_recorded(
+            &client,
+            &ModelSelectionTables::builtin(),
+            &[1],
+            &ConfirmedJournal::new(&["1"]),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             state.lock().unwrap().writes,
             vec![("POST".into(), "/api/v1/keys".into())]
@@ -645,9 +758,14 @@ mod tests {
     #[tokio::test]
     async fn selected_provision_composite_shares_one_key_across_apps() {
         let (client, state, server) = selection_fixture().await;
-        let result = provision_selected(&client, &ModelSelectionTables::builtin(), &[3, 3])
-            .await
-            .unwrap();
+        let result = provision_selected_recorded(
+            &client,
+            &ModelSelectionTables::builtin(),
+            &[3, 3],
+            &ConfirmedJournal::new(&["3"]),
+        )
+        .await
+        .unwrap();
         assert!(result.tiers.len() >= 2);
         assert!(result
             .tiers
@@ -663,9 +781,14 @@ mod tests {
         state.lock().unwrap().keys.push(serde_json::json!({
             "id": 99, "key": "fixture-old-key", "name": "LoongPort/a7/anthropic/99", "status": "active"
         }));
-        let result = provision(&client, &ModelSelectionTables::builtin())
-            .await
-            .unwrap();
+        let result = provision_scope(
+            &client,
+            &ModelSelectionTables::builtin(),
+            None,
+            Some(&ConfirmedJournal::new(&["1", "2", "3"])),
+        )
+        .await
+        .unwrap();
         assert_eq!(result.tiers.len(), 4);
         let writes = state.lock().unwrap().writes.clone();
         assert_eq!(

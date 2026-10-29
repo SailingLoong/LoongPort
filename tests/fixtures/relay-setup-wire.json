@@ -1,0 +1,90 @@
+{
+  "discovery": {
+    "schemaVersion": 1,
+    "relayId": 7,
+    "account": {
+      "identity": "site/account-7",
+      "siteOrigin": "https://fixture.example",
+      "accountLabel": "Fixture"
+    },
+    "revision": "revision-1",
+    "choices": [
+      {
+        "app": "codex",
+        "groupId": "a",
+        "groupName": "same display name",
+        "providerId": "codex-a",
+        "localConfiguration": "absent",
+        "compatibility": "unknown",
+        "keyStatus": "unknown"
+      },
+      {
+        "app": "claude",
+        "groupId": "a",
+        "groupName": "same display name",
+        "providerId": "claude-a",
+        "localConfiguration": "absent",
+        "compatibility": "unknown",
+        "keyStatus": "unknown"
+      },
+      {
+        "app": "codex",
+        "groupId": "b",
+        "groupName": "same display name",
+        "providerId": "codex-b",
+        "localConfiguration": "absent",
+        "compatibility": "unknown",
+        "keyStatus": "unknown"
+      }
+    ]
+  },
+  "request": {
+    "kind": "start",
+    "operationId": "f8d02319-67c1-426b-a931-c836de11320e",
+    "relayId": 7,
+    "discoveryRevision": "revision-1",
+    "selections": [
+      {
+        "app": "codex",
+        "groupId": "a"
+      }
+    ]
+  },
+  "receipt": {
+    "schemaVersion": 1,
+    "operationId": "f8d02319-67c1-426b-a931-c836de11320e",
+    "receiptRevision": 1,
+    "relayId": 7,
+    "accountIdentity": "site/account-7",
+    "selectionDigest": "29de8c47e151448c19176069326a68e0719e8e5a5c73d5183b94af21be6d2ac6",
+    "selections": [
+      {
+        "app": "codex",
+        "groupId": "a"
+      }
+    ],
+    "status": "running",
+    "groups": [
+      {
+        "groupId": "a",
+        "groupName": "same display name",
+        "state": "notStarted"
+      }
+    ],
+    "targets": [
+      {
+        "app": "codex",
+        "groupId": "a",
+        "providerId": "codex-a",
+        "configuration": "notStarted",
+        "compatibility": "unknown",
+        "connection": {
+          "state": "notRequested"
+        }
+      }
+    ],
+    "createdKeyCount": 0,
+    "createdAt": 5,
+    "updatedAt": 5
+  }
+}

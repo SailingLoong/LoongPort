@@ -57,3 +57,27 @@ fixture_case!(
     composite_catalog_failure_retains_created_resource_receipt_and_reuses_on_retry,
     "composite_partial"
 );
+
+fixture_case!(
+    selected_preparation_preserves_existing_provider_current_catalog_mcp_and_chain,
+    "selected_isolation"
+);
+
+fixture_case!(
+    selected_new_projection_preserves_mergeable_current_duplicate_mcp_and_live_files,
+    "selected_new_isolation"
+);
+
+fixture_case!(
+    selected_initial_metadata_failure_rolls_back_provider_and_chain,
+    "selected_metadata_rollback"
+);
+
+fixture_case!(
+    selected_setup_preflight_rejects_before_write_then_records_and_recovers_shared_group,
+    "setup_preflight_journal"
+);
+fixture_case!(
+    selected_setup_rechecks_authentication_after_waiting_for_original_account_lock,
+    "setup_auth_lock"
+);

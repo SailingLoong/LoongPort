@@ -261,7 +261,7 @@ export function ServicesPage(props: ServicesPageProps) {
   }, [viewActive, active]);
   return (
     <AccountApplicationNavigation.Provider
-      value={() => props.onOpenApp(props.appId)}
+      value={(targetApp = props.appId) => props.onOpenApp(targetApp)}
     >
       <Tabs
         value={section}
@@ -687,7 +687,7 @@ function ServicesPageContent({
   if (platform === "qoder") {
     return (
       <section className="page-content space-y-4">
-        <QoderAccountPanel />
+        <QoderAccountPanel defaultApp={appId} />
         <Button variant="outline" onClick={() => onOpenApp("codex")}>
           管理原有 Qoder 配置
         </Button>

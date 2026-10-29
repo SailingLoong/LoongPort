@@ -2,9 +2,11 @@ import { Suspense } from "react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "@/App";
+import { relayApi } from "@/lib/api/relay";
+import { serviceOnboardingApi } from "@/lib/api/serviceOnboarding";
 import {
   LAST_APP_STORAGE_KEY,
   LAST_VIEW_STORAGE_KEY,
@@ -69,6 +71,7 @@ function renderApp() {
 }
 
 describe("relay directory routing", () => {
+  afterEach(() => vi.restoreAllMocks());
   beforeEach(() => {
     localStorage.setItem(LAST_VIEW_STORAGE_KEY, "providers");
     localStorage.setItem(LAST_APP_STORAGE_KEY, "claude");
@@ -86,6 +89,25 @@ describe("relay directory routing", () => {
   });
 
   it("returns from configuration to the add flow on Escape without leaving onboarding", async () => {
+    // This is the real selected-setup page. Only its read-only native boundary
+    // is supplied here; Escape must still be handled before the outer shell.
+    const discovery = vi.spyOn(relayApi, "discoverTiers").mockResolvedValue({
+      schemaVersion: 1,
+      relayId: 7,
+      account: {
+        identity: "fixture/account7",
+        siteOrigin: "https://fixture.example",
+        accountLabel: "Example",
+      },
+      revision: "fixture-revision",
+      choices: [],
+    });
+    const recovery = vi
+      .spyOn(relayApi, "getSetupOperation")
+      .mockResolvedValue(null);
+    const prepare = vi.spyOn(relayApi, "prepareTiers");
+    const refresh = vi.spyOn(relayApi, "refresh");
+    const dismiss = vi.spyOn(serviceOnboardingApi, "dismiss");
     renderApp();
     fireEvent.click(
       await screen.findByRole("button", { name: "loongport.addEntry.title" }),
@@ -98,18 +120,26 @@ describe("relay directory routing", () => {
     );
     expect(
       await screen.findByRole("heading", {
-        name: "loongport.onboarding.configure",
+        name: "准备接入配置",
       }),
     ).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "common.back" })).toHaveLength(
       1,
     );
+    await waitFor(() => expect(discovery).toHaveBeenCalledWith(7));
+    expect(recovery).toHaveBeenCalledWith(7);
+    expect(prepare).not.toHaveBeenCalled();
+    expect(refresh).not.toHaveBeenCalled();
+    expect(dismiss).not.toHaveBeenCalled();
     fireEvent.keyDown(document.body, { key: "Escape" });
     expect(await screen.findByTestId("relay-directory")).toBeVisible();
     expect(document.querySelector("header")).toHaveAttribute("hidden");
     expect(screen.getAllByRole("button", { name: "common.back" })).toHaveLength(
       1,
     );
+    expect(dismiss).not.toHaveBeenCalled();
+    expect(prepare).not.toHaveBeenCalled();
+    expect(refresh).not.toHaveBeenCalled();
   });
 
   it.each([

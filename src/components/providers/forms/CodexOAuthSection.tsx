@@ -1,6 +1,7 @@
 import {
   AccountWorkspace,
   AccountDetailSections,
+  AccountApplicationNavigation,
 } from "@/components/relay/accounts/AccountWorkspace";
 import React from "react";
 import { useTranslation } from "react-i18next";
@@ -33,6 +34,9 @@ import { useCodexOauth } from "./hooks/useCodexOauth";
 import { copyText } from "@/lib/clipboard";
 import CodexOauthAccountQuota from "@/components/CodexOauthAccountQuota";
 import { cn } from "@/lib/utils";
+import { usePreservedViewActive } from "@/components/ui/PreservedView";
+import { useCodexAccountProviderLinks } from "./hooks/useCodexAccountProviderLinks";
+import { CodexAccountNativeEntry } from "./CodexAccountNativeEntry";
 
 interface CodexOAuthSectionProps {
   className?: string;
@@ -69,6 +73,29 @@ interface CodexOAuthSectionProps {
   fastModeEnabled?: boolean;
   /** FAST mode 切换回调 */
   onFastModeChange?: (enabled: boolean) => void;
+}
+
+function CodexLinkedNativeEntry({
+  accountId,
+  needsReauth,
+}: {
+  accountId: string;
+  needsReauth: boolean;
+}) {
+  const active = usePreservedViewActive();
+  const links = useCodexAccountProviderLinks(accountId, active);
+  const openApplication = React.useContext(AccountApplicationNavigation);
+  return (
+    <CodexAccountNativeEntry
+      accountId={accountId}
+      needsReauth={needsReauth}
+      providers={links.providers}
+      state={links.state}
+      active={active}
+      onRetry={() => void links.retry()}
+      onOpenCodex={openApplication ? () => openApplication("codex") : undefined}
+    />
+  );
 }
 
 /**
@@ -554,31 +581,37 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
                   );
                   if (unified)
                     return (
-                      <AccountDetailSections
-                        authorization={
-                          <>
-                            {authorization}
-                            <p role="status" className="text-sm">
-                              {account.reauth_required
-                                ? "需要重新授权"
-                                : "账号授权已保存；实际可用性仍需请求验证"}
-                            </p>
-                          </>
-                        }
-                        entitlements={
-                          <>
-                            {quota}
+                      <>
+                        <AccountDetailSections
+                          authorization={
+                            <>
+                              {authorization}
+                              <p role="status" className="text-sm">
+                                {account.reauth_required
+                                  ? "需要重新授权"
+                                  : "账号授权已保存；实际可用性仍需请求验证"}
+                              </p>
+                            </>
+                          }
+                          entitlements={
+                            <>
+                              {quota}
+                              <p className="text-xs text-muted-foreground">
+                                显示原账号额度。本页没有签到领取能力，不以登录或额度信息代替消费验收。
+                              </p>
+                            </>
+                          }
+                          inference={
                             <p className="text-xs text-muted-foreground">
-                              显示原账号额度。本页没有签到领取能力，不以登录或额度信息代替消费验收。
+                              真实推理消费尚未验收。请通过实际应用入口验证模型、流式回复与错误恢复。
                             </p>
-                          </>
-                        }
-                        inference={
-                          <p className="text-xs text-muted-foreground">
-                            真实推理消费尚未验收。请通过实际应用入口验证模型、流式回复与错误恢复。
-                          </p>
-                        }
-                      />
+                          }
+                        />
+                        <CodexLinkedNativeEntry
+                          accountId={account.id}
+                          needsReauth={!!account.reauth_required}
+                        />
+                      </>
                     );
                   return (
                     <div

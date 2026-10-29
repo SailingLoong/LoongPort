@@ -135,6 +135,7 @@ export interface SavedAccount {
   sourceVerified: boolean;
   identitySource: "nativeCapture" | "officialLogin" | "packageDeclared" | null;
   officialLabel: string | null;
+  deviceMid?: string | null;
   capabilities: SessionCheckDisplay | null;
   canActivate: boolean;
   activationBlockedReason: AccountError | null;
@@ -238,6 +239,56 @@ export interface SwitchOperationStatus {
   refreshed: boolean;
   restartRequested: boolean;
 }
+export interface SwitchOperationQuery {
+  operation: SwitchOperationStatus | null;
+  // Query failure is unknown, never a failed switch. Keep any pointer already read.
+  error?: AccountError;
+  // A nonsecret pointer is not proof of completion (or even a readable record).
+  request: {
+    requestId: string;
+    target: string;
+    contextRevision: string;
+  } | null;
+}
+
+export interface SwitchRequestEvidence {
+  readonly source: Readonly<ContextSelection>;
+  readonly contextRevision: string;
+  readonly requestId: string;
+  readonly target: string;
+}
+
+/** Created locally only after the wrapper verifies this request's failed phase. */
+export class ConfirmedSwitchFailure implements AccountError {
+  readonly code: string;
+  readonly remedy: string;
+  readonly committed: boolean;
+  readonly source: ContextSelection;
+  readonly contextRevision: string;
+  readonly operation: SwitchOperationStatus;
+
+  constructor(
+    failure: unknown,
+    source: ContextSelection,
+    revision: string,
+    operation: SwitchOperationStatus,
+  ) {
+    const safe = safeAccountError(failure);
+    this.code = safe.code;
+    this.remedy = safe.remedy;
+    this.committed = safe.committed;
+    this.source = fields(source, ["installPath", "dataRoot", "keyMode"]);
+    this.contextRevision = revision;
+    this.operation = fields(operation, [
+      "requestId",
+      "target",
+      "phase",
+      "refreshed",
+      "restartRequested",
+    ]);
+  }
+}
+
 type SwitchRequest = {
   requestId: string;
   sourceKey: string;
@@ -500,6 +551,10 @@ export const accountErrorText = {
     "Recovery storage is full. Confirm or recapture an older record, then permanently clean up that selected record.",
   resource_limit:
     "The local account store reached its limit. Review local recovery and saved data before continuing.",
+  device_taken:
+    "This device ID is already bound to another account. Start sign-in again with a different device ID.",
+  device_mismatch:
+    "This account has a different device ID. Start sign-in again and select its existing device ID or explicitly choose a new one.",
   recovery_unconfirmed:
     "This recovery record is not confirmed and cannot be deleted. Confirm or explicitly recapture it first.",
   recovery_changed:
@@ -698,6 +753,7 @@ function publicCatalog(result: CatalogStatus): CatalogStatus {
       sourceVerified: profile.sourceVerified === true,
       identitySource: profile.identitySource ?? null,
       officialLabel: profile.officialLabel ?? null,
+      deviceMid: profile.deviceMid ?? null,
       capabilities: profile.capabilities
         ? publicCapabilities(profile.capabilities)
         : null,
@@ -811,17 +867,60 @@ export const zcodeAccountsApi = {
     requestId: string,
   ): Promise<SwitchOperationStatus | null> =>
     call("get_zcode_switch_operation", { source, contextRevision, requestId }),
+  queryLastOperationState: async (
+    source: ContextSelection,
+    contextRevision: string,
+    expected?: Pick<SwitchOperationStatus, "requestId" | "target">,
+  ): Promise<SwitchOperationQuery> => {
+    let request: SwitchOperationQuery["request"] = null;
+    try {
+      if (expected) {
+        // A captured original request remains queryable if another window
+        // replaces or deletes the latest pointer. This does not replay it.
+        request = {
+          ...fields(expected, ["requestId", "target"]),
+          contextRevision,
+        };
+      } else {
+        const stored = lastRequest(source);
+        if (!stored || stored.sourceKey !== sourceKey(source))
+          return { operation: null, request: null };
+        // Capture once, before awaiting: another window may replace the pointer.
+        request = fields(stored, ["requestId", "target", "contextRevision"]);
+      }
+      const operation = await zcodeAccountsApi.operationStatus(
+        source,
+        contextRevision,
+        request.requestId,
+      );
+      return {
+        operation:
+          operation?.requestId === request.requestId &&
+          operation.target === request.target
+            ? fields(operation, [
+                "requestId",
+                "target",
+                "phase",
+                "refreshed",
+                "restartRequested",
+              ])
+            : null,
+        request,
+      };
+    } catch (cause) {
+      return { operation: null, request, error: safeAccountError(cause) };
+    }
+  },
   queryLastOperation: async (
     source: ContextSelection,
     contextRevision: string,
   ): Promise<SwitchOperationStatus | null> => {
-    const request = lastRequest(source);
-    if (!request || request.sourceKey !== sourceKey(source)) return null;
-    return zcodeAccountsApi.operationStatus(
+    const result = await zcodeAccountsApi.queryLastOperationState(
       source,
       contextRevision,
-      request.requestId,
     );
+    if (result.error) throw result.error;
+    return result.operation;
   },
   openForLogin: (source: ContextSelection): Promise<void> =>
     call("open_zcode_for_account_login", { source }),
@@ -1044,9 +1143,28 @@ export const zcodeAccountsApi = {
     contextRevision: string,
     id: string,
     catalogRevision: string,
+    onRequest?: (evidence: SwitchRequestEvidence) => void,
   ): Promise<"switched" | "refreshed"> => {
+    const reportRequest = (request: SwitchRequest) => {
+      if (!onRequest) return;
+      try {
+        onRequest(
+          Object.freeze({
+            source: Object.freeze(
+              fields(source, ["installPath", "dataRoot", "keyMode"]),
+            ),
+            contextRevision,
+            requestId: request.requestId,
+            target: request.target,
+          }),
+        );
+      } catch {
+        // A readonly observer must not change the original native workflow.
+      }
+    };
     let previous = lastRequest(source);
     if (previous?.sourceKey === sourceKey(source)) {
+      reportRequest(previous);
       // Resolve the original physical operation before allocating another identity.
       // A lost reply must never become a second quit/write/restart sequence.
       const original = await zcodeAccountsApi.operationStatus(
@@ -1108,6 +1226,7 @@ export const zcodeAccountsApi = {
             catalogRevision,
           };
     rememberRequest(request);
+    reportRequest(request);
     try {
       const result = await call<"switched" | "refreshed">(
         "switch_zcode_saved_account",
@@ -1149,7 +1268,19 @@ export const zcodeAccountsApi = {
           remedy: "queryOriginal",
           committed: true,
         };
-      if (status?.phase === "failed") forgetRequest(request.requestId);
+      if (
+        status?.phase === "failed" &&
+        status.requestId === request.requestId &&
+        status.target === id
+      ) {
+        forgetRequest(request.requestId);
+        throw new ConfirmedSwitchFailure(
+          cause,
+          source,
+          contextRevision,
+          status,
+        );
+      }
       throw safeAccountError(cause);
     }
   },

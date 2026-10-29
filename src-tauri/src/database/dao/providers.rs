@@ -10,6 +10,23 @@ use rusqlite::{params, OptionalExtension, Transaction};
 use std::collections::{HashMap, HashSet};
 #[path = "providers/qoder_automatic.rs"]
 mod qoder_automatic;
+#[cfg(test)]
+#[path = "providers/selected_prepare_tests.rs"]
+mod selected_prepare_tests;
+#[cfg(test)]
+#[path = "providers/setup_prepare_tests.rs"]
+mod setup_prepare_tests;
+
+/// Preparation stores a candidate without publishing it into application routing.
+/// All ordinary saves retain the existing update and chain-publication semantics.
+#[derive(Clone, Copy)]
+enum ProviderSaveIntent<'a> {
+    Maintain,
+    PrepareNewLocal {
+        rate_multiplier: Option<f64>,
+        authority: Option<&'a crate::relay::setup_journal::PreparationAuthority>,
+    },
+}
 
 /// Delete one row in a caller-owned inventory mutation. The final inventory
 /// must be reconciled before that mutation is committed or published.
@@ -458,6 +475,72 @@ impl Database {
         )
     }
 
+    /// Insert a selected configuration through the original vault-aware writer.
+    /// Existing rows are never rewritten, including when another writer inserted
+    /// after discovery. No current selection or routing-chain membership changes.
+    pub(crate) fn prepare_provider_if_absent(
+        &self,
+        app_type: &str,
+        provider: &Provider,
+        rate_multiplier: Option<f64>,
+        authority: Option<&crate::relay::setup_journal::PreparationAuthority>,
+    ) -> Result<bool, AppError> {
+        use crate::services::provider::qoder_daily::PersistOutcome;
+        let vault = self.secrets.read()?;
+        self.save_provider_with_vault_owned(
+            app_type,
+            provider,
+            (
+                None,
+                false,
+                false,
+                None,
+                ProviderSaveIntent::PrepareNewLocal {
+                    rate_multiplier,
+                    authority,
+                },
+            ),
+            self.secrets.as_ref(),
+            &vault,
+            None,
+        )
+        .map(|outcome| matches!(outcome, PersistOutcome::Applied))
+    }
+
+    /// Validate the original setup scope inside the caller's pinned storage/SQL
+    /// boundary. Shared by POST preflight and this same provider transaction.
+    pub(crate) fn validate_relay_setup_authority_on(
+        conn: &rusqlite::Connection,
+        storage: &StorageContext,
+        authority: &crate::relay::setup_journal::PreparationAuthority,
+        lifecycle_epoch: u64,
+    ) -> Result<crate::relay::setup_contract::RelaySetupReceipt, AppError> {
+        use crate::relay::setup_contract::{account_identity_digest, session_fingerprint};
+        crate::database::storage::check_identity(conn, storage)?;
+        let receipt = super::relay_setup_operations::bound_on(
+            conn,
+            &authority.storage_binding,
+            &authority.operation_id,
+        )?;
+        let account = crate::relay::creds::get(conn, storage, receipt.relay_id)?
+            .ok_or_else(|| AppError::Config("relaySetup.accountChanged".into()))?;
+        let id = account
+            .account_id
+            .ok_or_else(|| AppError::Config("relaySetup.accountChanged".into()))?;
+        let identity =
+            account_identity_digest(account.backend_kind.as_str(), &account.site_origin, id)
+                .map_err(|code| AppError::Config(format!("relaySetup.{code}")))?;
+        let fingerprint = session_fingerprint(&identity, &account.auth_token);
+        super::relay_setup_operations::validate_authority_on(
+            conn,
+            authority,
+            storage.identity().store_id(),
+            &identity,
+            &fingerprint,
+            lifecycle_epoch,
+        )
+    }
+
     /// The existing provider SQL owner, under the operation's pinned generation.
     /// Compare the row and publish its replacement in this same SQLite transaction.
     pub(crate) fn save_provider_with_vault(
@@ -472,7 +555,13 @@ impl Database {
         self.save_provider_with_vault_owned(
             app_type,
             provider,
-            (expected, mark_user_edited, false, None),
+            (
+                expected,
+                mark_user_edited,
+                false,
+                None,
+                ProviderSaveIntent::Maintain,
+            ),
             session,
             vault,
             None,
@@ -491,7 +580,7 @@ impl Database {
         self.save_provider_with_vault_owned(
             app_type,
             provider,
-            (None, false, reissue, None),
+            (None, false, reissue, None, ProviderSaveIntent::Maintain),
             self.secrets.as_ref(),
             &vault,
             None,
@@ -513,7 +602,13 @@ impl Database {
         self.save_provider_with_vault_owned(
             app_type,
             provider,
-            (Some(expected), mark_user_edited, false, proof),
+            (
+                Some(expected),
+                mark_user_edited,
+                false,
+                proof,
+                ProviderSaveIntent::Maintain,
+            ),
             session,
             vault,
             None,
@@ -530,12 +625,13 @@ impl Database {
             bool,
             bool,
             Option<&crate::database::credential_revision::WriteProof>,
+            ProviderSaveIntent<'_>,
         ),
         session: &crate::secrets::session::SecretSession,
         vault: &std::sync::RwLockReadGuard<'_, StorageContext>,
         qoder_operation: Option<&crate::services::provider::qoder_daily::Operation>,
     ) -> Result<crate::services::provider::qoder_daily::PersistOutcome, AppError> {
-        let (expected, mark_user_edited, reissue, credential_write) = comparison;
+        let (expected, mark_user_edited, reissue, credential_write, intent) = comparison;
         if !std::ptr::eq(session, self.secrets.as_ref()) {
             return Err(AppError::Config("settings.session_mismatch".into()));
         }
@@ -545,7 +641,10 @@ impl Database {
         // connections. Reserve the writer before reading, so SQLite's busy
         // handler can wait instead of failing a deferred lock-upgrade deadlock.
         // Ordinary provider saves retain their existing transaction behavior.
-        let behavior = if qoder_operation.is_some() || credential_write.is_some() {
+        let behavior = if qoder_operation.is_some()
+            || credential_write.is_some()
+            || matches!(intent, ProviderSaveIntent::PrepareNewLocal { .. })
+        {
             rusqlite::TransactionBehavior::Immediate
         } else {
             rusqlite::TransactionBehavior::Deferred
@@ -555,10 +654,78 @@ impl Database {
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         use crate::services::provider::qoder_daily::{self, PersistOutcome};
+        let setup_authority = match intent {
+            ProviderSaveIntent::PrepareNewLocal { authority, .. } => authority,
+            ProviderSaveIntent::Maintain => None,
+        };
+        let setup_receipt = setup_authority
+            .map(|authority| {
+                Self::validate_relay_setup_authority_on(
+                    &tx,
+                    vault,
+                    authority,
+                    session.lifecycle_epoch(),
+                )
+            })
+            .transpose()?;
+        if let Some(receipt) = &setup_receipt {
+            if !receipt
+                .targets
+                .iter()
+                .any(|target| target.app == app_type && target.provider_id == provider.id)
+            {
+                return Err(AppError::Config("relaySetup.selectionChanged".into()));
+            }
+        }
         let credential_revisions =
             crate::database::credential_revision::original_provider_uses_revisions(&tx)?;
         let current =
             Self::get_all_providers_on_connection(&tx, vault, app_type)?.shift_remove(&provider.id);
+        if matches!(intent, ProviderSaveIntent::PrepareNewLocal { .. }) && current.is_some() {
+            // Never rewrite a concurrent winner. Recorded setup also checks its
+            // identity and commits the Existing fact under this same transaction.
+            if let (Some(authority), Some(receipt), Some(existing)) =
+                (setup_authority, setup_receipt.as_ref(), current.as_ref())
+            {
+                let target = receipt
+                    .targets
+                    .iter()
+                    .find(|target| target.app == app_type && target.provider_id == provider.id)
+                    .ok_or_else(|| AppError::Config("relaySetup.selectionChanged".into()))?;
+                if !crate::relay::managed::belongs_to_relay(
+                    existing,
+                    provider.website_url.as_deref().unwrap_or_default(),
+                    provider
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.loongport_account_id),
+                ) || existing
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.loongport_group.as_ref())
+                    .is_some_and(|group| group.id != target.group_id)
+                {
+                    return Err(AppError::Config(
+                        "relaySetup.needsConfigurationReview".into(),
+                    ));
+                }
+                super::relay_setup_operations::local_fact_in_transaction_on(
+                    &tx,
+                    &authority.storage_binding,
+                    &authority.operation_id,
+                    app_type,
+                    crate::relay::setup_contract::ConfigurationState::Existing,
+                    chrono::Utc::now().timestamp_millis(),
+                )?;
+                tx.commit()?;
+            }
+            return Ok(PersistOutcome::AlreadyCurrent);
+        }
+        if matches!(intent, ProviderSaveIntent::PrepareNewLocal { .. }) {
+            crate::proxy::application_routing::preserve_chain_before_local_preparation_on(
+                &tx, app_type,
+            )?;
+        }
         let mut replacement = provider.clone();
         if let Some(operation) = qoder_operation {
             let previous = current
@@ -757,6 +924,26 @@ impl Database {
             }
         }
 
+        if let ProviderSaveIntent::PrepareNewLocal {
+            rate_multiplier, ..
+        } = intent
+        {
+            tx.execute(
+                "UPDATE providers SET available_models=?1, tier_rate_multiplier=?4 WHERE id=?2 AND app_type=?3",
+                params![
+                    provider
+                        .available_models
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()
+                        .map_err(|error| AppError::Database(error.to_string()))?,
+                    provider.id,
+                    app_type,
+                    rate_multiplier,
+                ],
+            )?;
+        }
+
         // Incarnation belongs to this original row and this same credential transaction.
         // Ordinary label/model/route writes preserve it; explicit reissue never relies on equality.
         let rotate = reissue
@@ -782,6 +969,22 @@ impl Database {
                 params![provider.id, app_type],
             )?;
         }
+        if let Some(authority) = setup_authority {
+            Self::validate_relay_setup_authority_on(
+                &tx,
+                vault,
+                authority,
+                session.lifecycle_epoch(),
+            )?;
+            super::relay_setup_operations::local_fact_in_transaction_on(
+                &tx,
+                &authority.storage_binding,
+                &authority.operation_id,
+                app_type,
+                crate::relay::setup_contract::ConfigurationState::Prepared,
+                chrono::Utc::now().timestamp_millis(),
+            )?;
+        }
         tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
         // 释放连接锁再追加链成员：note_provider_created 内部要拿同一把锁，
         // conn 守卫活到函数尾的话这里就死锁了。
@@ -790,7 +993,7 @@ impl Database {
         // 链成员资格：新档位（插入分支）自动进链垫底——上游新增默认排在最后生效。
         // 只挂创建、不挂更新：被用户应用出链的档位刷新后不能爬回链里。
         // 追加失败只警告不阻断——主写入已成功，链是辅助状态（与 record_attempt 同款尽力而为）。
-        if !is_update {
+        if !is_update && matches!(intent, ProviderSaveIntent::Maintain) {
             if let Err(e) = crate::proxy::application_routing::note_provider_created(
                 self,
                 app_type,
@@ -856,7 +1059,13 @@ impl Database {
         self.save_provider_with_vault_owned(
             "codex",
             &next,
-            (Some(&expected), false, false, None),
+            (
+                Some(&expected),
+                false,
+                false,
+                None,
+                ProviderSaveIntent::Maintain,
+            ),
             self.secrets.as_ref(),
             &vault,
             Some(operation),

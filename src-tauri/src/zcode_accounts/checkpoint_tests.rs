@@ -4,6 +4,95 @@ use super::*;
 use crate::secrets::storage::StorageContext;
 use crate::secrets::VaultContext;
 
+#[test]
+fn saved_profile_accepts_its_own_device_identity() {
+    let input = serde_json::json!({
+        "label": null,
+        "identitySource": "officialLogin",
+        "evidence": null,
+        "requiresCapabilityCheck": true,
+        "deviceMid": "11111111-2222-4333-8444-555555555555"
+    });
+    let details: ProfileDetails = serde_json::from_value(input).unwrap();
+    let output = serde_json::to_value(details).unwrap();
+    assert_eq!(output["deviceMid"], "11111111-2222-4333-8444-555555555555");
+}
+
+#[test]
+fn account_device_bindings_remain_distinct_and_reject_duplicates() {
+    let native = native();
+    let a = native
+        .inspect(&native_document(OAuthFamily::Zai, "first", "one"))
+        .unwrap();
+    let b = native
+        .inspect(&native_document(OAuthFamily::Zai, "second", "two"))
+        .unwrap();
+    let mut catalog = ProfileCatalog::default();
+    catalog.upsert(a.clone());
+    catalog.upsert(b.clone());
+    let first = "11111111-2222-4333-8444-555555555555";
+    let second = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    catalog
+        .set_device_mid(a.identity(), &native, Some(first), true)
+        .unwrap();
+    catalog.upsert(a.clone());
+    catalog
+        .set_device_mid(a.identity(), &native, Some(first), false)
+        .unwrap();
+    assert_eq!(
+        catalog.details(&a, &native).device_mid.as_deref(),
+        Some(first)
+    );
+    assert_eq!(
+        catalog.set_device_mid(b.identity(), &native, Some(first), true),
+        Err(CheckpointError::DuplicateIdentity)
+    );
+    // A flow started before the ID became exclusive cannot steal it on save.
+    assert_eq!(
+        catalog.set_device_mid(b.identity(), &native, Some(first), false),
+        Err(CheckpointError::DuplicateIdentity)
+    );
+    catalog
+        .set_device_mid(b.identity(), &native, Some(second), true)
+        .unwrap();
+    assert_eq!(
+        catalog.details(&a, &native).device_mid.as_deref(),
+        Some(first)
+    );
+    assert_eq!(
+        catalog.details(&b, &native).device_mid.as_deref(),
+        Some(second)
+    );
+}
+
+#[test]
+fn device_binding_uses_a_new_catalog_format() {
+    let vault = StorageContext::Encrypted(VaultContext::generate().unwrap());
+    let native = native();
+    let snapshot = native
+        .inspect(&native_document(OAuthFamily::Zai, "a", "local"))
+        .unwrap();
+    let mut catalog = ProfileCatalog::default();
+    catalog.upsert(snapshot.clone());
+    catalog
+        .set_device_mid(
+            snapshot.identity(),
+            &native,
+            Some("11111111-2222-4333-8444-555555555555"),
+            true,
+        )
+        .unwrap();
+    let encoded = catalog.seal(&vault, &native).unwrap();
+    let bytes = vault
+        .open(&["file", PROFILE_FILE, "content"], &encoded)
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(payload["version"], 5);
+    assert!(ProfileCatalog::open(&encoded, &vault, &native).is_ok());
+    let downgrade = mutate_payload(&encoded, PROFILE_FILE, &vault, |p| p["version"] = 3.into());
+    assert!(ProfileCatalog::open(&downgrade, &vault, &native).is_err());
+}
+
 fn native() -> NativeCipher {
     NativeCipher::new(TEST_CONTEXT, TEST_SECRET).unwrap()
 }

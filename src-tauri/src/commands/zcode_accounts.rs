@@ -238,8 +238,10 @@ pub(crate) async fn begin_zcode_official_login(
     state: State<'_, AppState>,
     family: String,
     data_root: Option<std::path::PathBuf>,
+    device_mid: Option<String>,
 ) -> Result<crate::zcode_accounts::oauth::LoginProgress, PublicError> {
-    crate::zcode_accounts::oauth_runtime::begin(state.db.clone(), &family, data_root).await
+    crate::zcode_accounts::oauth_runtime::begin(state.db.clone(), &family, data_root, device_mid)
+        .await
 }
 #[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn begin_saved_zcode_coding(

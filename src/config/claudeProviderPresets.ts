@@ -801,14 +801,15 @@ export const providerPresets: ProviderPreset[] = [
     name: "OpenCode Go",
     websiteUrl: "https://opencode.ai/go",
     apiKeyUrl: "https://opencode.ai",
-    // Go 网关 /v1/messages 只认 x-api-key（Bearer 被静默忽略），
-    // 必须用 ANTHROPIC_API_KEY，不能换回 ANTHROPIC_AUTH_TOKEN。
+    // 官方文档只列 /inference/go/anthropic 这一 Anthropic 端基址；未文档化的
+    // 旧入口 /zen/go 只认 x-api-key（Bearer 被静默忽略），新入口两种头都认。
+    // 继续用 ANTHROPIC_API_KEY（x-api-key）直填保持不变。
     // 直连 Anthropic 端点可用除 grok-4.5 外的全部 Go 模型；
     // Chat 组模型（DeepSeek/GLM/Kimi 等）依赖网关服务端格式转换（未见文档承诺）。
     apiKeyField: "ANTHROPIC_API_KEY",
     settingsConfig: {
       env: {
-        ANTHROPIC_BASE_URL: "https://opencode.ai/zen/go",
+        ANTHROPIC_BASE_URL: "https://opencode.ai/inference/go/anthropic",
         ANTHROPIC_API_KEY: "",
         ANTHROPIC_MODEL: "deepseek-v4-flash",
         ANTHROPIC_DEFAULT_HAIKU_MODEL: "deepseek-v4-flash",
@@ -817,7 +818,7 @@ export const providerPresets: ProviderPreset[] = [
       },
     },
     category: "third_party",
-    endpointCandidates: ["https://opencode.ai/zen/go"],
+    endpointCandidates: ["https://opencode.ai/inference/go/anthropic"],
     icon: "opencode",
     iconColor: "#211E1E",
   },

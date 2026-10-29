@@ -1,6 +1,7 @@
 //! Narrow debug/test-hook fixtures exercising the production relay boundary.
 //! Only loopback HTTP and an in-memory provider database are used.
 use super::*;
+use crate::relay::setup_journal::test_support::ConfirmedJournal;
 use axum::{body::Body, extract::Request, routing::any, Json, Router};
 use serde_json::{json, Value};
 
@@ -179,7 +180,14 @@ fn verify_persistence() {
     let account = account(7);
     let db = Arc::new(crate::database::Database::memory().unwrap());
     let state = AppState::new(db.clone()).unwrap();
-    persist_provision_batch_scope(&state, &account, batch(&account, "old"), false).unwrap();
+    persist_provision_batch_scope(
+        &state,
+        &account,
+        batch(&account, "old"),
+        ProvisionPersistenceIntent::SelectedPrepare,
+        None,
+    )
+    .unwrap();
     let old_id = managed::newapi_provider_id_for(&account.site_origin, 7, "old");
     let old_codex = db.get_provider_by_id(&old_id, "codex").unwrap().unwrap();
     let mut next = batch(&account, "selected");
@@ -190,7 +198,14 @@ fn verify_persistence() {
             group_id: "selected".into(),
         }],
     );
-    let summary = persist_provision_batch_scope(&state, &account, next, false).unwrap();
+    let summary = persist_provision_batch_scope(
+        &state,
+        &account,
+        next,
+        ProvisionPersistenceIntent::SelectedPrepare,
+        None,
+    )
+    .unwrap();
     assert_eq!(summary.tiers.len(), 1);
     for app in ["claude", "codex", "gemini"] {
         assert!(db.get_provider_by_id(&old_id, app).unwrap().is_some());
@@ -206,6 +221,275 @@ fn verify_persistence() {
     assert!(db.get_provider_by_id(&new_id, "codex").unwrap().is_some());
     assert!(db.get_provider_by_id(&new_id, "claude").unwrap().is_none());
     assert!(db.get_provider_by_id(&new_id, "gemini").unwrap().is_none());
+}
+
+fn verify_selected_isolation() {
+    let account = account(7);
+    let db = Arc::new(crate::database::Database::memory().unwrap());
+    let state = AppState::new(db.clone()).unwrap();
+    let mut selected = batch(&account, "selected");
+    restrict_batch_to_selection(
+        &mut selected,
+        &[RelayTierSelection {
+            app: "codex".into(),
+            group_id: "selected".into(),
+        }],
+    );
+    let id = selected.candidates[0].provider_id.clone();
+    let mut original = provider(id.clone(), Some(7));
+    original.settings_config =
+        json!({"auth":{"OPENAI_API_KEY":"fixture-manual-key"},"config":"model = \"manual-model\""});
+    original.notes = Some("retain manually edited routing".into());
+    original.in_failover_queue = true;
+    db.save_provider("codex", &original).unwrap();
+    db.set_available_models("codex", &id, &["manual-model".into()])
+        .unwrap();
+    db.set_current_provider("codex", &id).unwrap();
+    db.set_user_edited("codex", &id, true).unwrap();
+    db.set_setting(
+        "application_priority_codex",
+        &serde_json::to_string(&[&id]).unwrap(),
+    )
+    .unwrap();
+    let before = db.get_provider_by_id(&id, "codex").unwrap().unwrap();
+    let before_chain = db.get_setting("application_priority_codex").unwrap();
+    let before_mcp = db.get_all_mcp_servers().unwrap();
+    let summary = persist_provision_batch_scope(
+        &state,
+        &account,
+        selected,
+        ProvisionPersistenceIntent::SelectedPrepare,
+        None,
+    )
+    .unwrap();
+    let after = db.get_provider_by_id(&id, "codex").unwrap().unwrap();
+    assert_eq!(
+        serde_json::to_value(&before).unwrap(),
+        serde_json::to_value(&after).unwrap()
+    );
+    assert_eq!(before.available_models, after.available_models);
+    assert_eq!(
+        db.get_current_provider("codex").unwrap().as_deref(),
+        Some(id.as_str())
+    );
+    assert_eq!(
+        db.get_setting("application_priority_codex").unwrap(),
+        before_chain
+    );
+    assert_eq!(
+        serde_json::to_value(db.get_all_mcp_servers().unwrap()).unwrap(),
+        serde_json::to_value(before_mcp).unwrap()
+    );
+    assert!(db.get_user_edited("codex", &id).unwrap());
+    assert!(summary.merged_providers.is_empty());
+    assert_eq!(summary.tiers[0].model, "manual-model");
+}
+
+/// Exercise the new-row branch against side effects that would otherwise be
+/// observable: a mergeable current duplicate, registered MCP, and live files.
+fn verify_selected_new_projection_isolation() {
+    let account = account(7);
+    let db = Arc::new(crate::database::Database::memory().unwrap());
+    let state = AppState::new(db.clone()).unwrap();
+    let mut selected = batch(&account, "selected-new");
+    restrict_batch_to_selection(
+        &mut selected,
+        &[RelayTierSelection {
+            app: "codex".into(),
+            group_id: "selected-new".into(),
+        }],
+    );
+    let candidate = &selected.candidates[0];
+    let id = candidate.provider_id.clone();
+    let mut duplicate = provider("fixture-unmanaged-current".into(), None);
+    duplicate.settings_config = provider_config::settings_config_for(
+        &AppType::Codex,
+        &candidate.api_key,
+        "Imported duplicate",
+        &sub2api::base_url_for(
+            &AppType::Codex,
+            &account.site_origin,
+            &candidate.api_base_url,
+        ),
+        "manual-model",
+    )
+    .unwrap();
+    duplicate.in_failover_queue = true;
+    db.save_provider("codex", &duplicate).unwrap();
+    db.set_current_provider("codex", &duplicate.id).unwrap();
+    db.set_user_edited("codex", &duplicate.id, true).unwrap();
+    let chain = format!("[ \"{}\" ]", duplicate.id);
+    db.set_setting("application_priority_codex", &chain)
+        .unwrap();
+    db.save_mcp_server(&crate::app_config::McpServer {
+        id: crate::relay::imagegen_mcp::IMAGEGEN_MCP_ID.into(),
+        name: "Existing image tool sentinel".into(),
+        server: json!({"type":"stdio", "command":"fixture-never-executed"}),
+        apps: crate::app_config::McpApps::default(),
+        description: Some("preserve registration until explicit apply".into()),
+        homepage: None,
+        docs: None,
+        tags: vec!["fixture-sentinel".into()],
+    })
+    .unwrap();
+
+    // Integration support installs a per-process synthetic home before entry.
+    assert!(std::env::var_os("CC_SWITCH_TEST_HOME").is_some());
+    struct LiveSentinel(std::path::PathBuf, Option<Vec<u8>>);
+    impl Drop for LiveSentinel {
+        fn drop(&mut self) {
+            match &self.1 {
+                Some(bytes) => std::fs::write(&self.0, bytes).unwrap(),
+                None => {
+                    let _ = std::fs::remove_file(&self.0);
+                }
+            }
+        }
+    }
+    let mut live = Vec::new();
+    for (path, content) in [
+        (
+            crate::codex_config::get_codex_config_path(),
+            b"# selected preparation must not publish live\nmodel = \"manual-model\"\n".as_slice(),
+        ),
+        (
+            crate::codex_config::get_codex_auth_path(),
+            br#"{"OPENAI_API_KEY":"fixture-live-sentinel"}"#.as_slice(),
+        ),
+    ] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        live.push((
+            LiveSentinel(path.clone(), std::fs::read(&path).ok()),
+            content.to_vec(),
+        ));
+        std::fs::write(path, content).unwrap();
+    }
+    let before = db
+        .get_provider_by_id(&duplicate.id, "codex")
+        .unwrap()
+        .unwrap();
+    let before_mcp = serde_json::to_value(db.get_all_mcp_servers().unwrap()).unwrap();
+    let summary = persist_provision_batch_scope(
+        &state,
+        &account,
+        selected,
+        ProvisionPersistenceIntent::SelectedPrepare,
+        None,
+    )
+    .unwrap();
+    assert!(summary.failures.is_empty(), "{:?}", summary.failures);
+    assert_eq!(summary.tiers.len(), 1);
+    assert!(summary.merged_providers.is_empty());
+    let prepared = db.get_provider_by_id(&id, "codex").unwrap().unwrap();
+    assert_eq!(
+        provider_fingerprint::for_provider(&prepared, &AppType::Codex),
+        provider_fingerprint::for_provider(&before, &AppType::Codex),
+        "fixture duplicate must really be mergeable",
+    );
+    assert!(provider_fingerprint::for_provider(&prepared, &AppType::Codex).is_some());
+    assert_eq!(
+        serde_json::to_value(&before).unwrap(),
+        serde_json::to_value(
+            db.get_provider_by_id(&duplicate.id, "codex")
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        db.get_current_provider("codex").unwrap().as_deref(),
+        Some(duplicate.id.as_str())
+    );
+    assert!(db.get_user_edited("codex", &duplicate.id).unwrap());
+    assert!(!prepared.in_failover_queue);
+    assert_eq!(
+        db.get_setting("application_priority_codex")
+            .unwrap()
+            .as_deref(),
+        Some(chain.as_str())
+    );
+    assert_eq!(
+        serde_json::to_value(db.get_all_mcp_servers().unwrap()).unwrap(),
+        before_mcp
+    );
+    for (guard, bytes) in &live {
+        assert_eq!(std::fs::read(&guard.0).unwrap(), *bytes);
+    }
+}
+
+fn verify_selected_metadata_rollback() {
+    // AppState construction performs the admitted legacy routing migration, so a
+    // fresh Database no longer implies an absent chain after startup. Exercise
+    // both transaction branches explicitly rather than assuming startup is inert.
+    for initial_chain in [None, Some("[  ]")] {
+        verify_selected_metadata_rollback_with_chain(initial_chain);
+    }
+}
+
+fn verify_selected_metadata_rollback_with_chain(initial_chain: Option<&str>) {
+    let account = account(7);
+    let db = Arc::new(crate::database::Database::memory().unwrap());
+    let state = AppState::new(db.clone()).unwrap();
+    match initial_chain {
+        Some(raw) => db.set_setting("application_priority_codex", raw).unwrap(),
+        None => {
+            db.conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "DELETE FROM settings WHERE key='application_priority_codex'",
+                    [],
+                )
+                .unwrap();
+        }
+    }
+    let mut selected = batch(&account, "rollback");
+    restrict_batch_to_selection(
+        &mut selected,
+        &[RelayTierSelection {
+            app: "codex".into(),
+            group_id: "rollback".into(),
+        }],
+    );
+    let id = selected.candidates[0].provider_id.clone();
+    assert_eq!(
+        db.get_setting("application_priority_codex")
+            .unwrap()
+            .as_deref(),
+        initial_chain
+    );
+    db.conn
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_initial_rate BEFORE UPDATE OF tier_rate_multiplier ON providers
+         BEGIN SELECT RAISE(ABORT, 'fixture initial rate failure'); END;",
+        )
+        .unwrap();
+    let summary = persist_provision_batch_scope(
+        &state,
+        &account,
+        selected,
+        ProvisionPersistenceIntent::SelectedPrepare,
+        None,
+    )
+    .unwrap();
+    assert_eq!(summary.failures.len(), 1);
+    assert!(summary.failures[0]
+        .reason
+        .contains("fixture initial rate failure"));
+    assert!(summary.tiers.is_empty());
+    assert!(
+        db.get_provider_by_id(&id, "codex").unwrap().is_none(),
+        "initial metadata failure must not leave a partially prepared provider"
+    );
+    assert_eq!(
+        db.get_setting("application_priority_codex")
+            .unwrap()
+            .as_deref(),
+        initial_chain,
+        "provider failure must roll back new chain materialization and preserve existing bytes"
+    );
 }
 
 fn verify_legacy() {
@@ -269,10 +553,11 @@ async fn verify_sub2api(inactive: bool) {
         .iter()
         .all(|(method, _)| method == "GET"));
     fixture.state.lock().unwrap().keys = [2, 99].into_iter().map(|id| json!({"id":id,"key":format!("fixture-old-{id}"),"name":format!("LoongPort/a7/anthropic/{id}"),"status":"active"})).collect();
-    let first = provision::provision_selected(&client, &tables, &[1, 1])
+    let journal = ConfirmedJournal::new(&["1", "3"]);
+    let first = provision::provision_selected_recorded(&client, &tables, &[1, 1], &journal)
         .await
         .unwrap();
-    let repeated = provision::provision_selected(&client, &tables, &[1])
+    let repeated = provision::provision_selected_recorded(&client, &tables, &[1], &journal)
         .await
         .unwrap();
     assert_eq!(first.tiers.len(), 1);
@@ -290,7 +575,7 @@ async fn verify_sub2api(inactive: bool) {
         .keys
         .iter()
         .any(|key| key["id"] == 3));
-    let composite = provision::provision_selected(&client, &tables, &[3, 3])
+    let composite = provision::provision_selected_recorded(&client, &tables, &[3, 3], &journal)
         .await
         .unwrap();
     assert_eq!(composite.tiers.len(), 2);
@@ -347,10 +632,11 @@ async fn verify_newapi() {
         .iter()
         .all(|(method, _)| method == "GET"));
     fixture.state.lock().unwrap().tokens = ["beta", "removed"].into_iter().enumerate().map(|(id, group)| json!({"id":id+10,"key":"masked","name":if group == "beta" { "LoongPort/napi/a7/9E5k5185SOn3P436lHIcTOjLtPJlxHkM" } else { "LoongPort/napi/a7/4feXWMxC5v5gN5QSBdH7w39XgPE6oHfQ" },"group":group,"status":1})).collect();
-    let first = newapi_provision::reconcile_selected_for_account(&client, 7, &selected)
+    let journal = ConfirmedJournal::new(&["alpha"]);
+    let first = newapi_provision::reconcile_selected_recorded(&client, 7, &selected, &journal)
         .await
         .unwrap();
-    let second = newapi_provision::reconcile_selected_for_account(&client, 7, &selected)
+    let second = newapi_provision::reconcile_selected_recorded(&client, 7, &selected, &journal)
         .await
         .unwrap();
     assert_eq!(first.tokens_created, 1);
@@ -456,10 +742,12 @@ async fn verify_capabilities() {
             }];
             let db = Arc::new(crate::database::Database::memory().unwrap());
             let state = Arc::new(AppState::new(db.clone()).unwrap());
+            let journal = ConfirmedJournal::for_app(&[group], selected_app);
             for expected_created in [1, 0] {
-                let batch = provision_backend_scope(&account, None, Some(&selected))
-                    .await
-                    .unwrap();
+                let batch =
+                    provision_backend_scope(&account, None, Some(&selected), Some(&journal))
+                        .await
+                        .unwrap();
                 assert_eq!(batch.keys_created, expected_created);
                 assert_eq!(batch.candidates.len(), usize::from(expected_success));
                 assert!(batch
@@ -472,7 +760,7 @@ async fn verify_capabilities() {
                 let persist_account = account.clone();
                 let persist_state = state.clone();
                 let summary = tokio::task::spawn_blocking(move || {
-                    persist_provision_batch_scope(&persist_state, &persist_account, batch, false)
+                    persist_provision_batch_scope(&persist_state, &persist_account, batch, ProvisionPersistenceIntent::SelectedPrepare, None)
                 }).await.unwrap().expect("selected partial creation must return a structured receipt, not erase progress as an error");
                 assert_eq!(summary.keys_created, expected_created);
                 assert_eq!(summary.tiers.len(), usize::from(expected_success));
@@ -516,8 +804,9 @@ async fn verify_composite_partial() {
         }];
         let db = Arc::new(crate::database::Database::memory().unwrap());
         let state = Arc::new(AppState::new(db.clone()).unwrap());
+        let journal = ConfirmedJournal::new(&["3"]);
         for expected_created in [1, 0] {
-            let batch = provision_backend_scope(&account, None, Some(&selected))
+            let batch = provision_backend_scope(&account, None, Some(&selected), Some(&journal))
                 .await
                 .expect(
                     "a post-create composite catalog failure must preserve the partial receipt",
@@ -528,7 +817,13 @@ async fn verify_composite_partial() {
             let persist_state = state.clone();
             let persist_account = account.clone();
             let receipt = tokio::task::spawn_blocking(move || {
-                persist_provision_batch_scope(&persist_state, &persist_account, batch, false)
+                persist_provision_batch_scope(
+                    &persist_state,
+                    &persist_account,
+                    batch,
+                    ProvisionPersistenceIntent::SelectedPrepare,
+                    None,
+                )
             })
             .await
             .unwrap()
@@ -556,8 +851,185 @@ async fn verify_composite_partial() {
 }
 
 /// Invoked only through the existing integration-test support boundary.
+fn save_setup_account(state: &AppState, fixture: &Fixture) -> creds::RelayAccount {
+    with_conn(state, |conn, vault| {
+        let id = creds::save_authenticated_relay(
+            conn,
+            vault,
+            creds::AuthenticatedRelay {
+                site: creds::RelaySite {
+                    site_origin: &fixture.origin,
+                    site_name: "Fixture",
+                    api_base_url: "",
+                    backend_kind: discovery::BackendKind::Sub2Api,
+                },
+                account: creds::AccountIdentity {
+                    id: 7,
+                    label: "Fixture",
+                    login_identifier: "fixture",
+                },
+                auth_token: "fixture-session",
+                refresh_token: None,
+                token_expires_at: None,
+                session: Default::default(),
+            },
+        )?;
+        creds::get(conn, vault, id)?
+            .ok_or_else(|| AppError::Config("missing fixture account".into()))
+    })
+    .unwrap()
+}
+async fn verify_setup_preflight_and_journal() {
+    use crate::relay::setup_contract::{
+        ConfigurationState, KeyState, PreparationErrorOutcome, RelayPrepareRequest, RelaySelection,
+    };
+    let fixture = Fixture::start().await;
+    let db = Arc::new(crate::database::Database::memory().unwrap());
+    let state = AppState::new(db.clone()).unwrap();
+    let account = save_setup_account(&state, &fixture);
+    let discovery = super::setup::discover(&state, &account, None)
+        .await
+        .unwrap();
+    let operation_id = "f8d02319-67c1-426b-a931-c836de11320e";
+    let request = RelayPrepareRequest::Start {
+        operation_id: operation_id.into(),
+        relay_id: account.id,
+        discovery_revision: discovery.revision.clone(),
+        selections: vec![
+            RelaySelection {
+                app: "codex".into(),
+                group_id: "3".into(),
+            },
+            RelaySelection {
+                app: "claude".into(),
+                group_id: "3".into(),
+            },
+        ],
+    };
+    let mut stale = request.clone();
+    if let RelayPrepareRequest::Start {
+        discovery_revision, ..
+    } = &mut stale
+    {
+        *discovery_revision = "stale".into();
+    }
+    let error = super::setup::prepare(&state, stale, None)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.outcome,
+        PreparationErrorOutcome::RejectedBeforeOperation
+    );
+    assert_eq!(error.operation_id.as_deref(), Some(operation_id));
+    assert!(crate::database::relay_setup_operations::read_on(
+        &db.conn.lock().unwrap(),
+        operation_id
+    )
+    .unwrap()
+    .is_none());
+    assert!(fixture
+        .state
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .all(|(method, _)| method == "GET"));
+    let receipt = super::setup::prepare(&state, request.clone(), None)
+        .await
+        .unwrap();
+    assert_eq!(receipt.created_key_count, 1);
+    assert_eq!(receipt.groups[0].state, KeyState::Ready);
+    assert_eq!(receipt.targets.len(), 2);
+    assert!(receipt
+        .targets
+        .iter()
+        .all(|target| target.configuration == ConfigurationState::Prepared));
+    let before = fixture.state.lock().unwrap().requests.len();
+    assert_eq!(
+        super::setup::prepare(&state, request, None).await.unwrap(),
+        receipt
+    );
+    assert_eq!(
+        fixture.state.lock().unwrap().requests.len(),
+        before,
+        "same operation is a read-only receipt lookup"
+    );
+    let storage = db.secrets.read().unwrap();
+    let restored = crate::database::relay_setup_operations::query_account_on(
+        &db.conn.lock().unwrap(),
+        storage.identity().store_id(),
+        account.id,
+        &receipt.account_identity,
+        None,
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        restored, receipt,
+        "no frontend UUID is needed to recover the persisted operation"
+    );
+}
+async fn verify_setup_auth_invalidated_while_waiting() {
+    use crate::relay::setup_contract::{
+        PreparationErrorOutcome, RelayPrepareRequest, RelaySelection,
+    };
+    let fixture = Fixture::start().await;
+    let db = Arc::new(crate::database::Database::memory().unwrap());
+    let state = Arc::new(AppState::new(db.clone()).unwrap());
+    let account = save_setup_account(&state, &fixture);
+    let discovery = super::setup::discover(&state, &account, None)
+        .await
+        .unwrap();
+    fixture.state.lock().unwrap().requests.clear();
+    let lock = relay_provision_lock(&account).unwrap();
+    let guard = lock.lock().await;
+    let task_state = state.clone();
+    let relay_id = account.id;
+    let task = tokio::spawn(async move {
+        super::setup::prepare(
+            &task_state,
+            RelayPrepareRequest::Start {
+                operation_id: "95fc0852-e7f3-4d3d-bd83-5e333fa49ec4".into(),
+                relay_id,
+                discovery_revision: discovery.revision,
+                selections: vec![RelaySelection {
+                    app: "codex".into(),
+                    group_id: "3".into(),
+                }],
+            },
+            None,
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while Arc::strong_count(&lock) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    db.conn
+        .lock()
+        .unwrap()
+        .execute("DELETE FROM loongport_relay WHERE id=?1", [account.id])
+        .unwrap();
+    drop(guard);
+    let error = task.await.unwrap().unwrap_err();
+    assert_eq!(
+        error.outcome,
+        PreparationErrorOutcome::RejectedBeforeOperation
+    );
+    assert!(
+        fixture.state.lock().unwrap().requests.is_empty(),
+        "stale pre-lock credentials cannot make even a discovery request"
+    );
+}
+
 pub(crate) async fn verify(case: &str) {
     match case {
+        "setup_preflight_journal" => verify_setup_preflight_and_journal().await,
+        "setup_auth_lock" => verify_setup_auth_invalidated_while_waiting().await,
         "composite_partial" => verify_composite_partial().await,
         "capabilities" => verify_capabilities().await,
         "sub2api_selected" => verify_sub2api(false).await,
@@ -576,6 +1048,19 @@ pub(crate) async fn verify(case: &str) {
                 assert!(fixture.state.lock().unwrap().requests.is_empty());
             }
         }
+        "selected_metadata_rollback" => {
+            tokio::task::spawn_blocking(verify_selected_metadata_rollback)
+                .await
+                .unwrap()
+        }
+        "selected_new_isolation" => {
+            tokio::task::spawn_blocking(verify_selected_new_projection_isolation)
+                .await
+                .unwrap()
+        }
+        "selected_isolation" => tokio::task::spawn_blocking(verify_selected_isolation)
+            .await
+            .unwrap(),
         "persistence" => tokio::task::spawn_blocking(verify_persistence)
             .await
             .unwrap(),

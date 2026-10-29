@@ -245,7 +245,11 @@ it("ignores an old completed poll after the user starts a different session", as
     pending.resolve({ status: "completed", providerId: "created-provider" });
   });
   expect(screen.getByRole("dialog")).toHaveTextContent("正在等待浏览器授权…");
-  expect(invalidate).not.toHaveBeenCalled();
+  expect(invalidate).toHaveBeenCalledWith({
+    queryKey: ["applicationOverview", "codex"],
+  });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["serviceSources"] });
+  expect(invalidate).toHaveBeenCalledTimes(2);
   await tick();
   expect(api.poll).toHaveBeenLastCalledWith({ sessionId: "session-b" });
 });
@@ -276,7 +280,11 @@ it.each(["provider", "generation"])(
     await act(async () => {
       pending.resolve({ status: "completed", providerId: "device-a" });
     });
-    expect(invalidate).not.toHaveBeenCalled();
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: ["applicationOverview", "codex"],
+    });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["serviceSources"] });
+    expect(invalidate).toHaveBeenCalledTimes(2);
     expect(api.start).toHaveBeenCalledTimes(1);
   },
 );
@@ -381,7 +389,11 @@ it("expires even when a poll is still in flight and ignores its late success", a
   await act(async () => {
     pending.resolve({ status: "completed", providerId: "created-provider" });
   });
-  expect(invalidate).not.toHaveBeenCalled();
+  expect(invalidate).toHaveBeenCalledWith({
+    queryKey: ["applicationOverview", "codex"],
+  });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["serviceSources"] });
+  expect(invalidate).toHaveBeenCalledTimes(2);
 });
 it.each([
   "http://qoder.cn/device/selectAccounts",

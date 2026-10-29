@@ -132,6 +132,43 @@ mod service_tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn relay_exit_dismissal_persists_without_changing_sharing_or_completion() {
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let db = crate::Database::memory().unwrap();
+        crate::settings::unlock_settings_for_test(db.secrets.clone()).unwrap();
+        for (stats, crowd, stats_notice, crowd_notice) in [
+            (false, false, None, None),
+            (false, true, Some(false), Some(true)),
+            (true, false, Some(true), Some(false)),
+            (true, true, None, Some(true)),
+        ] {
+            crate::settings::mutate_settings(|settings| {
+                settings.service_onboarding_completed = false;
+                settings.service_onboarding_dismissed = false;
+                settings.enable_anonymous_stats = stats;
+                settings.crowd_metrics_enabled = crowd;
+                settings.stats_notice_confirmed = stats_notice;
+                settings.crowd_metrics_notice_confirmed = crowd_notice;
+            })
+            .unwrap();
+            let mut expected = serde_json::to_value(crate::settings::get_settings()).unwrap();
+            expected["serviceOnboardingDismissed"] = serde_json::json!(true);
+            assert!(service_onboarding_status().should_prompt);
+            let result = service_onboarding_dismiss().unwrap();
+            assert!(!result.should_prompt);
+            assert!(!result.completed);
+            crate::settings::reload_settings().unwrap();
+            assert!(!service_onboarding_status().should_prompt);
+            assert!(!service_onboarding_status().completed);
+            assert_eq!(
+                serde_json::to_value(crate::settings::get_settings()).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn upgrades_keep_preferences_and_do_not_show_new_install_prompt() {
         let mut settings = serde_json::from_str::<crate::settings::AppSettings>(
             r#"{"enableAnonymousStats":false,"crowdMetricsEnabled":true}"#,

@@ -225,6 +225,19 @@ export function QoderCnDeviceLogin({
         }
         try {
           const status = await qoderCnDeviceLoginApi.poll(result.sessionId);
+          // A confirmed completion may arrive after this view was closed or changed.
+          // Refresh backend-owned projections without restoring the old UI state.
+          if (
+            status.status === "completed" &&
+            status.providerId === result.providerId
+          ) {
+            void queryClient.invalidateQueries({
+              queryKey: ["applicationOverview", "codex"],
+            });
+            void queryClient.invalidateQueries({
+              queryKey: ["serviceSources"],
+            });
+          }
           if (!isCurrent(attempt)) return;
           if (Date.now() >= result.expiresAtMs) {
             fail(failureMessage("expired"));

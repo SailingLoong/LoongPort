@@ -25,6 +25,7 @@ pub(crate) enum CheckpointError {
     InvalidPayload,
     WrongContext,
     DuplicateIdentity,
+    DeviceMismatch,
     NoChange,
     RecoveryOnly,
     InvalidPhase,
@@ -67,6 +68,13 @@ pub(crate) struct ProfileDetails {
     pub requires_capability_check: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preserved_native_start: Option<[u8; 32]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_mid: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub device_exclusive: bool,
+}
+fn is_false(value: &bool) -> bool {
+    !value
 }
 fn require_capability_default() -> bool {
     true
@@ -79,6 +87,8 @@ impl Default for ProfileDetails {
             evidence: None,
             requires_capability_check: false,
             preserved_native_start: None,
+            device_mid: None,
+            device_exclusive: false,
         }
     }
 }
@@ -316,6 +326,35 @@ impl ProfileCatalog {
         self.details.insert(identity.clone(), details);
         Ok(())
     }
+    /// Commit the device identity alongside the authenticated profile image.
+    pub(crate) fn set_device_mid(
+        &mut self,
+        identity: &AccountIdentity,
+        native: &NativeCipher,
+        device_mid: Option<&str>,
+        unique: bool,
+    ) -> Result<(), CheckpointError> {
+        let device_mid = device_mid
+            .map(super::device_settings::normalize_id)
+            .transpose()
+            .map_err(|_| CheckpointError::InvalidPayload)?;
+        if device_mid.as_ref().is_some_and(|id| {
+            self.details.iter().any(|(other, details)| {
+                other != identity
+                    && details.device_mid.as_ref() == Some(id)
+                    && (unique || details.device_exclusive)
+            })
+        }) {
+            return Err(CheckpointError::DuplicateIdentity);
+        }
+        let snapshot = self.get(identity).ok_or(CheckpointError::InvalidPayload)?;
+        let mut details = self.details(snapshot, native);
+        let previously_exclusive = details.device_mid == device_mid && details.device_exclusive;
+        details.device_exclusive = device_mid.is_some() && (unique || previously_exclusive);
+        details.device_mid = device_mid;
+        self.details.insert(identity.clone(), details);
+        Ok(())
+    }
     /// Replaces a whole selected session. Failed incoming checks cannot erase
     /// existing working capabilities; no fields are copied between accounts.
     pub(crate) fn upsert_checked(
@@ -348,10 +387,10 @@ impl ProfileCatalog {
                 }
             }
         }
-        let label = self
-            .details
-            .get(snapshot.identity())
-            .and_then(|details| details.label.clone());
+        let previous = self.details.get(snapshot.identity());
+        let label = previous.and_then(|details| details.label.clone());
+        let device_mid = previous.and_then(|details| details.device_mid.clone());
+        let device_exclusive = previous.is_some_and(|details| details.device_exclusive);
         self.details.insert(
             snapshot.identity().clone(),
             ProfileDetails {
@@ -360,6 +399,8 @@ impl ProfileCatalog {
                 evidence: incoming,
                 requires_capability_check: true,
                 preserved_native_start: None,
+                device_mid,
+                device_exclusive,
             },
         );
         self.upsert_unverified(snapshot);
@@ -465,7 +506,13 @@ impl ProfileCatalog {
         }
         seal_payload(
             &CatalogPayload {
-                version: if !self.import_receipts.is_empty() {
+                version: if self
+                    .details
+                    .values()
+                    .any(|details| details.device_mid.is_some())
+                {
+                    5
+                } else if !self.import_receipts.is_empty() {
                     4
                 } else if self.login_receipts.is_empty() && self.details.is_empty() {
                     2
@@ -522,8 +569,18 @@ impl ProfileCatalog {
             (1, None, None, None, None)
             | (2, Some(_), None, None, None)
             | (3, Some(_), _, _, None)
-            | (4, Some(_), _, _, Some(_)) => (),
+            | (4, Some(_), _, _, Some(_))
+            | (5, Some(_), _, Some(_), _) => (),
             _ => return Err(CheckpointError::InvalidPayload),
+        }
+        if payload.version < 5
+            && payload.details.as_ref().is_some_and(|details| {
+                details
+                    .values()
+                    .any(|details| details.device_mid.is_some() || details.device_exclusive)
+            })
+        {
+            return Err(CheckpointError::InvalidPayload);
         }
         if payload.profiles.len() > MAX_PROFILES {
             return Err(CheckpointError::ResourceLimit);
@@ -560,6 +617,16 @@ impl ProfileCatalog {
             }) {
                 return Err(CheckpointError::InvalidPayload);
             }
+            if details
+                .device_mid
+                .as_ref()
+                .is_some_and(|id| super::device_settings::normalize_id(id).as_ref() != Ok(id))
+            {
+                return Err(CheckpointError::InvalidPayload);
+            }
+            if details.device_exclusive && details.device_mid.is_none() {
+                return Err(CheckpointError::InvalidPayload);
+            }
             let identity = snapshot.identity().clone();
             let evidence = details
                 .evidence
@@ -571,6 +638,17 @@ impl ProfileCatalog {
                     ..details
                 },
             );
+        }
+        for (identity, details) in &catalog.details {
+            if details.device_exclusive
+                && details.device_mid.as_ref().is_some_and(|id| {
+                    catalog.details.iter().any(|(other, value)| {
+                        other != identity && value.device_mid.as_ref() == Some(id)
+                    })
+                })
+            {
+                return Err(CheckpointError::DuplicateIdentity);
+            }
         }
         let receipts = payload.login_receipts.unwrap_or_default();
         if receipts.len() > MAX_LOGIN_RECEIPTS {

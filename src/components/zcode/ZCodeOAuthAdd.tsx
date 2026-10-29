@@ -34,6 +34,7 @@ import {
   type LoginProgress,
 } from "@/lib/api/zcodeLogin";
 import { settingsApi } from "@/lib/api/settings";
+import { zcodeDeviceApi } from "@/lib/api/zcodeDevices";
 
 type Write = "begin" | "key" | "decline" | "save";
 
@@ -44,6 +45,7 @@ export function ZCodeOAuthAdd({
   onImportLocal,
   libraryDataRoot,
   savedAccount,
+  boundDeviceMids = [],
 }: {
   open: boolean;
   onClose: () => void;
@@ -51,6 +53,7 @@ export function ZCodeOAuthAdd({
   onImportLocal?: () => void;
   libraryDataRoot?: string;
   savedAccount?: { id: string; catalogRevision: string };
+  boundDeviceMids?: string[];
 }) {
   const { t } = useTranslation();
   const copy = (
@@ -59,6 +62,14 @@ export function ZCodeOAuthAdd({
     values?: Record<string, string | number>,
   ) => t(`zcode.accounts.login.${key}`, { defaultValue, ...values });
   const [family, setFamily] = useState<LoginFamily>("bigmodel");
+  const [devices, setDevices] = useState<string[]>([]);
+  const [effectiveDeviceMid, setEffectiveDeviceMid] = useState<string | null>(
+    null,
+  );
+  const [deviceMid, setDeviceMid] = useState("current");
+  const [deviceLoading, setDeviceLoading] = useState(open && !savedAccount);
+  const [deviceLoadFailed, setDeviceLoadFailed] = useState(false);
+  const [deviceReload, setDeviceReload] = useState(0);
   const [progress, setProgress] = useState<LoginProgress | null>(null);
   const [busy, setBusy] = useState<Write | null>(null);
   const [reading, setReading] = useState(false);
@@ -200,13 +211,42 @@ export function ZCodeOAuthAdd({
     if (open) {
       reset();
       setFamily("bigmodel");
+      setDeviceLoading(!savedId);
       void restore();
     }
     return () => {
       alive.current = false;
       abandon();
     };
-  }, [open, abandon, reset, restore]);
+  }, [open, abandon, reset, restore, savedId]);
+
+  useEffect(() => {
+    if (!open || savedId) return;
+    let active = true;
+    setDevices([]);
+    setEffectiveDeviceMid(null);
+    setDeviceMid("current");
+    setDeviceLoading(true);
+    setDeviceLoadFailed(false);
+    void zcodeDeviceApi.state(libraryDataRoot).then(
+      (state) => {
+        if (active) {
+          setDevices(state.devices);
+          setEffectiveDeviceMid(state.effectiveDeviceMid);
+          setDeviceLoading(false);
+        }
+      },
+      () => {
+        if (active) {
+          setDeviceLoadFailed(true);
+          setDeviceLoading(false);
+        }
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [open, libraryDataRoot, savedId, deviceReload]);
 
   const read = useCallback(async () => {
     const flowId = flow.current;
@@ -279,9 +319,11 @@ export function ZCodeOAuthAdd({
     setBusy("begin");
     setError(null);
     try {
-      const next = await (libraryDataRoot === undefined
-        ? zcodeLoginApi.begin(family)
-        : zcodeLoginApi.begin(family, libraryDataRoot));
+      const next = await (deviceMid !== "current"
+        ? zcodeLoginApi.begin(family, libraryDataRoot, deviceMid)
+        : libraryDataRoot === undefined
+          ? zcodeLoginApi.begin(family)
+          : zcodeLoginApi.begin(family, libraryDataRoot));
       if (!current(version)) {
         void zcodeLoginApi.cancel(next.flowId).catch(() => {});
         return;
@@ -358,6 +400,7 @@ export function ZCodeOAuthAdd({
   const startAnother = () => {
     abandon();
     reset();
+    setDeviceMid("current");
   };
   const cancelRead = () => {
     readGeneration.current += 1;
@@ -366,6 +409,14 @@ export function ZCodeOAuthAdd({
     setPaused(true);
   };
   const phase = progress?.phase;
+  const selectedDeviceMid =
+    deviceMid === "current" ? effectiveDeviceMid : deviceMid;
+  const isBoundDevice = (id: string) =>
+    boundDeviceMids.some((bound) => bound.toLowerCase() === id.toLowerCase());
+  const deviceTaken =
+    selectedDeviceMid !== null && isBoundDevice(selectedDeviceMid);
+  const currentDeviceTaken =
+    effectiveDeviceMid !== null && isBoundDevice(effectiveDeviceMid);
   const completeCoding = progress?.purpose === "completeCoding";
   const blocked = busy !== null || reading;
   const keyUncertain =
@@ -468,6 +519,65 @@ export function ZCodeOAuthAdd({
                   <SelectItem value="zai">z.ai</SelectItem>
                 </SelectContent>
               </Select>
+              {devices.length > 0 && (
+                <Select
+                  value={deviceMid}
+                  onValueChange={setDeviceMid}
+                  disabled={blocked}
+                >
+                  <SelectTrigger
+                    aria-label={copy("device", "Account device ID")}
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="current" disabled={currentDeviceTaken}>
+                      {copy("deviceCurrent", "Use current environment")}
+                    </SelectItem>
+                    {devices.map((id) => (
+                      <SelectItem
+                        key={id}
+                        value={id}
+                        disabled={isBoundDevice(id)}
+                      >
+                        {id}
+                        {isBoundDevice(id)
+                          ? ` · ${copy("deviceBound", "Bound")}`
+                          : ""}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+              {devices.length > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  {copy(
+                    "deviceHint",
+                    "Choose an unassigned device ID when adding or reauthorizing an account.",
+                  )}
+                </p>
+              )}
+              {devices.length === 0 && currentDeviceTaken && (
+                <p role="status" className="text-xs text-muted-foreground">
+                  {copy(
+                    "deviceTakenNoAvailable",
+                    "The current device ID is already bound. Import another device ID before continuing.",
+                  )}
+                </p>
+              )}
+              {deviceLoadFailed && (
+                <div role="alert">
+                  <p>
+                    {copy("deviceLoadFailed", "Unable to load device IDs.")}
+                  </p>
+                  <Button
+                    variant="outline"
+                    onClick={() => setDeviceReload((v) => v + 1)}
+                  >
+                    {copy("retryDevices", "Retry")}
+                  </Button>
+                </div>
+              )}
               <p className="rounded-md border border-border-default bg-muted/30 p-3 text-sm">
                 {copy(
                   "officialBrowser",
@@ -853,7 +963,12 @@ export function ZCodeOAuthAdd({
               : copy("cancel", "Cancel")}
           </Button>
           {!progress && !savedAccount && (
-            <Button disabled={blocked} onClick={() => void begin()}>
+            <Button
+              disabled={
+                blocked || deviceLoading || deviceLoadFailed || deviceTaken
+              }
+              onClick={() => void begin()}
+            >
               {copy("continue", "Continue official sign-in")}
             </Button>
           )}

@@ -99,7 +99,7 @@ export function ZCodeDeviceManager({
       <p className="text-xs text-muted-foreground">
         {copy(
           "description",
-          "Import IDs from your ZCode installations. The selected ID is shared by sign-in, activity checks, balance queries and claims in this ZCode environment.",
+          "Import device IDs and choose one when authorizing each account. Unbound accounts use the default below.",
         )}
       </p>
       <Textarea

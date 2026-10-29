@@ -2344,6 +2344,115 @@ fn login_save_receipt_is_atomic_idempotent_and_survives_lost_reply() {
 }
 
 #[test]
+fn login_saves_device_with_account_and_rejects_replay_with_another_device() {
+    let fixture = Fixture::new(OAuthFamily::Zai);
+    let local = VaultAccountStore::new(fixture.vault_root.path(), &fixture.vault).unwrap();
+    let status = local.catalog_status(&fixture.native).unwrap();
+    let snapshot = fixture
+        .native
+        .inspect(&native_document(OAuthFamily::Zai, "new-login", "synthetic"))
+        .unwrap();
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let device = "11111111-2222-4333-8444-555555555555";
+    let request = |mid| LoginProfileSave {
+        revision: &status.revision,
+        request_id: &request_id,
+        snapshot: snapshot.clone(),
+        evidence: None,
+        update_duplicate: false,
+        completion: None,
+        device_mid: Some(mid),
+        device_unique: true,
+        device_explicit: true,
+    };
+    assert_eq!(
+        local
+            .save_login_profile_for(&fixture.native, request(device))
+            .unwrap(),
+        CaptureCommitOutcome::Saved
+    );
+    let saved = fixture.catalog();
+    assert_eq!(
+        saved
+            .details(&snapshot, &fixture.native)
+            .device_mid
+            .as_deref(),
+        Some(device)
+    );
+    assert_eq!(
+        local
+            .save_login_profile_for(&fixture.native, request(device))
+            .unwrap(),
+        CaptureCommitOutcome::Saved
+    );
+    assert_eq!(
+        local.save_login_profile_for(
+            &fixture.native,
+            request("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+        ),
+        Err(TransactionError::OperationAlreadyKnown)
+    );
+    let current = local.catalog_status(&fixture.native).unwrap();
+    let bytes = fs::read(fixture.vault_root.path().join(PROFILE_FILE)).unwrap();
+    let retry_id = uuid::Uuid::new_v4().to_string();
+    let refreshed = fixture
+        .native
+        .inspect(&native_document(
+            OAuthFamily::Zai,
+            "new-login",
+            "other-session",
+        ))
+        .unwrap();
+    let mismatch = LoginProfileSave {
+        revision: &current.revision,
+        request_id: &retry_id,
+        snapshot: refreshed,
+        evidence: None,
+        update_duplicate: true,
+        completion: None,
+        device_mid: Some("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"),
+        device_unique: true,
+        device_explicit: false,
+    };
+    assert_eq!(
+        local.save_login_profile_for(&fixture.native, mismatch),
+        Err(TransactionError::Checkpoint(
+            CheckpointError::DeviceMismatch
+        ))
+    );
+    assert_eq!(
+        fs::read(fixture.vault_root.path().join(PROFILE_FILE)).unwrap(),
+        bytes
+    );
+    let another = fixture
+        .native
+        .inspect(&native_document(OAuthFamily::Zai, "other-login", "session"))
+        .unwrap();
+    let concurrent_id = uuid::Uuid::new_v4().to_string();
+    let concurrent = LoginProfileSave {
+        revision: &current.revision,
+        request_id: &concurrent_id,
+        snapshot: another,
+        evidence: None,
+        update_duplicate: false,
+        completion: None,
+        device_mid: Some(device),
+        device_unique: false,
+        device_explicit: false,
+    };
+    assert_eq!(
+        local.save_login_profile_for(&fixture.native, concurrent),
+        Err(TransactionError::Checkpoint(
+            CheckpointError::DuplicateIdentity
+        ))
+    );
+    assert_eq!(
+        fs::read(fixture.vault_root.path().join(PROFILE_FILE)).unwrap(),
+        bytes
+    );
+}
+
+#[test]
 fn saved_coding_save_binds_original_revision_target_and_source_without_other_mutation() {
     let fixture = Fixture::new(OAuthFamily::Zai);
     let local = VaultAccountStore::new(fixture.vault_root.path(), &fixture.vault).unwrap();
@@ -2378,6 +2487,9 @@ fn saved_coding_save_binds_original_revision_target_and_source_without_other_mut
         evidence: None,
         update_duplicate: true,
         completion: Some(&target),
+        device_mid: None,
+        device_unique: false,
+        device_explicit: false,
     };
     assert_eq!(
         local.save_login_profile_for(&fixture.native, request("stale-revision")),
@@ -2450,7 +2562,10 @@ fn saved_coding_decline_records_kept_receipt_and_preserves_start_metadata() {
                     snapshot: original.clone(),
                     evidence: None,
                     update_duplicate: true,
-                    completion: Some(&target)
+                    completion: Some(&target),
+                    device_mid: None,
+                    device_unique: false,
+                    device_explicit: false,
                 }
             )
             .unwrap(),

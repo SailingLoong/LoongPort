@@ -29,6 +29,7 @@ use super::{
 };
 use crate::diagnostics::{DiagnosticEvent, ResultLogExt};
 use crate::paperclip::execution::RouteBinding;
+use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
 use crate::proxy::providers::copilot_auth::CopilotAuthManager;
 use crate::proxy::providers::xai_oauth_auth::XaiOAuthManager;
 use crate::{
@@ -2867,6 +2868,11 @@ impl RequestForwarder {
                 .map(str::to_owned);
         }
         let url = gemini_model_url.unwrap_or(url);
+        let (listen_address, listen_port) = {
+            let status = self.status.read().await;
+            (status.address.clone(), status.port)
+        };
+        super::upstream_guard::reject_self_forwarding(&url, &listen_address, listen_port).await?;
         let mut codex_anthropic_one_m = false;
 
         // 转换请求体（如果需要）
@@ -3182,10 +3188,23 @@ impl RequestForwarder {
                             );
                         }
                         Err(e) => {
-                            log::error!("[CodexOAuth] 获取 access_token 失败: {e}");
-                            return Err(ProxyError::AuthError(format!(
-                                "Codex OAuth 认证失败: {e}"
-                            )));
+                            // Only definitive credential rejection or a missing binding is
+                            // authentication failure. Transport/storage failures must not
+                            // tell the client that its account credentials are invalid.
+                            // Never expose refresh response bodies, URLs or local paths.
+                            let error = match e {
+                                CodexOAuthError::RefreshTokenInvalid => ProxyError::AuthError(
+                                    "Codex OAuth 凭据已失效，请重新登录".into(),
+                                ),
+                                CodexOAuthError::AccountNotFound(_) => ProxyError::AuthError(
+                                    "Codex OAuth 账号不存在，请检查账号绑定".into(),
+                                ),
+                                _ => ProxyError::ForwardFailed(
+                                    "Codex OAuth token 暂时不可用，请稍后重试或检查本地状态".into(),
+                                ),
+                            };
+                            log::error!("[CodexOAuth] 获取 access_token 失败: {error}");
+                            return Err(error);
                         }
                     }
                 } else {
@@ -3898,6 +3917,18 @@ impl RequestForwarder {
                 let mut response = self
                     .prepare_success_response_for_failover(response, request_is_streaming)
                     .await?;
+                // Chat gateways may carry an explicit error in HTTP 200. Classify
+                // only complete non-streaming error-only bodies before success is
+                // recorded; the original retry/denial/budget owner remains in charge.
+                if status == http::StatusCode::OK
+                    && !request_is_streaming
+                    && matches!(
+                        split_endpoint_and_query(&effective_endpoint).0,
+                        "/chat/completions" | "/v1/chat/completions"
+                    )
+                {
+                    response = self.validate_chat_success_response(response).await?;
+                }
                 // Streaming requests normally return SSE. If a compatible gateway
                 // explicitly returns JSON instead, buffer and validate it inside the retry
                 // loop as well so a 2xx Anthropic error envelope can still fail over. Do
@@ -4011,6 +4042,26 @@ impl RequestForwarder {
         })??;
 
         Ok(ProxyResponse::buffered(status, headers, body))
+    }
+
+    async fn validate_chat_success_response(
+        &self,
+        response: ProxyResponse,
+    ) -> Result<ProxyResponse, ProxyError> {
+        let status = response.status();
+        let headers = response.headers().clone();
+        let raw = response.bytes_with_limit(MAX_RESPONSE_BODY_BYTES).await?;
+        let decoded = match get_content_encoding(&headers) {
+            Some(encoding) => decompress_body_with_limit(&encoding, &raw, MAX_RESPONSE_BODY_BYTES)
+                .ok()
+                .flatten(),
+            None => None,
+        };
+        if let Some(error) = chat_error_only(decoded.as_deref().unwrap_or(&raw)) {
+            return Err(error);
+        }
+        // Preserve the original bytes and encoding for the actual consumer.
+        Ok(ProxyResponse::buffered(status, headers, raw))
     }
 
     /// Some Anthropic-compatible gateways return an Anthropic error envelope with
@@ -4464,6 +4515,58 @@ fn ensure_budgeted_native_path(
         ));
     }
     Ok(())
+}
+
+/// Conservative Chat error envelope recognition, not an empty-output heuristic.
+/// Content-bearing or unfamiliar siblings make the document ambiguous, so leave
+/// them to the original consumer. Error message text never establishes billing.
+fn chat_error_only(bytes: &[u8]) -> Option<ProxyError> {
+    let value: Value = serde_json::from_slice(bytes).ok()?;
+    let object = value.as_object()?;
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "error" | "type" | "id" | "object" | "created" | "model" | "request_id"
+        )
+    }) {
+        return None;
+    }
+    let error = object.get("error")?.as_object()?;
+    if !["type", "code", "message"].into_iter().any(|field| {
+        error
+            .get(field)
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty())
+    }) {
+        return None;
+    }
+    let has_category = |category: &str| {
+        ["type", "code"]
+            .into_iter()
+            .any(|field| error.get(field).and_then(Value::as_str) == Some(category))
+    };
+    let mut failure = ProxyError::UpstreamError {
+        status: 502,
+        body: Some(value.to_string()),
+    };
+    // Reuse the exact refusal boundary, with precedence over quota/rate types.
+    let status = if is_explicit_upstream_denial(&failure) {
+        403
+    } else if has_category("insufficient_quota") {
+        402
+    } else if has_category("rate_limit_error") || has_category("rate_limit_exceeded") {
+        429
+    } else {
+        502
+    };
+    if let ProxyError::UpstreamError {
+        status: effective_status,
+        ..
+    } = &mut failure
+    {
+        *effective_status = status;
+    }
+    Some(failure)
 }
 
 /// Only structured, exact denial categories establish this boundary. Message text
@@ -5790,6 +5893,209 @@ mod tests {
             in_failover_queue: false,
             available_models: None,
         }
+    }
+
+    const CODEX_REFRESH_CANARY: &str = "synthetic-private-refresh-token-canary";
+
+    // Regression at the real consumer, not a reimplemented error mapper.
+    // The refresh transport result is synthetic; manager -> forwarder retry
+    // loop -> original IntoResponse all execute. TestHome blocks real refresh
+    // HTTP when no injected result exists, and both access tokens are expired.
+    async fn assert_codex_refresh_failure_consumer(
+        error: crate::proxy::providers::codex_oauth_auth::CodexOAuthError,
+        expected: u16,
+    ) {
+        use crate::provider::{AuthBinding, AuthBindingSource, ProviderMeta};
+        use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
+        use axum::response::IntoResponse;
+
+        let _home = crate::secrets::testing::TestHome::new().unwrap();
+        let db = Arc::new(Database::memory().unwrap());
+        let manager = Arc::new(CodexOAuthManager::new(db.secrets.clone()).unwrap());
+        let mut providers = Vec::new();
+        for id in ["synthetic-first", "synthetic-second"] {
+            manager
+                .add_test_account_with_access_token(id, "synthetic-expiring-access", None)
+                .await
+                .unwrap();
+            // Expire both caches before queuing the first account's error.
+            manager
+                .test_refresh_next(id, "unused-access", "unused-refresh")
+                .await;
+            let mut provider = Provider::with_id(
+                id.into(),
+                id.into(),
+                json!({
+                    "auth": {}, "config": "",
+                    "env": {"ANTHROPIC_MODEL":"gpt-5", "ANTHROPIC_AUTH_TOKEN":"synthetic-placeholder"}
+                }),
+                None,
+            );
+            provider.meta = Some(ProviderMeta {
+                provider_type: Some("codex_oauth".into()),
+                auth_binding: Some(AuthBinding {
+                    source: AuthBindingSource::ManagedAccount,
+                    auth_provider: Some("codex_oauth".into()),
+                    account_id: Some(id.into()),
+                }),
+                ..Default::default()
+            });
+            assert!(super::super::providers::is_codex_official_provider(
+                &provider
+            ));
+            db.save_provider("claude", &provider).unwrap();
+            providers.push(provider);
+        }
+        db.set_current_provider("claude", "synthetic-first")
+            .unwrap();
+        manager
+            .test_refresh_failure_next("synthetic-first", error)
+            .await;
+        let service = crate::services::ProxyService::new_with_codex_oauth_manager(
+            db.clone(),
+            manager.clone(),
+            crate::relay::model_verification::passive::PassiveIngress::channel(1).0,
+        );
+        let mut forwarder = test_forwarder(Duration::from_secs(2), Duration::from_secs(2));
+        forwarder.router = Arc::new(ProviderRouter::new(db.clone()));
+        forwarder.failover_manager = Arc::new(FailoverSwitchManager::new(db.clone()));
+        forwarder.service_owner = Arc::downgrade(&service);
+        forwarder.current_provider_id_at_start = "synthetic-first".into();
+        forwarder.max_attempts = 2;
+        let outcome = tokio::time::timeout(Duration::from_secs(5), forwarder.forward_with_retry(
+                &AppType::Claude, http::Method::POST, "/v1/messages",
+                json!({"model":"gpt-5","max_tokens":8,"messages":[{"role":"user","content":"synthetic"}]}),
+                http::HeaderMap::new(), Extensions::new(), providers,
+            )).await.expect("synthetic token failure must finish without network");
+        let failure = match outcome {
+            Err(e) => e,
+            Ok(_) => panic!("expired synthetic accounts cannot forward"),
+        };
+        assert_eq!(
+            failure.provider.as_ref().unwrap().id,
+            "synthetic-first",
+            "official card must not silently switch"
+        );
+        assert!(
+            !manager.test_refresh_is_queued(),
+            "real manager must consume refresh fixture"
+        );
+        let response = failure.error.into_response();
+        assert_eq!(response.status().as_u16(), expected);
+        let bytes = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            !body.contains(CODEX_REFRESH_CANARY),
+            "raw credential/transport details must not escape"
+        );
+        assert!(!db
+            .provider_attempt_error_rates("claude")
+            .unwrap()
+            .contains_key("synthetic-second"));
+        assert_eq!(
+            manager.list_accounts().await.len(),
+            2,
+            "classification must not delete accounts"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn codex_refresh_consumer_network() {
+        use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
+        assert_codex_refresh_failure_consumer(
+            CodexOAuthError::NetworkError(CODEX_REFRESH_CANARY.into()),
+            502,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn codex_refresh_consumer_forbidden() {
+        use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
+        assert_codex_refresh_failure_consumer(
+            CodexOAuthError::TokenFetchFailed(format!("403 {CODEX_REFRESH_CANARY}")),
+            502,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn codex_refresh_consumer_rate_limited() {
+        use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
+        assert_codex_refresh_failure_consumer(
+            CodexOAuthError::TokenFetchFailed(format!("429 {CODEX_REFRESH_CANARY}")),
+            502,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn codex_refresh_consumer_unavailable() {
+        use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
+        assert_codex_refresh_failure_consumer(
+            CodexOAuthError::TokenFetchFailed(format!("503 {CODEX_REFRESH_CANARY}")),
+            502,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn codex_refresh_consumer_io() {
+        use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
+        assert_codex_refresh_failure_consumer(
+            CodexOAuthError::IoError(CODEX_REFRESH_CANARY.into()),
+            502,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn codex_refresh_consumer_parse() {
+        use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
+        assert_codex_refresh_failure_consumer(
+            CodexOAuthError::ParseError(CODEX_REFRESH_CANARY.into()),
+            502,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn codex_refresh_consumer_recovery_required() {
+        use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
+        assert_codex_refresh_failure_consumer(
+            CodexOAuthError::ProtectedStorage(crate::error::AppError::Config(format!(
+                "mode.verification_required {CODEX_REFRESH_CANARY}"
+            ))),
+            502,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn codex_refresh_consumer_invalid() {
+        use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
+        assert_codex_refresh_failure_consumer(CodexOAuthError::RefreshTokenInvalid, 401).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn codex_refresh_consumer_missing() {
+        use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
+        assert_codex_refresh_failure_consumer(
+            CodexOAuthError::AccountNotFound(CODEX_REFRESH_CANARY.into()),
+            401,
+        )
+        .await;
     }
 
     fn test_forwarder(

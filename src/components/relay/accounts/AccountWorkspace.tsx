@@ -10,9 +10,10 @@ import { Search, User, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import type { AppId } from "@/lib/api/types";
 
 export const AccountApplicationNavigation = createContext<
-  (() => void) | undefined
+  ((targetApp?: AppId) => void) | undefined
 >(undefined);
 
 /** A navigation request only; selection and account state stay in the native workspace. */
@@ -27,12 +28,14 @@ export function AccountWorkspace<T extends { id: string }>({
   identityDetails,
   children,
   enabled = true,
+  showApplicationNavigation = true,
 }: {
   accounts: T[];
   label: (row: T) => string;
   identityDetails?: (row: T) => ReactNode;
   children: (row: T) => ReactNode;
   enabled?: boolean;
+  showApplicationNavigation?: boolean;
 }) {
   const openApplication = useContext(AccountApplicationNavigation);
   const target = useContext(AccountWorkspaceTarget);
@@ -113,12 +116,12 @@ export function AccountWorkspace<T extends { id: string }>({
               {identityDetails?.(current)}
             </header>
             {children(current)}
-            {openApplication && (
+            {openApplication && showApplicationNavigation && (
               <AccountDetailSection title="用于哪些应用">
                 <p className="text-xs text-muted-foreground">
                   应用配置引用原账号。配置已保存不等于推理已接通，实际运行仍需验证。
                 </p>
-                <Button variant="outline" onClick={openApplication}>
+                <Button variant="outline" onClick={() => openApplication()}>
                   到应用中查看与配置
                   <ArrowRight className="ml-2 h-4 w-4" />
                 </Button>
