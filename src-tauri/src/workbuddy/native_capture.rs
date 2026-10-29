@@ -62,7 +62,7 @@ pub(super) fn schedule_capture<R: Send + 'static>(
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "gui"))]
-fn installed_bundle() -> Result<std::path::PathBuf, Failure> {
+pub(super) fn installed_bundle() -> Result<std::path::PathBuf, Failure> {
     use objc2::rc::Retained;
     use objc2_app_kit::NSWorkspace;
     // SAFETY: NSString copies the static NUL-terminated UTF-8 bundle identifier.

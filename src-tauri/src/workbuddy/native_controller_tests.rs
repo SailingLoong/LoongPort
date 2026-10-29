@@ -17,6 +17,8 @@ use std::{
     sync::Arc,
 };
 use zeroize::Zeroizing;
+#[path = "native_controller/activate_tests.rs"]
+mod activate_tests;
 struct Fixture {
     _root: tempfile::TempDir,
     session: Arc<SecretSession>,

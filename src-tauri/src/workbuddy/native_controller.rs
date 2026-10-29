@@ -100,6 +100,49 @@ fn scope(source: &mut impl ControlledSource) -> Result<(PathBuf, NativeContext, 
 }
 #[cfg_attr(not(test), allow(dead_code))]
 impl Controller<'_> {
+    pub(super) async fn activate(
+        &self,
+        key: &SelectionKey,
+        source: &mut impl ControlledSource,
+        io: &mut dyn FileIo,
+    ) -> Result<Outcome, Failure> {
+        let target = self.select(key).await?;
+        let plan = self.prepare(&target, source, io).await?;
+        self.apply(&plan, source, io).await
+    }
+
+    pub(super) async fn journal_binding(
+        &self,
+    ) -> Result<(super::model::Domain, transaction::Stamp), Failure> {
+        native_owner::with_selected_owner(
+            self.catalog.session,
+            self.catalog.identity,
+            self.catalog.epoch,
+            self.catalog.selection,
+            |owner| {
+                if owner.disposition()? == Disposition::Absent {
+                    return Err(Failure::RecoveryRequired);
+                }
+                let (stamp, journal) = owner.load()?;
+                let journal = journal.ok_or(Failure::RecoveryRequired)?;
+                let realm = super::model::Domain::parse(journal.realm())
+                    .map_err(|_| Failure::RecoveryRequired)?;
+                Ok((realm, stamp))
+            },
+        )
+        .await
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "gui"))]
+    pub(super) async fn activate_installed(
+        &self,
+        key: &SelectionKey,
+        bundle: &Path,
+    ) -> Result<Outcome, Failure> {
+        let selected = self.select(key).await?;
+        let mut plan = self.prepare_installed(&selected, bundle).await?;
+        self.apply_installed(&mut plan).await
+    }
     #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "gui"))]
     pub(super) async fn capture_installed(
         &self,
@@ -170,6 +213,17 @@ impl Controller<'_> {
     ) -> Result<Outcome, Failure> {
         let mut source = install::open(bundle, realm)?;
         self.recover(&mut source, &mut transaction::Files).await
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "gui"))]
+    pub(super) async fn recover_installed_bound(
+        &self,
+        bundle: &Path,
+        realm: super::model::Domain,
+        expected: &transaction::Stamp,
+    ) -> Result<Outcome, Failure> {
+        let mut source = install::open(bundle, realm)?;
+        self.recover_bound(&mut source, &mut transaction::Files, Some(expected))
+            .await
     }
     pub(super) async fn select(&self, key: &SelectionKey) -> Result<Selection, Failure> {
         Ok(Selection {
@@ -279,6 +333,14 @@ impl Controller<'_> {
         source: &mut impl ControlledSource,
         io: &mut dyn FileIo,
     ) -> Result<Outcome, Failure> {
+        self.recover_bound(source, io, None).await
+    }
+    pub(super) async fn recover_bound(
+        &self,
+        source: &mut impl ControlledSource,
+        io: &mut dyn FileIo,
+        expected: Option<&transaction::Stamp>,
+    ) -> Result<Outcome, Failure> {
         if !cfg!(unix) {
             return Err(Failure::UnsafePath);
         }
@@ -293,6 +355,9 @@ impl Controller<'_> {
                 // Recovery consumes its persisted original Stamp, not a fabricated
                 // refreshed account selection or a newly initialized journal.
                 let (stamp, _) = owner.load()?;
+                if expected.is_some_and(|original| *original != stamp) {
+                    return Err(Failure::RecoveryRequired);
+                }
                 let mut stopped = || verify_bound(source, &root, &context).is_ok();
                 transaction::recover(&paths, io, owner, &mut stopped, &stamp, &context)
             },

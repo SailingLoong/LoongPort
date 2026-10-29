@@ -49,6 +49,12 @@ pub(crate) struct Journal {
     after: Image,
     phase: Phase,
 }
+impl Journal {
+    #[cfg(all(unix, any(test, feature = "gui")))]
+    pub(super) fn realm(&self) -> &str {
+        &self.context.realm
+    }
+}
 #[derive(Clone)]
 pub(crate) struct Paths {
     root: PathBuf,
@@ -209,7 +215,8 @@ pub(crate) fn observe(io: &mut dyn FileIo, paths: &Paths) -> Result<Image, Failu
         marker: io.read(&paths.marker)?,
     })
 }
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) enum Outcome {
     Applied,
     AlreadyApplied,

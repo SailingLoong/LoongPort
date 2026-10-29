@@ -215,3 +215,34 @@ pub(crate) async fn list_workbuddy_native_captures(
 > {
     crate::workbuddy::native_capture::list(state.db.secret_session()).await
 }
+
+#[tauri::command]
+pub(crate) async fn activate_workbuddy_native_account(
+    state: State<'_, AppState>,
+    target: crate::workbuddy::native_activation::SelectionKey,
+) -> Result<
+    crate::workbuddy::native_activation::Outcome,
+    crate::workbuddy::native_activation::Failure,
+> {
+    crate::workbuddy::native_activation::activate(state.db.clone(), target).await
+}
+
+#[tauri::command]
+pub(crate) async fn recover_workbuddy_native_switch(
+    state: State<'_, AppState>,
+) -> Result<
+    crate::workbuddy::native_activation::Outcome,
+    crate::workbuddy::native_activation::Failure,
+> {
+    crate::workbuddy::native_activation::recover(state.db.clone()).await
+}
+
+#[tauri::command]
+pub(crate) async fn inspect_workbuddy_native_recovery(
+    state: State<'_, AppState>,
+) -> Result<
+    crate::workbuddy::native_activation::RecoveryState,
+    crate::workbuddy::native_activation::Failure,
+> {
+    crate::workbuddy::native_activation::recovery_state(state.db.secret_session()).await
+}
