@@ -537,3 +537,6 @@ async fn incomplete_persistent_choices_never_fall_back_to_id_and_generation() {
     assert!(!wire.contains(f.client.to_str().unwrap()));
     assert!(!wire.contains("credential"));
 }
+
+#[path = "native_controller/process_tests.rs"]
+mod process_tests;

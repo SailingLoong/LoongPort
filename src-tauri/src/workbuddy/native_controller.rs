@@ -12,6 +12,11 @@ use super::{
 use crate::secrets::storage::StorageIdentity;
 use std::path::{Path, PathBuf};
 
+#[cfg(any(test, target_os = "macos"))]
+#[cfg_attr(not(test), allow(dead_code))]
+// Internal consumer; verified production source factory remains separate.
+mod process;
+
 mod sealed {
     pub trait Sealed {}
 }

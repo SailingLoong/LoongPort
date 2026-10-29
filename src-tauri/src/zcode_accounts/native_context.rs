@@ -805,7 +805,7 @@ fn native_user() -> Result<OsUser, BlockedReason> {
 }
 
 #[cfg(target_os = "macos")]
-pub(super) fn native_pids(uid: u32) -> Result<Vec<i32>, ()> {
+pub(crate) fn native_pids(uid: u32) -> Result<Vec<i32>, ()> {
     // Apple xnu bsd/sys/proc_info.h: PROC_UID_ONLY = 4 (2 is PROC_PGRP_ONLY).
     // https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/proc_info.h
     // A full buffer cannot prove completeness.
@@ -830,7 +830,7 @@ fn native_process_path(pid: i32, uid: u32) -> Result<PathBuf, ()> {
     native_process_identity(pid, uid).map(|(path, _)| path)
 }
 #[cfg(target_os = "macos")]
-pub(super) fn native_process_identity(pid: i32, uid: u32) -> Result<(PathBuf, [u64; 2]), ()> {
+pub(crate) fn native_process_identity(pid: i32, uid: u32) -> Result<(PathBuf, [u64; 2]), ()> {
     use std::os::unix::ffi::OsStrExt;
     fn identity(pid: i32, uid: u32) -> Result<(u64, u64), ()> {
         let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
