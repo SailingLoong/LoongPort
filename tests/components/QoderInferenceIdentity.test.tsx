@@ -1,16 +1,27 @@
 import {
   act,
   fireEvent,
-  render,
+  render as renderWithTestingLibrary,
   screen,
   waitFor,
 } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { ReactElement, ReactNode } from "react";
 import { QoderInferenceIdentity } from "@/components/providers/qoder/QoderInferenceIdentity";
 import type {
   QoderHttpIdentityContext,
   QoderHttpIdentityResult,
 } from "@/lib/api/qoderHttpAuth";
+
+let queryClient: QueryClient;
+function render(element: ReactElement) {
+  return renderWithTestingLibrary(element, {
+    wrapper: ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    ),
+  });
+}
 
 const api = vi.hoisted(() => ({ context: vi.fn(), action: vi.fn() }));
 const nativeDialog = vi.hoisted(() => ({ confirm: vi.fn(), ask: vi.fn() }));
@@ -64,6 +75,9 @@ async function close() {
   );
 }
 beforeEach(() => {
+  queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
   api.context.mockReset().mockResolvedValue(unestablished);
   api.action
     .mockReset()
