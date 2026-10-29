@@ -245,12 +245,23 @@ impl ProxyServer {
                                     // 将 hyper::body::Incoming 转为 axum::body::Body，保留 extensions
                                     let (mut parts, body) = req.into_parts();
 
+                                    #[cfg(test)]
+                                    let trace = loopback_tests::PhaseTrace::from_headers(&parts.headers);
+                                    #[cfg(test)]
+                                    if let Some(trace) = &trace {
+                                        trace.emit("request_received");
+                                        parts.extensions.insert(trace.clone());
+                                    }
+
                                     // Insert our own header case map alongside hyper's internal one
                                     parts.extensions.insert(cases);
 
                                     let body = axum::body::Body::new(body);
                                     let axum_req = http::Request::from_parts(parts, body);
-                                    <Router as tower::Service<http::Request<axum::body::Body>>>::call(&mut router, axum_req).await
+                                    let result = <Router as tower::Service<http::Request<axum::body::Body>>>::call(&mut router, axum_req).await;
+                                    #[cfg(test)]
+                                    if let Some(trace) = &trace { trace.emit("response_ready_for_hyper"); }
+                                    result
                                 }
                             });
 
@@ -933,4 +944,4 @@ pub(crate) async fn verify_qoder_shared_flow(case: &str) {
 
 #[cfg(test)]
 #[path = "server_loopback_tests.rs"]
-mod loopback_tests;
+pub(super) mod loopback_tests;
