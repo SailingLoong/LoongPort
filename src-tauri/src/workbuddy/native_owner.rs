@@ -143,6 +143,38 @@ impl<'a> Owner<'a> {
         }
         Ok(())
     }
+    fn check_accounts(&self) -> Result<(), Failure> {
+        self.check()?;
+        if self.disposition()? == Disposition::Pending {
+            return Err(Failure::RecoveryRequired);
+        }
+        Ok(())
+    }
+    pub(super) fn load_accounts(&self) -> Result<Vec<super::model::SavedAccount>, Failure> {
+        self.check_accounts()?;
+        let (session, _, _) = self.selected.ok_or(Failure::SourceChanged)?;
+        let rows =
+            super::store::load_with_vault(session, self.storage).map_err(|_| Failure::Journal)?;
+        self.check_accounts()?;
+        Ok(rows)
+    }
+    pub(super) fn save_accounts(
+        &self,
+        rows: Vec<super::model::SavedAccount>,
+        before_write: impl FnOnce() -> Result<(), Failure>,
+    ) -> Result<(), Failure> {
+        self.check_accounts()?;
+        let (session, _, _) = self.selected.ok_or(Failure::SourceChanged)?;
+        super::store::save_with_vault(session, self.storage, &self.identity, rows, || {
+            self.check_accounts()
+                .map_err(|_| super::model::Failure::StorageUnavailable)?;
+            before_write().map_err(|_| super::model::Failure::StorageUnavailable)?;
+            self.check_accounts()
+                .map_err(|_| super::model::Failure::StorageUnavailable)
+        })
+        .map_err(|_| Failure::Journal)?;
+        self.check_accounts()
+    }
     fn file(&self) -> Result<crate::secrets::owned_file::OwnedFile, Failure> {
         crate::secrets::owned_file::OwnedFile::registered(
             crate::secrets::owned_file::WORKBUDDY_NATIVE_JOURNAL_FILE,

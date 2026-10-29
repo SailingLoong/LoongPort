@@ -1,17 +1,10 @@
 //! Explicit read-only known-location observation; never native switch authorization.
+use super::native_source::read_pair;
+pub(crate) use super::native_source::PreviewError;
+#[cfg(test)]
+use super::native_source::{marker_path, AUTH_LIMIT, MARKER_LIMIT};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-#[derive(Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) enum PreviewError {
-    UnsafeSource,
-    SourceChanged,
-    UnreadableSource,
-    InvalidDocument,
-    UnsupportedContext,
-    #[cfg(not(any(unix, windows)))]
-    UnsupportedPlatform,
-}
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum AuthObservation {
@@ -36,8 +29,6 @@ enum HostOs {
     #[cfg(any(test, target_os = "windows"))]
     Windows,
 }
-const AUTH_LIMIT: u64 = 4 * 1024 * 1024;
-const MARKER_LIMIT: u64 = 64 * 1024;
 
 #[cfg(feature = "gui")]
 pub(crate) fn preview_current() -> Result<Preview, PreviewError> {
@@ -60,166 +51,6 @@ fn auth_path(home: &Path, os: HostOs) -> PathBuf {
         HostOs::Windows => "AppData/Local/CodeBuddyExtension/Data/Public/auth",
     })
     .join("workbuddy-desktop.info")
-}
-fn marker_path(auth: &Path) -> PathBuf {
-    let mut name = auth.as_os_str().to_os_string();
-    name.push(".logged-out");
-    PathBuf::from(name)
-}
-#[derive(PartialEq, Eq)]
-struct Identity {
-    volume: u64,
-    index: u64,
-}
-fn identity(file: &std::fs::File) -> Result<Identity, PreviewError> {
-    let metadata = file
-        .metadata()
-        .map_err(|_| PreviewError::UnreadableSource)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        Ok(Identity {
-            volume: metadata.dev(),
-            index: metadata.ino(),
-        })
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::{fs::MetadataExt, io::AsRawHandle};
-        use windows_sys::Win32::Storage::FileSystem::{
-            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
-        };
-        if metadata.file_attributes() & 0x400 != 0 {
-            return Err(PreviewError::UnsafeSource);
-        }
-        let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-        // SAFETY: live owned file handle and initialized writable structure for this call.
-        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
-            return Err(PreviewError::UnreadableSource);
-        }
-        Ok(Identity {
-            volume: u64::from(information.dwVolumeSerialNumber),
-            index: (u64::from(information.nFileIndexHigh) << 32)
-                | u64::from(information.nFileIndexLow),
-        })
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = metadata;
-        Err(PreviewError::UnsupportedPlatform)
-    }
-}
-fn parents(path: &Path) -> Result<Vec<Identity>, PreviewError> {
-    let mut result = Vec::new();
-    for parent in path.ancestors().collect::<Vec<_>>().into_iter().rev() {
-        if !parent.is_absolute() {
-            continue;
-        }
-        let meta = match std::fs::symlink_metadata(parent) {
-            Ok(meta) => meta,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
-            Err(_) => return Err(PreviewError::UnreadableSource),
-        };
-        if !meta.is_dir() || meta.file_type().is_symlink() {
-            return Err(PreviewError::UnsafeSource);
-        }
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC);
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::{fs::MetadataExt, fs::OpenOptionsExt};
-            use windows_sys::Win32::Storage::FileSystem::{
-                FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-            };
-            if meta.file_attributes() & 0x400 != 0 {
-                return Err(PreviewError::UnsafeSource);
-            }
-            options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
-        }
-        let file = options
-            .open(parent)
-            .map_err(|_| PreviewError::UnsafeSource)?;
-        if !file
-            .metadata()
-            .map_err(|_| PreviewError::UnreadableSource)?
-            .is_dir()
-        {
-            return Err(PreviewError::UnsafeSource);
-        }
-        result.push(identity(&file)?);
-    }
-    Ok(result)
-}
-#[derive(PartialEq, Eq)]
-struct Sample {
-    identity: Identity,
-    modified: std::time::SystemTime,
-    bytes: zeroize::Zeroizing<Vec<u8>>,
-}
-fn read_file(path: &Path, limit: u64) -> Result<Option<Sample>, PreviewError> {
-    use std::io::Read;
-    let Some(mut file) = crate::config_file_io::open_regular_file(path, limit)
-        .map_err(|_| PreviewError::UnsafeSource)?
-    else {
-        return Ok(None);
-    };
-    let before = identity(&file)?;
-    let meta = file
-        .metadata()
-        .map_err(|_| PreviewError::UnreadableSource)?;
-    let modified = meta
-        .modified()
-        .map_err(|_| PreviewError::UnreadableSource)?;
-    let mut bytes = zeroize::Zeroizing::new(Vec::new());
-    (&mut file)
-        .take(limit + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| PreviewError::UnreadableSource)?;
-    let after = file
-        .metadata()
-        .map_err(|_| PreviewError::UnreadableSource)?;
-    if bytes.len() as u64 > limit {
-        return Err(PreviewError::UnsafeSource);
-    }
-    if identity(&file)? != before
-        || after.len() != meta.len()
-        || after
-            .modified()
-            .map_err(|_| PreviewError::UnreadableSource)?
-            != modified
-    {
-        return Err(PreviewError::SourceChanged);
-    }
-    Ok(Some(Sample {
-        identity: before,
-        modified,
-        bytes,
-    }))
-}
-#[derive(PartialEq, Eq)]
-struct Pair {
-    parents: Vec<Identity>,
-    auth: Option<Sample>,
-    marker: Option<Sample>,
-}
-fn read_pair(auth: &Path) -> Result<Pair, PreviewError> {
-    let parent = auth.parent().ok_or(PreviewError::UnsafeSource)?;
-    let before = parents(parent)?;
-    let auth_sample = read_file(auth, AUTH_LIMIT)?;
-    let marker = read_file(&marker_path(auth), MARKER_LIMIT)?;
-    if parents(parent)? != before {
-        return Err(PreviewError::SourceChanged);
-    }
-    Ok(Pair {
-        parents: before,
-        auth: auth_sample,
-        marker,
-    })
 }
 fn observe_at(home: &Path, os: HostOs, after_read: impl FnOnce()) -> Result<Preview, PreviewError> {
     if !home.is_absolute()

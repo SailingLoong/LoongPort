@@ -12,6 +12,8 @@ pub(crate) struct StoredNativeSnapshot {
     context: NativeContext,
     identity: String,
     bytes: Zeroizing<Vec<u8>>,
+    // LoongPort row lifetime only; never source authentication or rollback proof.
+    incarnation: Option<uuid::Uuid>,
 }
 impl StoredNativeSnapshot {
     fn context(&self) -> &NativeContext {
@@ -52,6 +54,59 @@ impl Drop for Credential {
     }
 }
 impl Account {
+    pub(in crate::workbuddy) fn from_observation(
+        bytes: &[u8],
+        context: &NativeContext,
+        label: &str,
+    ) -> Result<Self, Failure> {
+        Self::observed_with_lifetime(bytes, context, label, uuid::Uuid::new_v4())
+    }
+    pub(in crate::workbuddy) fn recapture_observation(
+        &self,
+        bytes: &[u8],
+        context: &NativeContext,
+        label: &str,
+    ) -> Result<Self, Failure> {
+        let Credential::NativeOnly(snapshot) = &self.credential else {
+            return Err(Failure::UnsupportedContext);
+        };
+        if snapshot.context() != context {
+            return Err(Failure::UnsupportedContext);
+        }
+        let incarnation = snapshot.incarnation.ok_or(Failure::UnsupportedContext)?;
+        let next = Self::observed_with_lifetime(bytes, context, label, incarnation)?;
+        if next.uid != self.uid {
+            return Err(Failure::UnsupportedContext);
+        }
+        Ok(next)
+    }
+    fn observed_with_lifetime(
+        bytes: &[u8],
+        context: &NativeContext,
+        label: &str,
+        incarnation: uuid::Uuid,
+    ) -> Result<Self, Failure> {
+        let identity = native::validate_stored_identity(bytes, context)
+            .map_err(|_| Failure::UnsupportedContext)?;
+        Ok(Self {
+            uid: identity.clone(),
+            domain: Domain::parse(&context.realm)?,
+            label: label.into(),
+            credential: Credential::NativeOnly(StoredNativeSnapshot {
+                context: context.clone(),
+                identity,
+                bytes: Zeroizing::new(bytes.to_vec()),
+                incarnation: Some(incarnation),
+            }),
+        })
+    }
+    pub(in crate::workbuddy) fn has_native_lifetime(&self) -> bool {
+        self.native_snapshot()
+            .is_some_and(|snapshot| snapshot.incarnation.is_some())
+    }
+    pub(in crate::workbuddy) fn same_native_scope(&self, context: &NativeContext) -> bool {
+        matches!(&self.credential, Credential::NativeOnly(snapshot) if snapshot.context()==context)
+    }
     pub(crate) fn is_api(&self) -> bool {
         matches!(
             self.credential,
@@ -134,6 +189,15 @@ pub(super) fn fingerprint_with_native(token: &str, snapshot: &StoredNativeSnapsh
         hash.update((value.len() as u64).to_be_bytes());
         hash.update(value);
     }
+    if let Some(incarnation) = snapshot.incarnation {
+        for value in [
+            b"native-incarnation:v2".as_slice(),
+            incarnation.as_bytes().as_slice(),
+        ] {
+            hash.update((value.len() as u64).to_be_bytes());
+            hash.update(value);
+        }
+    }
     hash.finalize().into()
 }
 #[derive(Deserialize)]
@@ -163,6 +227,8 @@ struct WireNative {
     version: u32,
     context: NativeContext,
     snapshot: String,
+    #[serde(default, deserialize_with = "present")]
+    incarnation: Option<String>,
 }
 impl Drop for WireNative {
     fn drop(&mut self) {
@@ -174,9 +240,21 @@ fn decode_native<E: serde::de::Error>(
     uid: &str,
     domain: Domain,
 ) -> Result<StoredNativeSnapshot, E> {
-    if record.version != 1 {
-        return Err(E::custom("unsupported native credential version"));
-    }
+    let incarnation = match (record.version, record.incarnation.as_deref()) {
+        (1, None) => None,
+        (2, Some(value)) => {
+            let id =
+                uuid::Uuid::parse_str(value).map_err(|_| E::custom("invalid native lifetime"))?;
+            if id.get_version_num() != 4
+                || id.get_variant() != uuid::Variant::RFC4122
+                || id.hyphenated().to_string() != value
+            {
+                return Err(E::custom("invalid native lifetime"));
+            }
+            Some(id)
+        }
+        _ => return Err(E::custom("unsupported native credential lifetime version")),
+    };
     let bytes = Zeroizing::new(
         STANDARD
             .decode(&record.snapshot)
@@ -191,6 +269,7 @@ fn decode_native<E: serde::de::Error>(
         context: record.context.clone(),
         identity,
         bytes,
+        incarnation,
     };
     if snapshot.identity() != uid || snapshot.context().realm != domain.host() {
         return Err(E::custom("native identity mismatch"));
@@ -251,14 +330,17 @@ impl Serialize for Account {
                 version: u32,
                 context: &'a NativeContext,
                 snapshot: &'a str,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                incarnation: Option<String>,
             }
             let encoded = Zeroizing::new(STANDARD.encode(snapshot.bytes()));
             state.serialize_field(
                 "native",
                 &Record {
-                    version: 1,
+                    version: if snapshot.incarnation.is_some() { 2 } else { 1 },
                     context: snapshot.context(),
                     snapshot: &encoded,
+                    incarnation: snapshot.incarnation.map(|id| id.hyphenated().to_string()),
                 },
             )?;
         }

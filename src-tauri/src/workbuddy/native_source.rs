@@ -1,0 +1,353 @@
+//! Bounded untrusted observation -> original selected owner -> stored-only data.
+//! No home discovery, source authentication, official-key access or native apply.
+use super::{
+    model::{Account, Credential, Domain, SavedAccount},
+    native::NativeContext,
+    native_transaction::Failure,
+};
+use crate::{
+    app_store::isolated_scope::SelectionSnapshot,
+    secrets::{session::SecretSession, storage::StorageIdentity},
+};
+use serde::Serialize;
+use std::path::{Path, PathBuf};
+pub(super) const AUTH_LIMIT: u64 = 4 * 1024 * 1024;
+pub(super) const MARKER_LIMIT: u64 = 64 * 1024;
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum PreviewError {
+    UnsafeSource,
+    SourceChanged,
+    UnreadableSource,
+    InvalidDocument,
+    UnsupportedContext,
+    #[cfg(not(any(unix, windows)))]
+    UnsupportedPlatform,
+}
+pub(super) fn marker_path(auth: &Path) -> PathBuf {
+    let mut name = auth.as_os_str().to_os_string();
+    name.push(".logged-out");
+    PathBuf::from(name)
+}
+#[derive(PartialEq, Eq)]
+struct Identity {
+    volume: u64,
+    index: u64,
+}
+fn identity(file: &std::fs::File) -> Result<Identity, PreviewError> {
+    let metadata = file
+        .metadata()
+        .map_err(|_| PreviewError::UnreadableSource)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(Identity {
+            volume: metadata.dev(),
+            index: metadata.ino(),
+        })
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::{fs::MetadataExt, io::AsRawHandle};
+        use windows_sys::Win32::Storage::FileSystem::{
+            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        };
+        if metadata.file_attributes() & 0x400 != 0 {
+            return Err(PreviewError::UnsafeSource);
+        }
+        let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: live owned file handle and initialized writable structure for this call.
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
+            return Err(PreviewError::UnreadableSource);
+        }
+        Ok(Identity {
+            volume: u64::from(information.dwVolumeSerialNumber),
+            index: (u64::from(information.nFileIndexHigh) << 32)
+                | u64::from(information.nFileIndexLow),
+        })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = metadata;
+        Err(PreviewError::UnsupportedPlatform)
+    }
+}
+fn parents(path: &Path) -> Result<Vec<Identity>, PreviewError> {
+    let mut result = Vec::new();
+    for parent in path.ancestors().collect::<Vec<_>>().into_iter().rev() {
+        if !parent.is_absolute() {
+            continue;
+        }
+        let meta = match std::fs::symlink_metadata(parent) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Err(_) => return Err(PreviewError::UnreadableSource),
+        };
+        if !meta.is_dir() || meta.file_type().is_symlink() {
+            return Err(PreviewError::UnsafeSource);
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::{fs::MetadataExt, fs::OpenOptionsExt};
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            };
+            if meta.file_attributes() & 0x400 != 0 {
+                return Err(PreviewError::UnsafeSource);
+            }
+            options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+        }
+        let file = options
+            .open(parent)
+            .map_err(|_| PreviewError::UnsafeSource)?;
+        if !file
+            .metadata()
+            .map_err(|_| PreviewError::UnreadableSource)?
+            .is_dir()
+        {
+            return Err(PreviewError::UnsafeSource);
+        }
+        result.push(identity(&file)?);
+    }
+    Ok(result)
+}
+#[derive(PartialEq, Eq)]
+pub(super) struct Sample {
+    identity: Identity,
+    modified: std::time::SystemTime,
+    pub(super) bytes: zeroize::Zeroizing<Vec<u8>>,
+}
+fn read_file(path: &Path, limit: u64) -> Result<Option<Sample>, PreviewError> {
+    use std::io::Read;
+    let Some(mut file) = crate::config_file_io::open_regular_file(path, limit)
+        .map_err(|_| PreviewError::UnsafeSource)?
+    else {
+        return Ok(None);
+    };
+    let before = identity(&file)?;
+    let meta = file
+        .metadata()
+        .map_err(|_| PreviewError::UnreadableSource)?;
+    let modified = meta
+        .modified()
+        .map_err(|_| PreviewError::UnreadableSource)?;
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+    (&mut file)
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| PreviewError::UnreadableSource)?;
+    let after = file
+        .metadata()
+        .map_err(|_| PreviewError::UnreadableSource)?;
+    if bytes.len() as u64 > limit {
+        return Err(PreviewError::UnsafeSource);
+    }
+    if identity(&file)? != before
+        || after.len() != meta.len()
+        || after
+            .modified()
+            .map_err(|_| PreviewError::UnreadableSource)?
+            != modified
+    {
+        return Err(PreviewError::SourceChanged);
+    }
+    Ok(Some(Sample {
+        identity: before,
+        modified,
+        bytes,
+    }))
+}
+#[derive(PartialEq, Eq)]
+pub(super) struct Pair {
+    parents: Vec<Identity>,
+    pub(super) auth: Option<Sample>,
+    pub(super) marker: Option<Sample>,
+}
+pub(super) fn read_pair(auth: &Path) -> Result<Pair, PreviewError> {
+    let parent = auth.parent().ok_or(PreviewError::UnsafeSource)?;
+    let before = parents(parent)?;
+    let auth_sample = read_file(auth, AUTH_LIMIT)?;
+    let marker = read_file(&marker_path(auth), MARKER_LIMIT)?;
+    if parents(parent)? != before {
+        return Err(PreviewError::SourceChanged);
+    }
+    Ok(Pair {
+        parents: before,
+        auth: auth_sample,
+        marker,
+    })
+}
+
+/// Sealed observation, not verified provenance or a NativeSnapshot capability.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) struct Observation {
+    path: PathBuf,
+    pair: Pair,
+    context: NativeContext,
+    uid: String,
+}
+#[cfg_attr(not(test), allow(dead_code))]
+impl Observation {
+    pub(super) fn read(path: &Path, context: &NativeContext) -> Result<Self, Failure> {
+        if !path.is_absolute()
+            || path.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir | std::path::Component::CurDir
+                )
+            })
+        {
+            return Err(Failure::UnsafePath);
+        }
+        let pair = read_pair(path).map_err(|_| Failure::SourceChanged)?;
+        if pair.marker.is_some() {
+            return Err(Failure::RequestConflict);
+        }
+        let auth = pair.auth.as_ref().ok_or(Failure::RequestConflict)?;
+        let uid = super::native::validate_stored_identity(&auth.bytes, context)
+            .map_err(|_| Failure::RequestConflict)?;
+        let result = Self {
+            path: path.into(),
+            pair,
+            context: context.clone(),
+            uid,
+        };
+        result.verify()?;
+        Ok(result)
+    }
+    fn verify(&self) -> Result<(), Failure> {
+        if read_pair(&self.path).map_err(|_| Failure::SourceChanged)? != self.pair {
+            return Err(Failure::SourceChanged);
+        }
+        Ok(())
+    }
+}
+/// Explicit original owner binding, never inferred from an observed path or UID.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) struct Catalog<'a> {
+    pub session: &'a SecretSession,
+    pub identity: &'a StorageIdentity,
+    pub epoch: u64,
+    pub selection: &'a SelectionSnapshot,
+}
+/// Data lookup fence reuses original generation + credential equality, including
+/// the persisted v2 row lifetime. Legacy v1 data never issues a lifetime receipt.
+/// Private/zeroizing credential retention; no serialization or native execution admission.
+#[derive(Clone)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) struct Receipt {
+    pub id: String,
+    pub generation: u64,
+    pub realm: String,
+    credential: Credential,
+}
+impl Receipt {
+    fn matches(&self, row: &SavedAccount, owner: &str) -> bool {
+        row.account.has_native_lifetime()
+            && self.id == row.account.id(owner)
+            && self.realm == row.account.domain.host()
+            && self.generation == row.generation
+            && self.credential == row.account.credential
+    }
+}
+#[cfg_attr(not(test), allow(dead_code))]
+impl Catalog<'_> {
+    pub(super) async fn save(
+        &self,
+        observation: &Observation,
+        expected: Option<&Receipt>,
+        label: &str,
+    ) -> Result<Receipt, Failure> {
+        super::native_owner::with_selected_owner(
+            self.session,
+            self.identity,
+            self.epoch,
+            self.selection,
+            |owner| {
+                observation.verify()?;
+                let mut rows = owner.load_accounts()?;
+                let domain = Domain::parse(&observation.context.realm)
+                    .map_err(|_| Failure::RequestConflict)?;
+                let matching: Vec<_> = rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| r.account.domain == domain && r.account.uid == observation.uid)
+                    .map(|(i, _)| i)
+                    .collect();
+                let bytes = &observation
+                    .pair
+                    .auth
+                    .as_ref()
+                    .ok_or(Failure::RequestConflict)?
+                    .bytes;
+                let index = match matching.as_slice() {
+                    [] if expected.is_none() => {
+                        let account = Account::from_observation(bytes, &observation.context, label)
+                            .map_err(|_| Failure::RequestConflict)?;
+                        rows.push(SavedAccount::new(account));
+                        rows.len() - 1
+                    }
+                    [i] if expected.is_some_and(|receipt| {
+                        receipt.matches(&rows[*i], self.identity.store_id())
+                    }) =>
+                    {
+                        if !rows[*i].account.same_native_scope(&observation.context) {
+                            return Err(Failure::RequestConflict);
+                        }
+                        let account = rows[*i]
+                            .account
+                            .recapture_observation(bytes, &observation.context, label)
+                            .map_err(|_| Failure::RequestConflict)?;
+                        rows[*i].generation = rows[*i]
+                            .generation
+                            .checked_add(1)
+                            .ok_or(Failure::RequestConflict)?;
+                        rows[*i].account = account;
+                        *i
+                    }
+                    _ => return Err(Failure::RequestConflict),
+                };
+                let row = &rows[index];
+                let receipt = Receipt {
+                    id: row.account.id(self.identity.store_id()),
+                    generation: row.generation,
+                    realm: domain.host().into(),
+                    credential: row.account.credential.clone(),
+                };
+                owner.save_accounts(rows, || observation.verify())?;
+                Ok(receipt)
+            },
+        )
+        .await
+    }
+    pub(super) async fn load(&self, receipt: &Receipt) -> Result<SavedAccount, Failure> {
+        super::native_owner::with_selected_owner(
+            self.session,
+            self.identity,
+            self.epoch,
+            self.selection,
+            |owner| {
+                let rows = owner.load_accounts()?;
+                let mut matches = rows
+                    .into_iter()
+                    .filter(|r| r.account.id(self.identity.store_id()) == receipt.id);
+                let row = matches.next().ok_or(Failure::RequestConflict)?;
+                if matches.next().is_some()
+                    || !receipt.matches(&row, self.identity.store_id())
+                    || !matches!(&row.account.credential, Credential::NativeOnly(_))
+                {
+                    return Err(Failure::RequestConflict);
+                }
+                Ok(row)
+            },
+        )
+        .await
+    }
+}

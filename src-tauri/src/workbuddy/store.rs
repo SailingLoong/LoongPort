@@ -100,26 +100,37 @@ pub(crate) fn save(
     accounts: Vec<SavedAccount>,
 ) -> Result<(), Failure> {
     let vault = session.read().map_err(|_| Failure::StorageUnavailable)?;
+    save_with_vault(session, &vault, expected, accounts, || Ok(()))
+}
+
+pub(super) fn save_with_vault(
+    session: &SecretSession,
+    vault: &crate::secrets::storage::StorageContext,
+    expected: &StorageIdentity,
+    accounts: Vec<SavedAccount>,
+    before_write: impl FnOnce() -> Result<(), Failure>,
+) -> Result<(), Failure> {
     if &vault.identity() != expected || accounts.len() > 200 {
         return Err(Failure::StorageUnavailable);
     }
     validate_accounts(&accounts)?;
     // Authenticate and validate the existing original owner before replacement.
     // Unknown future credentials/corrupt or foreign-key data are never empty.
-    load_with_vault(session, &vault)?;
+    load_with_vault(session, vault)?;
     let plaintext = zeroize::Zeroizing::new(
         serde_json::to_vec(&Document { accounts }).map_err(|_| Failure::StorageUnavailable)?,
     );
     let owned = OwnedFile::registered(FILE).map_err(|_| Failure::StorageUnavailable)?;
     let ciphertext = owned
-        .encode_storage(&vault, &plaintext)
+        .encode_storage(vault, &plaintext)
         .map_err(|_| Failure::StorageUnavailable)?;
     if ciphertext.len() as u64 > MAX_BYTES {
         return Err(Failure::StorageUnavailable);
     }
+    before_write()?;
     crate::secrets::session::ensure_owned_directory(session.root(), session.root())
         .map_err(|_| Failure::StorageUnavailable)?;
-    crate::secrets::files::ensure_plaintext_destination(&vault, &owned.path(session))
+    crate::secrets::files::ensure_plaintext_destination(vault, &owned.path(session))
         .map_err(|_| Failure::StorageUnavailable)?;
     crate::secrets::session::write_durable(&owned.path(session), &ciphertext)
         .map_err(|_| Failure::StorageUnavailable)

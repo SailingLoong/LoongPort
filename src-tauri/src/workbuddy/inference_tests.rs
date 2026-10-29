@@ -1906,3 +1906,38 @@ async fn retained_native_image_and_original_generation_fence_old_api_owner() {
         Err(Failure::ExpiredAuthorization)
     ));
 }
+
+#[tokio::test]
+async fn native_v2_lifetime_change_retires_original_http_owner() {
+    let f = Fixture::new(true);
+    let binding = store::binding(&f.session).unwrap();
+    let mut api = store::load(&f.session, &binding).unwrap().remove(0);
+    let mut value =
+        serde_json::to_value(crate::workbuddy::native_account_tests::native_row_fixture()).unwrap();
+    value["account"]["native"]["version"] = json!(2);
+    value["account"]["native"]["incarnation"] = json!("11111111-1111-4111-8111-111111111111");
+    let mut native: SavedAccount = serde_json::from_value(value).unwrap();
+    api.account.uid = native.account.uid.clone();
+    api.inference.as_mut().unwrap().uid = native.account.uid.clone();
+    native
+        .account
+        .replace_api_preserving_native(api.account)
+        .unwrap();
+    api.account = native.account;
+    store::save(&f.session, &binding, vec![api]).unwrap();
+    let rows = store::load(&f.session, &binding).unwrap();
+    let owner = Owner::from_row(&f.session, binding.clone(), &rows[0]).unwrap();
+    assert!(owner.rows(&f.session).is_ok());
+    let mut value = serde_json::to_value(&rows[0]).unwrap();
+    value["account"]["native"]["incarnation"] = json!("22222222-2222-4222-8222-222222222222");
+    let changed: SavedAccount = serde_json::from_value(value).unwrap();
+    assert_ne!(
+        changed.account.http_fingerprint().unwrap(),
+        rows[0].account.http_fingerprint().unwrap()
+    );
+    store::save(&f.session, &binding, vec![changed]).unwrap();
+    assert!(matches!(
+        owner.rows(&f.session),
+        Err(Failure::ExpiredAuthorization)
+    ));
+}

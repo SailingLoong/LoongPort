@@ -40,3 +40,7 @@ pub(crate) mod native_preview;
 
 #[cfg(test)]
 mod native_account_tests;
+
+mod native_source;
+#[cfg(test)]
+mod native_source_tests;
