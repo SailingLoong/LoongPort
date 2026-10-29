@@ -70,10 +70,29 @@ pub(crate) fn load_with_vault(
         .map_err(|_| Failure::StorageUnavailable)?;
     let doc: Document =
         serde_json::from_slice(&plaintext).map_err(|_| Failure::StorageUnavailable)?;
-    if doc.accounts.len() > 200 {
+    validate_accounts(&doc.accounts)?;
+    Ok(doc.accounts)
+}
+fn validate_accounts(accounts: &[SavedAccount]) -> Result<(), Failure> {
+    if accounts.len() > 200 {
         return Err(Failure::StorageUnavailable);
     }
-    Ok(doc.accounts)
+    let mut identities = std::collections::BTreeMap::new();
+    for row in accounts {
+        row.validate_for_store()?;
+        // Historical API rows may share an identity. Preserve them verbatim;
+        // only native retention requires an unambiguous original account owner.
+        let has_native = !matches!(&row.account.credential, super::model::Credential::Api(_));
+        if let Some(previous_has_native) = identities.insert(
+            (row.account.domain.host(), row.account.uid.as_str()),
+            has_native,
+        ) {
+            if previous_has_native || has_native {
+                return Err(Failure::StorageUnavailable);
+            }
+        }
+    }
+    Ok(())
 }
 pub(crate) fn save(
     session: &SecretSession,
@@ -84,6 +103,10 @@ pub(crate) fn save(
     if &vault.identity() != expected || accounts.len() > 200 {
         return Err(Failure::StorageUnavailable);
     }
+    validate_accounts(&accounts)?;
+    // Authenticate and validate the existing original owner before replacement.
+    // Unknown future credentials/corrupt or foreign-key data are never empty.
+    load_with_vault(session, &vault)?;
     let plaintext = zeroize::Zeroizing::new(
         serde_json::to_vec(&Document { accounts }).map_err(|_| Failure::StorageUnavailable)?,
     );
@@ -124,7 +147,7 @@ pub(crate) mod plaintext_tests {
             uid: "synthetic-user".into(),
             domain: super::super::model::Domain::WorkBuddy,
             label: "Synthetic".into(),
-            token: "synthetic-plaintext-token".into(),
+            credential: "synthetic-plaintext-token".into(),
         });
         save(&session, &original, vec![account]).unwrap();
         let bytes = std::fs::read(root.path().join(FILE)).unwrap();
@@ -134,7 +157,10 @@ pub(crate) mod plaintext_tests {
             "synthetic-plaintext-token"
         );
         assert_eq!(
-            load(&session, &original).unwrap()[0].account.token,
+            load(&session, &original).unwrap()[0]
+                .account
+                .api_token()
+                .unwrap(),
             "synthetic-plaintext-token"
         );
         assert!(!root.path().join("vault.json").exists());
@@ -157,5 +183,58 @@ pub(crate) mod plaintext_tests {
     #[cfg(feature = "test-hooks")]
     pub(crate) fn run() {
         plaintext_store_round_trips_without_key_and_preserves_binding_checks();
+    }
+}
+
+#[cfg(test)]
+mod legacy_duplicate_compat_tests {
+    use super::*;
+    #[test]
+    fn legacy_api_duplicate_identity_remains_lossless() {
+        let root = tempfile::tempdir().unwrap();
+        let session = SecretSession::from_context(
+            root.path().into(),
+            crate::secrets::VaultContext::generate().unwrap(),
+        );
+        let expected = binding(&session).unwrap();
+        let make = |label: &str, token: &str| {
+            let account = serde_json::from_value(serde_json::json!({"uid":"synthetic-duplicate", "domain":"workBuddy", "label":label, "token":token})).unwrap();
+            SavedAccount::new(account)
+        };
+        let rows = vec![
+            make("First historical row", "synthetic-one"),
+            make("Second historical row", "synthetic-two"),
+        ];
+        let original = serde_json::to_value(&rows).unwrap();
+        let ids: Vec<_> = rows
+            .iter()
+            .map(|r| r.account.id(expected.store_id()))
+            .collect();
+        let owned = OwnedFile::registered(FILE).unwrap();
+        let bytes = owned
+            .encode_storage(
+                &session.read().unwrap(),
+                &serde_json::to_vec(&serde_json::json!({"accounts":original})).unwrap(),
+            )
+            .unwrap();
+        std::fs::write(root.path().join(FILE), &bytes).unwrap();
+        let loaded = load(&session, &expected)
+            .expect("legacy API duplicates were readable before native storage");
+        assert_eq!(serde_json::to_value(&loaded).unwrap(), original);
+        assert_eq!(std::fs::read(root.path().join(FILE)).unwrap(), bytes);
+        assert_eq!(
+            loaded
+                .iter()
+                .map(|r| r.account.id(expected.store_id()))
+                .collect::<Vec<_>>(),
+            ids
+        );
+        for _ in 0..2 {
+            save(&session, &expected, loaded.clone()).unwrap();
+            assert_eq!(
+                serde_json::to_value(load(&session, &expected).unwrap()).unwrap(),
+                original
+            );
+        }
     }
 }

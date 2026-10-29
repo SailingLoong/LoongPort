@@ -90,7 +90,7 @@ pub(crate) fn parse_account(token: &Value, profile: &Value) -> Result<Account, F
         uid: uid.into(),
         domain,
         label,
-        token: token.into(),
+        credential: token.into(),
     })
 }
 pub(crate) fn verification_url(raw: &str, state: &str) -> Result<String, Failure> {
@@ -362,7 +362,7 @@ pub(crate) async fn finish<T: Transport>(
     let mut account = parse_account(&token, &profile)?;
     let provisional = SavedAccount::new(account.clone());
     let grant = super::inference::grant_from_login(session, &provisional, &token, &profile, now)?;
-    zeroize::Zeroize::zeroize(&mut account.token);
+    account.clear_api_token()?;
     let mut rows = store::load(session, &binding)?;
     let account_id = account.id(binding.store_id());
     if let Some(row) = rows
@@ -380,7 +380,7 @@ pub(crate) async fn finish<T: Transport>(
         row.auto_claim_enabled = false;
         row.auto_claim_credential = None;
         // Never erase an unresolved claim or its attempted day during reauthorization.
-        row.account = account;
+        row.account.replace_api_preserving_native(account)?;
         row.inference = Some(grant);
         row.shared_authorization = true;
         row.inference_consent = Some(false);

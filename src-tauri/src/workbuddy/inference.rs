@@ -16,7 +16,6 @@ use bytes::Bytes;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     future::Future,
@@ -74,6 +73,7 @@ impl Drop for Authorization {
 struct Owner {
     binding: StorageIdentity,
     epoch: u64,
+    account_generation: u64,
     account_id: String,
     uid: String,
     domain: Domain,
@@ -84,18 +84,24 @@ struct Owner {
     inference_required: bool,
 }
 impl Owner {
-    fn from_row(session: &SecretSession, binding: StorageIdentity, row: &SavedAccount) -> Self {
-        Self {
+    fn from_row(
+        session: &SecretSession,
+        binding: StorageIdentity,
+        row: &SavedAccount,
+    ) -> Result<Self, Failure> {
+        row.account.api_token()?;
+        Ok(Self {
             epoch: session.lifecycle_epoch(),
+            account_generation: row.generation,
             account_id: row.account.id(binding.store_id()),
             uid: row.account.uid.clone(),
             domain: row.account.domain,
-            legacy_fingerprint: Sha256::digest(row.account.token.as_bytes()).into(),
+            legacy_fingerprint: row.account.http_fingerprint()?,
             original_grant_id: row.inference.as_ref().map(|g| g.grant_id.clone()),
             binding,
             inference_revision: None,
             inference_required: false,
-        }
+        })
     }
     fn rows(&self, session: &SecretSession) -> Result<(Vec<SavedAccount>, usize), Failure> {
         if session.lifecycle_epoch() != self.epoch || store::binding(session)? != self.binding {
@@ -107,11 +113,15 @@ impl Owner {
             .position(|r| r.account.id(self.binding.store_id()) == self.account_id)
             .ok_or(Failure::ExpiredAuthorization)?;
         let row = &rows[index];
-        let fingerprint: [u8; 32] = Sha256::digest(row.account.token.as_bytes()).into();
+        let fingerprint = row
+            .account
+            .http_fingerprint()
+            .map_err(|_| Failure::ExpiredAuthorization)?;
         if self.inference_revision.is_some_and(|revision| {
             (self.inference_required && !row.inference_allowed())
                 || row.inference_revision != revision
-        }) || row.account.uid != self.uid
+        }) || row.generation != self.account_generation
+            || row.account.uid != self.uid
             || row.account.domain != self.domain
             || fingerprint != self.legacy_fingerprint
             || row.inference.as_ref().map(|g| g.grant_id.as_str())
@@ -364,7 +374,7 @@ pub(super) fn grant_from_login(
     profile: &Value,
     now: i64,
 ) -> Result<Authorization, Failure> {
-    let owner = Owner::from_row(session, store::binding(session)?, row);
+    let owner = Owner::from_row(session, store::binding(session)?, row)?;
     new_grant(&owner, token, profile, now)
 }
 
@@ -385,6 +395,7 @@ pub(crate) async fn set_inference_consent(
         .iter_mut()
         .find(|r| r.account.id(binding.store_id()) == account_id)
         .ok_or(Failure::UnsupportedContext)?;
+    row.account.api_token()?;
     if enabled {
         let Some(grant) = row.inference.as_ref() else {
             return Ok(false);
@@ -401,7 +412,7 @@ pub(crate) async fn set_inference_consent(
             // Retain unresolved claims and explicit automatic consent, binding it to the
             // same verified identity/grant instead of a duplicate, expiring access token.
             let automatic = row.automatic_enabled();
-            row.account.token.zeroize();
+            row.account.clear_api_token()?;
             row.shared_authorization = true;
             row.generation = row
                 .generation
@@ -727,6 +738,7 @@ fn routing_stamp(
     row: &SavedAccount,
 ) -> Option<crate::services::service_source_identity::WorkBuddyStamp> {
     require_model_requests().ok()?;
+    row.account.api_token().ok()?;
     let grant = row.inference.as_ref()?;
     if !row.inference_allowed()
         || !valid_grant(grant, row)
@@ -743,7 +755,7 @@ fn routing_stamp(
         storage: binding.clone(),
         uid: row.account.uid.clone(),
         domain: row.account.domain.host().into(),
-        legacy_fingerprint: hex::encode(Sha256::digest(row.account.token.as_bytes())),
+        legacy_fingerprint: hex::encode(row.account.http_fingerprint().ok()?),
         original_grant_id: grant.grant_id.clone(),
         inference_revision: row.inference_revision,
         generation: row.generation,
@@ -811,8 +823,9 @@ pub(crate) fn routing_facts(
     Ok((facts, unavailable))
 }
 
-fn valid_grant(grant: &Authorization, row: &SavedAccount) -> bool {
-    grant.platform == PLATFORM
+pub(super) fn valid_grant(grant: &Authorization, row: &SavedAccount) -> bool {
+    row.account.is_api()
+        && grant.platform == PLATFORM
         && grant.uid == row.account.uid
         && grant.domain == row.account.domain
         && valid_text(&grant.grant_id, 128)
@@ -869,7 +882,7 @@ impl PendingAuthorization {
                 .iter()
                 .find(|r| r.account.id(b.store_id()) == account_id)
                 .ok_or(Failure::UnsupportedContext)?;
-            let mut owner = Owner::from_row(&session, b, row);
+            let mut owner = Owner::from_row(&session, b, row)?;
             // A supplemental login may start while inference is off, but cannot
             // outlive a later explicit permission change and silently turn it on.
             owner.inference_revision = Some(row.inference_revision);
@@ -1053,7 +1066,7 @@ impl PendingAuthorization {
         let automatic = row.automatic_enabled();
         row.inference = Some(grant);
         row.shared_authorization = true;
-        row.account.token.zeroize();
+        row.account.clear_api_token()?;
         row.inference_consent = Some(true);
         row.inference_revision = row
             .inference_revision
@@ -1142,6 +1155,7 @@ impl Lease {
             .iter()
             .find(|r| r.account.id(binding.store_id()) == account_id)
             .ok_or(Failure::UnsupportedContext)?;
+        row.account.api_token()?;
         if (inference && !row.inference_allowed()) || (!inference && !row.shared_authorization) {
             return Err(Failure::NeedsVerification);
         }
@@ -1154,7 +1168,7 @@ impl Lease {
                 return Err(Failure::ExpiredAuthorization);
             }
         }
-        let mut owner = Owner::from_row(&session, binding, row);
+        let mut owner = Owner::from_row(&session, binding, row)?;
         owner.inference_revision = inference.then_some(row.inference_revision);
         owner.inference_required = inference;
         Ok(Self {
@@ -1641,7 +1655,10 @@ impl FixtureTransport {
             || rows.iter().any(|row| {
                 let uid = &row.account.uid;
                 !uid.starts_with("synthetic-")
-                    || row.account.token != format!("fixture-checkin-{uid}")
+                    || !row
+                        .account
+                        .api_token()
+                        .is_ok_and(|token| token == format!("fixture-checkin-{uid}"))
                     || !row.inference.as_ref().is_some_and(|grant| {
                         grant.uid == *uid
                             && grant.access == format!("fixture-access-{uid}")
@@ -1745,7 +1762,10 @@ impl FixtureTransport {
             .find(|row| row.account.uid == uid)
             .ok_or(Failure::UnsupportedContext)?;
         if !uid.starts_with("synthetic-")
-            || row.account.token != format!("fixture-checkin-{uid}")
+            || !row
+                .account
+                .api_token()
+                .is_ok_and(|token| token == format!("fixture-checkin-{uid}"))
             || !row.inference.as_ref().is_some_and(|grant| {
                 grant.access == format!("fixture-access-{uid}")
                     && grant.refresh == format!("fixture-refresh-{uid}")
@@ -1771,7 +1791,12 @@ impl FixtureTransport {
             .iter_mut()
             .find(|row| row.account.uid == uid)
             .ok_or(Failure::UnsupportedContext)?;
-        if !uid.starts_with("synthetic-") || row.account.token != format!("fixture-checkin-{uid}") {
+        if !uid.starts_with("synthetic-")
+            || !row
+                .account
+                .api_token()
+                .is_ok_and(|token| token == format!("fixture-checkin-{uid}"))
+        {
             return Err(Failure::UnsupportedContext);
         }
         let grant = row.inference.as_mut().ok_or(Failure::UnsupportedContext)?;
@@ -1812,7 +1837,7 @@ impl FixtureTransport {
                 uid: (*uid).into(),
                 domain: Domain::WorkBuddy,
                 label: (*uid).into(),
-                token: format!("fixture-checkin-{uid}"),
+                credential: format!("fixture-checkin-{uid}").into(),
             });
             row.inference = Some(Authorization {
                 platform: PLATFORM.into(),

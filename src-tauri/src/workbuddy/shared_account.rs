@@ -24,7 +24,12 @@ impl Admission<'_> {
         rows: &[SavedAccount],
         binding: &StorageIdentity,
     ) -> Result<(), Failure> {
+        self.snapshot.account.api_token()?;
         let i = engine::matched(rows, binding, self.snapshot)?;
+        rows[i]
+            .account
+            .api_token()
+            .map_err(|_| Failure::ExpiredAuthorization)?;
         if self.day.is_some() {
             engine::automatic_admission(&rows[i], self.policy)?;
             if rows[i].pending != self.snapshot.pending
@@ -56,7 +61,8 @@ pub(super) async fn request_with<T: Transport>(
     transport: &T,
 ) -> Result<Value, DispatchFailure> {
     use DispatchFailure::{NotDispatched, OutcomeUnknown};
-    if !snapshot.shared_authorization
+    if !snapshot.account.is_api()
+        || !snapshot.shared_authorization
         || matches!(
             endpoint,
             AccountEndpoint::AuthState | AccountEndpoint::AuthToken | AccountEndpoint::Profile

@@ -353,7 +353,7 @@ pub(crate) async fn verify(case: &str) {
             uid: "synthetic-account".into(),
             domain: Domain::CodeBuddy,
             label: "Synthetic legacy".into(),
-            token: "synthetic-old-token".into(),
+            credential: "synthetic-old-token".into(),
         });
         legacy.attempted_day = Some(today(NOW));
         legacy.pending = Some(Attempt {
@@ -382,7 +382,10 @@ pub(crate) async fn verify(case: &str) {
         let loaded = store::load(&session, &binding).unwrap();
         assert!(!loaded[0].shared_authorization);
         assert!(loaded[0].pending == expected_pending);
-        assert_eq!(loaded[0].account.token, "synthetic-old-token");
+        assert_eq!(
+            loaded[0].account.api_token().unwrap(),
+            "synthetic-old-token"
+        );
         canonical[0].pending = expected_pending.clone();
         canonical[0].attempted_day = Some(today(NOW));
         store::save(&session, &binding, canonical).unwrap();
@@ -393,7 +396,10 @@ pub(crate) async fn verify(case: &str) {
         let restored = store::load(&session, &binding).unwrap();
         assert!(restored[0].pending == expected_pending);
         assert_eq!(restored[0].attempted_day, Some(today(NOW)));
-        assert_eq!(restored[0].account.token, "synthetic-old-token");
+        assert_eq!(
+            restored[0].account.api_token().unwrap(),
+            "synthetic-old-token"
+        );
         assert_eq!(std::fs::read(owned.path(&session)).unwrap(), old_ciphertext);
         let wrong_vault = crate::secrets::VaultContext::generate().unwrap();
         assert!(owned.decode(&wrong_vault, &old_ciphertext).is_err());
@@ -501,7 +507,7 @@ pub(crate) async fn verify(case: &str) {
         let mut rows = store::load(&session, &binding).unwrap();
         rows[0].shared_authorization = false;
         rows[0].inference = None;
-        rows[0].account.token = "synthetic-legacy-access".into();
+        rows[0].account.credential = "synthetic-legacy-access".into();
         store::save(&session, &binding, rows).unwrap();
         assert_eq!(
             set_inference_consent(&session, &id, true).await,
@@ -509,7 +515,10 @@ pub(crate) async fn verify(case: &str) {
         );
         let rows = store::load(&session, &binding).unwrap();
         assert!(!rows[0].shared_authorization);
-        assert_eq!(rows[0].account.token, "synthetic-legacy-access");
+        assert_eq!(
+            rows[0].account.api_token().unwrap(),
+            "synthetic-legacy-access"
+        );
         return;
     }
     if case == "consent" {

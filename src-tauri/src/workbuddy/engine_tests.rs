@@ -79,7 +79,7 @@ fn setup() -> (std::sync::Arc<SecretSession>, String) {
         uid: "synthetic-uid".into(),
         domain: Domain::CodeBuddy,
         label: "Synthetic account".into(),
-        token: "SYNTHETIC_TOKEN_CANARY".into(),
+        credential: "SYNTHETIC_TOKEN_CANARY".into(),
     };
     let id = account.id(b.store_id());
     store::save(&s, &b, vec![SavedAccount::new(account)]).unwrap();
@@ -266,7 +266,7 @@ async fn pending_unknown_claim_survives_verification_and_reauthorization_without
     let rows = store::load(&s, &b).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].account.id(b.store_id()), id);
-    assert!(rows[0].account.token.is_empty());
+    assert!(rows[0].account.api_token().unwrap().is_empty());
     assert!(rows[0].shared_authorization);
     assert!(rows[0].inference.is_some());
     assert_eq!(serde_json::to_value(&rows[0].pending).unwrap(), pending);
@@ -428,7 +428,7 @@ fn identities_are_bound_to_owner_and_official_cn_domain() {
         uid: "same-uid".into(),
         domain: Domain::CodeBuddy,
         label: "Account".into(),
-        token: "synthetic".into(),
+        credential: "synthetic".into(),
     };
     let mut b = a.clone();
     b.domain = Domain::WorkBuddy;
@@ -632,7 +632,7 @@ impl Transport for AccountBoundFake {
             let selected = account.expect("refresh requires the selected account");
             assert_eq!(selected.domain, domain);
             assert_eq!(selected.uid, uid);
-            assert_eq!(selected.token, token);
+            assert_eq!(selected.api_token().unwrap(), token);
             assert_eq!(endpoint, expected);
             Ok(value)
         })
@@ -652,7 +652,7 @@ fn account_isolation_fixture() -> (std::sync::Arc<SecretSession>, Vec<String>) {
             domain,
             uid: uid.into(),
             label: "Synthetic account".into(),
-            token: token.into(),
+            credential: token.into(),
         })
     })
     .collect();
@@ -705,7 +705,10 @@ async fn account_isolation_refresh_selects_domain_and_preserves_other_accounts()
             serde_json::to_value(&before[index]).unwrap()
         );
     }
-    assert_eq!(after[1].account.token, before[1].account.token);
+    assert_eq!(
+        after[1].account.api_token().unwrap(),
+        before[1].account.api_token().unwrap()
+    );
     let dto = serde_json::to_string(&view).unwrap();
     assert!(!dto.contains("SYNTHETIC_") && !dto.contains("same-uid"));
 }
@@ -823,7 +826,7 @@ impl Transport for BatchFake {
                 .expect("unexpected batch request");
             assert_eq!(selected.domain, domain);
             assert_eq!(selected.uid, uid);
-            assert_eq!(selected.token, token);
+            assert_eq!(selected.api_token().unwrap(), token);
             assert_eq!(endpoint, expected);
             self.calls
                 .lock()
@@ -1257,7 +1260,7 @@ async fn automatic_defaults_off_optin_bound_and_stale_setter_rejected() {
         .is_err());
     let b = store::binding(&s).unwrap();
     let mut rows = store::load(&s, &b).unwrap();
-    rows[0].account.token = "SYNTHETIC_REPLACEMENT".into();
+    rows[0].account.credential = "SYNTHETIC_REPLACEMENT".into();
     store::save(&s, &b, rows).unwrap();
     e.automatic_tick().await.unwrap();
     assert!(!e.list().await.unwrap()[0].auto_claim_enabled);
@@ -1692,7 +1695,7 @@ async fn late_claim_receipt_cannot_overwrite_reauthorized_account_or_revive_cons
     let saved = store::load(&s, &b).unwrap().remove(0);
     assert!(saved.generation > before.generation);
     assert!(!saved.automatic_enabled());
-    assert!(saved.account.token.is_empty());
+    assert!(saved.account.api_token().unwrap().is_empty());
     assert!(saved.shared_authorization);
     assert!(saved.inference.is_some());
     assert!(saved.pending == pending);
@@ -1923,7 +1926,7 @@ async fn refresh_late_result_rejects_relogin_generation_token_identity_deletion_
                 let mut rows = store::load(&s, &b).unwrap();
                 match change {
                     "generation" => rows[0].generation += 1,
-                    "token" => rows[0].account.token = "SYNTHETIC_REPLACEMENT_TOKEN".into(),
+                    "token" => rows[0].account.credential = "SYNTHETIC_REPLACEMENT_TOKEN".into(),
                     "identity" => rows[0].account.uid = "replacement-uid".into(),
                     "delete" => rows.clear(),
                     _ => unreachable!(),

@@ -729,7 +729,7 @@ mod expiry_review_tests {
             uid: "synthetic".into(),
             domain: super::super::model::Domain::WorkBuddy,
             label: "synthetic".into(),
-            token: "synthetic-token".into(),
+            credential: "synthetic-token".into(),
         });
         row.credits.expiry_observations.push(observation(
             json!({"DeductionEndTime":{"raw":"PRIVATE-RAW-CANARY"}}),

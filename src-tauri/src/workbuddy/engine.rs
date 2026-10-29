@@ -50,7 +50,7 @@ impl<T: Transport> Engine<'_, T> {
         e: Endpoint,
         snapshot: &SavedAccount,
     ) -> serde_json::Value {
-        if store::binding(self.session).ok().as_ref() != Some(b) {
+        if !snapshot.account.is_api() || store::binding(self.session).ok().as_ref() != Some(b) {
             return serde_json::json!({});
         }
         if snapshot.shared_authorization {
@@ -147,6 +147,7 @@ impl<T: Transport> Engine<'_, T> {
         snapshot: &SavedAccount,
         endpoint: Endpoint,
     ) -> Result<serde_json::Value, Failure> {
+        snapshot.account.api_token()?;
         if snapshot.shared_authorization {
             self.check_epoch(b, epoch)?;
             return Ok(self.request(b, endpoint, snapshot).await);
@@ -208,6 +209,7 @@ impl<T: Transport> Engine<'_, T> {
                 today(self.clock.now_ms()),
             )
         };
+        snapshot.account.api_token()?;
         // Retain the account lease, but never retain the shared owner over HTTP.
         let summary = self
             .refresh_read(&b, epoch, &snapshot, Endpoint::Summary)
@@ -259,7 +261,7 @@ impl<T: Transport> Engine<'_, T> {
     }
     pub async fn refresh_all(&self) -> Result<Vec<AccountView>, Failure> {
         let rows = self.list().await?;
-        for row in rows {
+        for row in rows.into_iter().filter(|row| row.can_refresh) {
             match self.refresh(&row.id).await {
                 Ok(_) | Err(Failure::Busy) => {}
                 Err(e) => return Err(e),
@@ -495,7 +497,7 @@ pub(super) fn matched(
         .position(|r| {
             r.account.id(b.store_id()) == expected.account.id(b.store_id())
                 && r.generation == expected.generation
-                && r.account.token == expected.account.token
+                && r.account.credential == expected.account.credential
         })
         .ok_or(Failure::ExpiredAuthorization)
 }
@@ -503,6 +505,7 @@ pub(super) fn automatic_admission(
     row: &SavedAccount,
     policy: Option<(u64, u64)>,
 ) -> Result<(), Failure> {
+    row.account.api_token()?;
     if policy.is_some_and(|(generation, revision)| {
         !row.automatic_enabled()
             || !row.can_set_automatic()

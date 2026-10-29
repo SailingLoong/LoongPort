@@ -32,6 +32,9 @@ pub(crate) fn request_url(
     account: Option<&Account>,
     state: Option<&str>,
 ) -> Result<reqwest::Url, Failure> {
+    if let Some(account) = account {
+        account.api_token()?;
+    }
     let host = match endpoint {
         Endpoint::AuthState | Endpoint::AuthToken | Endpoint::Profile => "copilot.tencent.com",
         _ => account.ok_or(Failure::NeedsVerification)?.domain.host(),
@@ -152,7 +155,7 @@ async fn send(
     }
     if let Some(account) = account {
         request = request
-            .bearer_auth(&account.token)
+            .bearer_auth(account.api_token().map_err(NotDispatched)?)
             .header("X-Domain", account.domain.host());
         if endpoint != Endpoint::Profile {
             request = request.header("X-User-Id", &account.uid);

@@ -37,6 +37,15 @@ fn source_id(platform: &str, account: &str, model: &str) -> String {
         ))
     )
 }
+// Export SQL embeds the wall clock. Compare every logical DB fact and the full
+// serialized image instead, including physical changes an SQL dump would omit.
+fn database_image(state: &AppState) -> (String, Vec<u8>) {
+    let conn = state.db.conn.lock().unwrap();
+    (
+        crate::database::Database::content_digest(&conn).unwrap(),
+        conn.serialize(rusqlite::MAIN_DB).unwrap().to_vec(),
+    )
+}
 pub(crate) async fn verify(state: &AppState, case: &str) {
     let accounts =
         WorkBuddyTransport::seed_accounts(state.db.secret_session(), &["synthetic-wb-a"])
@@ -411,8 +420,7 @@ pub(crate) async fn verify(state: &AppState, case: &str) {
                 &order,
             )
             .unwrap();
-            let before =
-                crate::database::Database::dump_sql(&state.db.conn.lock().unwrap(), &[]).unwrap();
+            let before = database_image(state);
             let live_before = crate::services::provider::read_live_settings(app.clone()).unwrap();
             // Codex managed account rows intentionally have a fixed two-field
             // projection. Generic model editing adds a catalog and is already
@@ -441,11 +449,7 @@ pub(crate) async fn verify(state: &AppState, case: &str) {
                         .contains("managedAccount.invalidProjection"),
                     "{error}"
                 );
-                assert!(
-                    crate::database::Database::dump_sql(&state.db.conn.lock().unwrap(), &[])
-                        .unwrap()
-                        == before
-                );
+                assert!(database_image(state) == before);
                 assert_eq!(
                     crate::services::provider::read_live_settings(app.clone()).unwrap(),
                     live_before
@@ -492,8 +496,7 @@ pub(crate) async fn verify(state: &AppState, case: &str) {
                 );
             }
             assert!(
-                crate::database::Database::dump_sql(&state.db.conn.lock().unwrap(), &[]).unwrap()
-                    == before,
+                database_image(state) == before,
                 "no provider, model preference, order, current target or backup may change"
             );
             assert_eq!(

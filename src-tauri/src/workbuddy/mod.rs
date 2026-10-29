@@ -37,3 +37,6 @@ mod native_transaction;
 
 #[cfg(any(feature = "gui", test))]
 pub(crate) mod native_preview;
+
+#[cfg(test)]
+mod native_account_tests;

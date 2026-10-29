@@ -5,7 +5,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 const MAX_NATIVE_AUTH_BYTES: usize = 4 * 1024 * 1024;
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct NativeContext {
     pub product: String,
     pub region: String,
@@ -258,6 +259,20 @@ pub(crate) fn capture(
     bytes: &[u8],
     context: &NativeContext,
 ) -> Result<NativeSnapshot, NativeError> {
+    let identity = validate_stored_identity(bytes, context)?;
+    Ok(NativeSnapshot {
+        context: context.clone(),
+        identity,
+        bytes: Zeroizing::new(bytes.to_vec()),
+    })
+}
+
+/// Shared structural validation only. A stored caller label is not official
+/// provenance and this function cannot mint the NativeSnapshot consumer type.
+pub(super) fn validate_stored_identity(
+    bytes: &[u8],
+    context: &NativeContext,
+) -> Result<String, NativeError> {
     if context.product != "workbuddy"
         || context.region != "cn"
         || !matches!(
@@ -269,12 +284,7 @@ pub(crate) fn capture(
     {
         return Err(NativeError::UnsupportedContext);
     }
-    let identity = validated_identity(bytes, context.realm.as_str())?;
-    Ok(NativeSnapshot {
-        context: context.clone(),
-        identity,
-        bytes: Zeroizing::new(bytes.to_vec()),
-    })
+    validated_identity(bytes, context.realm.as_str())
 }
 
 // Shared strict schema validator; it does not mint a source/install binding.

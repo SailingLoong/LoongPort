@@ -227,7 +227,7 @@ fn official_transport_is_cn_only_and_never_places_credentials_in_urls() {
         uid: "synthetic-uid".into(),
         domain: Domain::CodeBuddy,
         label: "Synthetic".into(),
-        token: "SYNTHETIC_TOKEN_CANARY".into(),
+        credential: "SYNTHETIC_TOKEN_CANARY".into(),
     };
     for e in [
         Endpoint::Summary,

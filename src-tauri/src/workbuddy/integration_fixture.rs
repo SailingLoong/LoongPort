@@ -63,7 +63,7 @@ pub(crate) async fn verify(case: &str) {
         "one login must retain the complete shared credential instead of discarding refresh/expiry"
     );
     assert!(
-        rows[0].account.token.is_empty(),
+        rows[0].account.api_token().unwrap().is_empty(),
         "no duplicate access token in the legacy credential slot"
     );
     assert!(!rows[0].automatic_enabled());
