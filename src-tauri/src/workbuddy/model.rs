@@ -1,4 +1,7 @@
-use super::{checkin::ClaimState, credits::Credits};
+use super::{
+    checkin::ClaimState,
+    credits::{CreditExpiryStatus, CreditExpiryView, Credits},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -61,6 +64,34 @@ pub(crate) struct Attempt {
     pub expected: Option<f64>,
     pub receipt: ClaimState,
 }
+/// One local reconciliation fact, persisted by the original claim owner.
+/// receipt_id is internal correlation only, never a provider receipt or replay permit.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct SuccessfulClaimFact {
+    pub confirmed_at_ms: i64,
+    pub credited: f64,
+    pub unit: Option<String>,
+    pub receipt_id: String,
+}
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SuccessfulClaimView {
+    pub confirmed_at_ms: Option<i64>,
+    pub time_source: Option<&'static str>,
+    pub credited: Option<f64>,
+    pub unit: Option<String>,
+}
+impl SuccessfulClaimFact {
+    fn view(&self) -> SuccessfulClaimView {
+        SuccessfulClaimView {
+            confirmed_at_ms: Some(self.confirmed_at_ms),
+            time_source: Some("localReconciled"),
+            credited: Some(self.credited),
+            unit: self.unit.clone(),
+        }
+    }
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SavedAccount {
@@ -88,6 +119,8 @@ pub(crate) struct SavedAccount {
     pub(super) inference_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) credit_models: Option<super::credits::CreditModelSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) last_successful_claim: Option<SuccessfulClaimFact>,
     pub account: Account,
     pub credits: Credits,
     pub claim_state: ClaimState,
@@ -115,6 +148,7 @@ impl SavedAccount {
             inference_consent: None,
             inference_revision: 0,
             credit_models: None,
+            last_successful_claim: None,
             account,
             credits: Credits::default(),
             claim_state: ClaimState::Unconfirmed,
@@ -218,6 +252,12 @@ impl SavedAccount {
             credits: self.credits.for_display(),
             claim_state: state,
             credited: if same_day { self.credited } else { None },
+            last_successful_claim: self
+                .last_successful_claim
+                .as_ref()
+                .map(SuccessfulClaimFact::view),
+            credit_expiry_status: CreditExpiryStatus::Unavailable,
+            next_known_credit_expiry: None,
             can_refresh: self.account.is_api(),
             can_claim: self.account.is_api()
                 && self.pending.is_none()
@@ -248,6 +288,9 @@ pub(crate) struct AccountView {
     pub credited: Option<f64>,
     pub can_refresh: bool,
     pub can_claim: bool,
+    pub last_successful_claim: Option<SuccessfulClaimView>,
+    pub credit_expiry_status: CreditExpiryStatus,
+    pub next_known_credit_expiry: Option<CreditExpiryView>,
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
