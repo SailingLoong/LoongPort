@@ -45,4 +45,5 @@ mod native_source;
 #[cfg(test)]
 mod native_source_tests;
 
+#[cfg(unix)]
 mod native_controller;

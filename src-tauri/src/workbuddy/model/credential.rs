@@ -37,6 +37,7 @@ pub(crate) enum Credential {
 }
 impl Credential {
     /// Non-secret local row version, never source authenticity or admission.
+    #[cfg(unix)]
     pub(in crate::workbuddy) fn native_incarnation(&self) -> Option<uuid::Uuid> {
         match self {
             Self::Api(_) => None,
@@ -118,6 +119,7 @@ impl Account {
     pub(in crate::workbuddy) fn same_native_scope(&self, context: &NativeContext) -> bool {
         matches!(&self.credential, Credential::NativeOnly(snapshot) if snapshot.context()==context)
     }
+    #[cfg(unix)]
     pub(in crate::workbuddy) fn native_for_controller(
         &self,
         permit: &crate::workbuddy::native_controller::ReadPermit,

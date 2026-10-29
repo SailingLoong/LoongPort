@@ -245,6 +245,7 @@ pub(super) struct Catalog<'a> {
 /// This data is neither verified source provenance nor an Admission ticket.
 #[derive(Clone, Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg(unix)]
 pub(super) struct SelectionKey {
     pub(super) id: String,
     pub(super) generation: u64,
@@ -260,6 +261,7 @@ pub(super) struct Receipt {
 }
 impl Receipt {
     #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(unix)]
     pub(super) fn selection_key(&self) -> Result<SelectionKey, Failure> {
         Ok(SelectionKey {
             id: self.id.clone(),
@@ -277,6 +279,7 @@ impl Receipt {
             && self.generation == row.generation
             && self.credential == row.account.credential
     }
+    #[cfg(unix)]
     pub(super) fn read_under_owner(
         &self,
         owner: &super::native_owner::Owner<'_>,
@@ -295,6 +298,7 @@ impl Receipt {
 }
 #[cfg_attr(not(test), allow(dead_code))]
 impl Catalog<'_> {
+    #[cfg(unix)]
     pub(super) async fn select(&self, key: &SelectionKey) -> Result<Receipt, Failure> {
         super::native_owner::with_selected_owner(
             self.session,

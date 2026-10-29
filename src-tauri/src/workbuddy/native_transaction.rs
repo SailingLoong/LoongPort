@@ -25,6 +25,7 @@ pub(crate) struct Image {
     marker: Option<Zeroizing<Vec<u8>>>,
 }
 impl Image {
+    #[cfg(unix)]
     pub(super) fn auth_bytes(&self) -> Option<&[u8]> {
         self.auth.as_deref().map(|bytes| bytes.as_slice())
     }
@@ -114,6 +115,7 @@ fn bind_root(paths: &Paths) -> Result<(RootIdentity, std::fs::File), Failure> {
         Err(Failure::UnsafePath)
     }
 }
+#[cfg(unix)]
 pub(super) fn validate_admission_root(paths: &Paths) -> Result<std::fs::File, Failure> {
     bind_root(paths).map(|(_, pin)| pin)
 }
