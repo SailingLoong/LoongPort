@@ -2868,6 +2868,11 @@ impl RequestForwarder {
                 .map(str::to_owned);
         }
         let url = gemini_model_url.unwrap_or(url);
+        let (listen_address, listen_port) = {
+            let status = self.status.read().await;
+            (status.address.clone(), status.port)
+        };
+        super::upstream_guard::reject_self_forwarding(&url, &listen_address, listen_port).await?;
         let mut codex_anthropic_one_m = false;
 
         // 转换请求体（如果需要）
