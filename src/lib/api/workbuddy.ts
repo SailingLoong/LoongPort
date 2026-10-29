@@ -24,6 +24,15 @@ export interface WorkBuddyNativeCaptureList {
   requestOutcome: "unknown";
   activationAvailable: false;
 }
+/** Native outcomes confirm a local transaction, not login or inference. */
+export type WorkBuddyNativeActivationResult = "applied" | "alreadyApplied";
+export type WorkBuddyNativeRecoveryResult = "restored" | "alreadyApplied";
+export interface WorkBuddyNativeRecoveryInspection {
+  phase: "absent" | "clear" | "pending";
+  requestOutcome: "unknown";
+  /** Current journal snapshot only; not proof that the client is stopped. */
+  canRequestActivation: boolean;
+}
 const nativeCaptureFailures = [
   "unsafePath",
   "io",
@@ -96,6 +105,22 @@ function nativeCaptureInput(value: WorkBuddyNativeCaptureInput) {
       label: v.label,
       expected: v.expected == null ? null : nativeSelection(v.expected),
     };
+  } catch {
+    throw new WorkBuddyNativeCaptureError("invalidInput");
+  }
+}
+function nativeActivationTarget(
+  value: WorkBuddyNativeSelectionKey,
+): WorkBuddyNativeSelectionKey {
+  try {
+    const v = nativeRecord(value);
+    if (
+      Object.keys(v).some(
+        (key) => !["id", "generation", "incarnation"].includes(key),
+      )
+    )
+      throw new Error();
+    return nativeSelection(value);
   } catch {
     throw new WorkBuddyNativeCaptureError("invalidInput");
   }
@@ -299,6 +324,54 @@ export const workbuddyApi = {
           accounts: v.accounts.map(nativeCaptureAccount),
           requestOutcome: "unknown",
           activationAvailable: false,
+        };
+      },
+      signal,
+    ),
+  activateNative: async (
+    target: WorkBuddyNativeSelectionKey,
+    signal?: AbortSignal,
+  ) =>
+    nativeCaptureRequest<WorkBuddyNativeActivationResult>(
+      "activate_workbuddy_native_account",
+      { target: nativeActivationTarget(target) },
+      (value) => {
+        if (value !== "applied" && value !== "alreadyApplied")
+          throw new Error();
+        return value;
+      },
+      signal,
+    ),
+  recoverNative: (signal?: AbortSignal) =>
+    nativeCaptureRequest<WorkBuddyNativeRecoveryResult>(
+      "recover_workbuddy_native_switch",
+      undefined,
+      (value) => {
+        if (value !== "restored" && value !== "alreadyApplied")
+          throw new Error();
+        return value;
+      },
+      signal,
+    ),
+  inspectNativeRecovery: (signal?: AbortSignal) =>
+    nativeCaptureRequest<WorkBuddyNativeRecoveryInspection>(
+      "inspect_workbuddy_native_recovery",
+      undefined,
+      (value) => {
+        const v = nativeRecord(value);
+        if (
+          (v.phase !== "absent" &&
+            v.phase !== "clear" &&
+            v.phase !== "pending") ||
+          v.requestOutcome !== "unknown" ||
+          typeof v.canRequestActivation !== "boolean" ||
+          v.canRequestActivation !== (v.phase !== "pending")
+        )
+          throw new Error();
+        return {
+          phase: v.phase,
+          requestOutcome: "unknown",
+          canRequestActivation: v.canRequestActivation,
         };
       },
       signal,
