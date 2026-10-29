@@ -1,5 +1,6 @@
 //! Internal persistent-target -> original native prepare/Admission/apply/recover.
-//! No production source/process adapter, IPC or real client invocation. Original
+//! A fixed macOS install factory supplies source/process admission; no IPC or
+//! real client invocation. Original
 //! native Admission pins are Unix-only; other platforms fail before journal writes.
 use super::{
     native::{self, NativeContext},
@@ -17,18 +18,29 @@ use std::path::{Path, PathBuf};
 // Internal consumer; verified production source factory remains separate.
 mod process;
 
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+mod install;
+
 mod sealed {
     pub trait Sealed {}
 }
 /// A reviewed local source/process adapter owns actual source, realm/key-context
 /// and stopped verification, including physical source identity. Path strings or
 /// stored metadata alone are not proof.
-/// Implementations are sealed here; only explicit fixture ports exist so far.
+/// Implementations are sealed here; the install factory retains physical pins
+/// and composes the existing process admission. Fixture ports remain test-only.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) trait ControlledSource: sealed::Sealed {
     fn root(&self) -> &Path;
     fn context(&self) -> &NativeContext;
+    /// Start a new operation's build-content admission, never a checkpoint refresh.
+    fn begin_operation(&mut self) -> Result<(), Failure> {
+        self.verify_stopped()
+    }
     fn verify_stopped(&mut self) -> Result<(), Failure>;
+    /// Recheck the retained source revision/pins after process observation.
+    /// No bulk reads here: expensive source work must precede that observation.
+    fn verify_unchanged(&mut self) -> Result<(), Failure>;
 }
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) struct Controller<'a> {
@@ -47,6 +59,14 @@ pub(super) struct Plan {
     root: PathBuf,
     context: NativeContext,
     ticket: Admission,
+}
+/// Concrete backend handoff, not yet an IPC/UI action. Dropping it only releases
+/// pins; an already-persisted pending journal remains the original owner's work.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[allow(dead_code)]
+pub(super) struct InstalledPlan {
+    plan: Plan,
+    source: install::Source,
 }
 /// Private-construction access witness. Stored data cannot directly mint a native
 /// snapshot; only the controller creates this after a sealed source verification.
@@ -70,6 +90,7 @@ fn verify_bound(
     Ok(())
 }
 fn scope(source: &mut impl ControlledSource) -> Result<(PathBuf, NativeContext, Paths), Failure> {
+    source.begin_operation()?;
     source.verify_stopped()?;
     let root = source.root().to_path_buf();
     let context = source.context().clone();
@@ -79,6 +100,46 @@ fn scope(source: &mut impl ControlledSource) -> Result<(PathBuf, NativeContext, 
 }
 #[cfg_attr(not(test), allow(dead_code))]
 impl Controller<'_> {
+    /// Production source construction is fixed to the reviewed public build;
+    /// neither caller-supplied context strings nor fixture pins are accepted.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[allow(dead_code)]
+    pub(super) async fn prepare_installed(
+        &self,
+        target: &Selection,
+        bundle: &Path,
+    ) -> Result<InstalledPlan, Failure> {
+        let realm = super::model::Domain::parse(&target.receipt.realm)
+            .map_err(|_| Failure::RequestConflict)?;
+        let mut source = install::open(bundle, realm)?;
+        let plan = self
+            .prepare(target, &mut source, &mut transaction::Files)
+            .await?;
+        Ok(InstalledPlan { plan, source })
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[allow(dead_code)]
+    pub(super) async fn apply_installed(
+        &self,
+        prepared: &mut InstalledPlan,
+    ) -> Result<Outcome, Failure> {
+        self.apply(
+            &prepared.plan,
+            &mut prepared.source,
+            &mut transaction::Files,
+        )
+        .await
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[allow(dead_code)]
+    pub(super) async fn recover_installed(
+        &self,
+        bundle: &Path,
+        realm: super::model::Domain,
+    ) -> Result<Outcome, Failure> {
+        let mut source = install::open(bundle, realm)?;
+        self.recover(&mut source, &mut transaction::Files).await
+    }
     pub(super) async fn select(&self, key: &SelectionKey) -> Result<Selection, Failure> {
         Ok(Selection {
             receipt: self.catalog.select(key).await?,
@@ -164,6 +225,7 @@ impl Controller<'_> {
         {
             return Err(Failure::SourceChanged);
         }
+        source.begin_operation()?;
         verify_bound(source, &plan.root, &plan.context)?;
         let paths = Paths::at(&plan.root)?;
         native_owner::with_selected_owner(

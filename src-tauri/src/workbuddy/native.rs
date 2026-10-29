@@ -11,7 +11,8 @@ pub(crate) struct NativeContext {
     pub product: String,
     pub region: String,
     pub realm: String,
-    /// Caller-verified local user/install/key-context binding, not a token.
+    /// Controller-checked local user/install scope, not a token, a globally
+    /// unique machine identity, or proof that opaque native fields decrypt.
     pub source: String,
 }
 

@@ -143,6 +143,53 @@ impl Processes for LiveProbe {
         Ok(self.0.borrow().clone())
     }
 }
+struct RestartDuringSourceCheck {
+    origin: FixtureSource,
+    rows: Rc<std::cell::RefCell<Vec<Process>>>,
+    running: Process,
+    full_checks: usize,
+}
+impl super::super::sealed::Sealed for RestartDuringSourceCheck {}
+impl ControlledSource for RestartDuringSourceCheck {
+    fn verify_unchanged(&mut self) -> Result<(), Failure> {
+        self.origin.verify_stopped()
+    }
+    fn root(&self) -> &Path {
+        self.origin.root()
+    }
+    fn context(&self) -> &NativeContext {
+        self.origin.context()
+    }
+    fn verify_stopped(&mut self) -> Result<(), Failure> {
+        self.origin.verify_stopped()?;
+        self.full_checks += 1;
+        if self.full_checks == 2 {
+            *self.rows.borrow_mut() = vec![self.running.clone()];
+        }
+        Ok(())
+    }
+}
+#[tokio::test]
+async fn process_admission_observes_restart_during_the_final_full_source_check() {
+    let f = Fixture::new().await;
+    let (scope, main) = install(&f);
+    let rows = Rc::new(std::cell::RefCell::new(quiet()));
+    let origin = RestartDuringSourceCheck {
+        origin: f.port(),
+        rows: rows.clone(),
+        full_checks: 0,
+        running: Process {
+            id: 101,
+            start_identity: [100, 1],
+            executable: main,
+        },
+    };
+    let mut source = ProcessBound::new(origin, scope, LiveProbe(rows));
+    let before = std::fs::read(f.auth()).unwrap();
+    assert_eq!(source.verify_stopped(), Err(Failure::SourceChanged));
+    assert_eq!(std::fs::read(f.auth()).unwrap(), before);
+    assert!(!journal(&f).exists());
+}
 
 #[tokio::test]
 async fn process_admission_rechecks_restart_after_waiting_for_original_owner_lock() {

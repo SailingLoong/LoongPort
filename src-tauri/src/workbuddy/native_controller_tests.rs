@@ -112,6 +112,9 @@ struct FixtureSource {
 }
 impl sealed::Sealed for FixtureSource {}
 impl ControlledSource for FixtureSource {
+    fn verify_unchanged(&mut self) -> Result<(), Failure> {
+        self.verify_stopped()
+    }
     fn root(&self) -> &Path {
         &self.root
     }
@@ -540,3 +543,6 @@ async fn incomplete_persistent_choices_never_fall_back_to_id_and_generation() {
 
 #[path = "native_controller/process_tests.rs"]
 mod process_tests;
+
+#[path = "native_controller/install_tests.rs"]
+mod install_tests;

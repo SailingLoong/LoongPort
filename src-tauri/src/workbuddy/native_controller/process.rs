@@ -142,6 +142,10 @@ impl<S, P> ProcessBound<S, P> {
 }
 impl<S: ControlledSource, P: Processes> super::sealed::Sealed for ProcessBound<S, P> {}
 impl<S: ControlledSource, P: Processes> ControlledSource for ProcessBound<S, P> {
+    fn begin_operation(&mut self) -> Result<(), Failure> {
+        // Bulk content reads finish before the next native process observation.
+        self.source.begin_operation()
+    }
     fn root(&self) -> &Path {
         self.source.root()
     }
@@ -151,6 +155,9 @@ impl<S: ControlledSource, P: Processes> ControlledSource for ProcessBound<S, P> 
     fn verify_stopped(&mut self) -> Result<(), Failure> {
         self.source.verify_stopped()?;
         self.scope.verify()?;
+        // Retain both source checks. begin_operation finished bulk content IO;
+        // checkpoints compare the retained revisions/pins without refreshing.
+        self.source.verify_stopped()?;
         let rows = self.processes.snapshot()?;
         if rows.is_empty() || rows.len() >= MAX_PROCESSES {
             // A live current-user caller itself must be present. Empty is not
@@ -164,7 +171,11 @@ impl<S: ControlledSource, P: Processes> ControlledSource for ProcessBound<S, P> 
             }
         }
         self.scope.verify()?;
-        self.source.verify_stopped()
+        self.source.verify_unchanged()
+    }
+    fn verify_unchanged(&mut self) -> Result<(), Failure> {
+        self.scope.verify()?;
+        self.source.verify_unchanged()
     }
 }
 
