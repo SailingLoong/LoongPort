@@ -71,7 +71,10 @@ pub(super) fn verify_native_content_admission(
     selected.verify_unchanged()?;
     verify_native_clear(root, old_context)
 }
-fn verify_native_clear(root: &Path, old_context: &StorageContext) -> Result<(), AppError> {
+pub(super) fn verify_native_clear(
+    root: &Path,
+    old_context: &StorageContext,
+) -> Result<(), AppError> {
     use crate::workbuddy::native_owner::{inspect, Disposition};
     match inspect(root, old_context) {
         Ok(Disposition::Absent | Disposition::Clear) => Ok(()),

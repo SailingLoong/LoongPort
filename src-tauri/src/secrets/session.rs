@@ -712,3 +712,75 @@ mod runtime_availability_tests {
 #[cfg(any(test, feature = "test-hooks"))]
 #[path = "session_protection_tests.rs"]
 pub(crate) mod protection_startup_tests;
+
+#[cfg(test)]
+pub(crate) mod legacy_admission_lock_tests {
+    use super::*;
+    use crate::secrets::{
+        storage::StorageContext,
+        transition::fence_test_support::{tree, Fixture, PASSWORD},
+    };
+    std::thread_local! {
+        static BEFORE_DATABASE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    }
+    pub(crate) fn before_database() {
+        BEFORE_DATABASE.with(|hook| {
+            let callback = hook.borrow_mut().take();
+            if let Some(callback) = callback {
+                callback();
+            }
+        });
+    }
+    #[test]
+    #[serial_test::serial]
+    fn legacy_install_rechecks_phase_epoch_and_context_after_database_lock_wait() {
+        for changed in ["phase", "epoch", "context"] {
+            let f = Fixture::new();
+            let client = crate::secrets::testing::tempdir().unwrap();
+            let storage = StorageContext::Encrypted(f.current());
+            let (pending, _, _) = crate::workbuddy::native_owner::testing::phase_receipts(
+                f.root(),
+                &storage,
+                client.path(),
+            );
+            let db = &f.db;
+            let store = &f.store;
+            let session = &db.secrets;
+            let connection = db.conn.lock().unwrap();
+            std::thread::scope(|scope| {
+                let (admitted, wait) = std::sync::mpsc::channel();
+                let worker = scope.spawn(move || {
+                    BEFORE_DATABASE.with(|hook| {
+                        *hook.borrow_mut() = Some(Box::new(move || admitted.send(()).unwrap()));
+                    });
+                    crate::secrets::transition::rotate(db, store, PASSWORD, false)
+                });
+                wait.recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("installer did not reach DB lock after initial admission");
+                match changed {
+                    "phase" => std::fs::write(
+                        f.root()
+                            .join(crate::secrets::owned_file::WORKBUDDY_NATIVE_JOURNAL_FILE),
+                        &pending,
+                    )
+                    .unwrap(),
+                    "epoch" => session.invalidate_database_leases(),
+                    _ => crate::database::vault::stamp(
+                        &connection,
+                        &VaultContext::generate().unwrap(),
+                    )
+                    .unwrap(),
+                }
+                let before = tree(f.home.path());
+                drop(connection);
+                assert!(
+                    worker.join().unwrap().is_err(),
+                    "{changed} changed during DB lock wait"
+                );
+                assert_eq!(before, tree(f.home.path()));
+                assert_eq!(store.calls(), 0);
+                session.ensure_available().unwrap();
+            });
+        }
+    }
+}

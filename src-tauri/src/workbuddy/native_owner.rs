@@ -1363,6 +1363,13 @@ mod session_tests {
 /// codec-only fixtures. Neither path is a handwritten wire schema or activation proof.
 #[cfg(test)]
 pub(crate) mod testing {
+    /// Initial registered owner fixture; no native activation or credential IO.
+    pub(crate) fn clear_receipt(root: &Path, storage: &StorageContext) -> Vec<u8> {
+        let binding = || (storage.identity(), 0);
+        let mut owner = Owner::new(root, storage, 0, &binding);
+        owner.initialize().unwrap();
+        std::fs::read(root.join(crate::secrets::owned_file::WORKBUDDY_NATIVE_JOURNAL_FILE)).unwrap()
+    }
     use super::super::native_transaction::*;
     use super::*;
     pub(crate) async fn selected(

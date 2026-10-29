@@ -50,6 +50,43 @@ struct ValidatedRestore {
     incoming: ValidatedSyncSnapshot,
     skills: PreparedSkills,
 }
+/// Borrowed authority minted only by the authenticated original bootstrap owner.
+/// This preserves its exact live intent through the shared legacy installer.
+pub(crate) struct BootstrapInstallPermit {
+    root: PathBuf,
+    metadata: VaultMetadata,
+    expected: Vec<u8>,
+}
+impl BootstrapInstallPermit {
+    fn for_intent(
+        root: &Path,
+        intent: &Intent,
+        current: &VaultContext,
+        expected: &[u8],
+    ) -> Result<Self, AppError> {
+        let observed: Intent = serde_json::from_slice(expected).map_err(|_| invalid())?;
+        if serde_json::to_value(&observed).map_err(|_| invalid())?
+            != serde_json::to_value(intent).map_err(|_| invalid())?
+            || current.metadata() != &intent.metadata
+        {
+            return Err(invalid());
+        }
+        Ok(Self {
+            root: root.to_owned(),
+            metadata: intent.metadata.clone(),
+            expected: expected.to_vec(),
+        })
+    }
+    pub(super) fn verify(&self, root: &Path, current: &VaultContext) -> Result<(), AppError> {
+        if root != self.root
+            || current.metadata() != &self.metadata
+            || pending_record(root)?.as_deref() != Some(self.expected.as_slice())
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+}
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Intent {
@@ -288,7 +325,7 @@ fn finalize_with_hook(
     let (mut settings, original) = read_settings(existing.as_ref().unwrap_or(&data.next))?;
     apply_source(&mut settings, source, &data.snapshot);
     if let Some(current) = existing {
-        return install(root, data, settings, current, store, automatic_unlock);
+        return install(root, data, settings, current, store, automatic_unlock, None);
     }
     let id = uuid::Uuid::new_v4().to_string();
     let stage = staging(root, &id)?;
@@ -330,12 +367,12 @@ fn finalize_with_hook(
     {
         return Err(AppError::Config("secret.restore_source_changed".into()));
     }
-    session::write_durable(
-        &root.join(INTENT),
-        &serde_json::to_vec(&intent).map_err(|_| invalid())?,
-    )?;
+    let expected = serde_json::to_vec(&intent).map_err(|_| invalid())?;
+    session::write_durable(&root.join(INTENT), &expected)?;
     hook(Checkpoint::Published)?;
-    finish_initial(root, intent, manifest, data, settings, store, hook)
+    finish_initial(
+        root, intent, manifest, data, settings, store, hook, &expected,
+    )
 }
 fn install(
     root: &Path,
@@ -344,6 +381,7 @@ fn install(
     current: VaultContext,
     store: &dyn KeyStore,
     automatic_unlock: bool,
+    owner: Option<&BootstrapInstallPermit>,
 ) -> Result<Arc<SecretSession>, AppError> {
     transition::ensure_legacy_generation_owner(root)?;
     transition::ensure_legacy_metadata(current.metadata())?;
@@ -377,19 +415,35 @@ fn install(
         source: data.skills.source.clone(),
         location,
     };
-    transition::install_generation_with_settings(
-        &db,
-        store,
-        data.next,
-        automatic_unlock,
-        move |connection, current, next| {
+    let prepare =
+        move |connection: &rusqlite::Connection, current: &VaultContext, next: &VaultContext| {
             Database::prepare_sync_join(incoming, connection, current, next)
-        },
-        Some(skills),
-        settings,
-    )?;
+        };
+    if let Some(owner) = owner {
+        transition::install_bootstrap_generation_with_settings(
+            &db,
+            store,
+            data.next,
+            automatic_unlock,
+            prepare,
+            Some(skills),
+            settings,
+            owner,
+        )?;
+    } else {
+        transition::install_generation_with_settings(
+            &db,
+            store,
+            data.next,
+            automatic_unlock,
+            prepare,
+            Some(skills),
+            settings,
+        )?;
+    }
     Ok(session)
 }
+#[allow(clippy::too_many_arguments)]
 fn finish_initial(
     root: &Path,
     intent: Intent,
@@ -398,10 +452,13 @@ fn finish_initial(
     settings: AppSettings,
     store: &dyn KeyStore,
     hook: &mut dyn FnMut(Checkpoint) -> Result<(), AppError>,
+    expected: &[u8],
 ) -> Result<Arc<SecretSession>, AppError> {
     transition::ensure_legacy_generation_owner(root)?;
     transition::ensure_legacy_metadata(&intent.metadata)?;
     transition::ensure_legacy_metadata(data.next.metadata())?;
+    let owner = BootstrapInstallPermit::for_intent(root, &intent, &data.next, expected)?;
+    owner.verify(root, &data.next)?;
     if manifest.automatic_unlock {
         save_verified(
             store,
@@ -430,6 +487,7 @@ fn finish_initial(
         inventory::validate_database(&connection, &data.next)?;
     }
     hook(Checkpoint::Database)?;
+    owner.verify(root, &data.next)?;
     if !regular(&root.join("vault.json"))? {
         session::write_metadata(
             root,
@@ -445,9 +503,19 @@ fn finish_initial(
             .map_err(inventory::secret_error)?;
     }
     hook(Checkpoint::Metadata)?;
+    owner.verify(root, &data.next)?;
     let next = data.next.clone();
-    let session = install(root, data, settings, next, store, manifest.automatic_unlock)?;
+    let session = install(
+        root,
+        data,
+        settings,
+        next,
+        store,
+        manifest.automatic_unlock,
+        Some(&owner),
+    )?;
     hook(Checkpoint::Installed)?;
+    owner.verify(root, session.read()?.encrypted()?)?;
     std::fs::remove_file(root.join(INTENT)).map_err(|e| AppError::io(root.join(INTENT), e))?;
     sync_dir(root)?;
     let _ = std::fs::remove_dir_all(staging(root, &intent.id)?);
@@ -565,9 +633,16 @@ fn recover_record(
         return Err(AppError::Config("secret.local_credentials_exist".into()));
     }
     transition::recover(root, store, password)?;
-    finish_initial(root, intent, manifest, data, settings, store, &mut |_| {
-        Ok(())
-    })?;
+    finish_initial(
+        root,
+        intent,
+        manifest,
+        data,
+        settings,
+        store,
+        &mut |_| Ok(()),
+        &bytes,
+    )?;
     Ok(())
 }
 /// Passive journal bytes; authentication and recovery remain with this owner.
@@ -1329,6 +1404,105 @@ mod tests {
                     original_credentials
                 );
                 assert!(!pending(&root).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn replaced_bootstrap_intent_is_never_adopted_by_the_original_owner() {
+        for replaced_at in [Checkpoint::Published, Checkpoint::Installed] {
+            let fixture = Fixture::new();
+            let root = fixture.root();
+            let snapshot = fixture.snapshot();
+            let expected = snapshot.manifest.snapshot_id.clone();
+            let prepared =
+                prepare_snapshot(snapshot, source(), "remote recovery password", &expected)
+                    .unwrap();
+            let result = finalize_with_hook(
+                &root,
+                prepared,
+                &MemoryKeyStore::default(),
+                false,
+                &mut |point| {
+                    if point == replaced_at {
+                        std::fs::write(root.join(INTENT), b"foreign synthetic bootstrap intent")
+                            .unwrap();
+                    }
+                    Ok(())
+                },
+            );
+            assert!(result.is_err());
+            if replaced_at == Checkpoint::Published {
+                assert!(!root.join(crate::config::DB_FILE_NAME).exists());
+                assert!(!root.join("vault.json").exists());
+            }
+            assert_eq!(
+                pending_record(&root).unwrap().unwrap(),
+                b"foreign synthetic bootstrap intent"
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn existing_database_restore_checks_native_phase_with_original_context() {
+        use crate::secrets::storage::StorageContext;
+        use crate::workbuddy::native_owner::{inspect, testing, Disposition};
+        for phase in ["pending", "corrupt", "wrong-key", "restored", "committed"] {
+            let fixture = Fixture::new();
+            let root = fixture.root();
+            let current = VaultContext::generate()
+                .unwrap()
+                .with_password("remote recovery password")
+                .unwrap();
+            let snapshot = fixture.snapshot_for_context(17, current.clone());
+            let expected = snapshot.manifest.snapshot_id.clone();
+            let connection =
+                vault::prepare(&root.join(crate::config::DB_FILE_NAME), &current).unwrap();
+            drop(connection);
+            session::write_metadata(&root, &session::completed_metadata(&current, true).unwrap())
+                .unwrap();
+            let client = crate::secrets::testing::tempdir().unwrap();
+            let storage = StorageContext::Encrypted(if phase == "wrong-key" {
+                VaultContext::generate().unwrap()
+            } else {
+                current
+            });
+            let (pending, restored, committed) =
+                testing::phase_receipts(&root, &storage, client.path());
+            let bytes = match phase {
+                "pending" => pending,
+                "corrupt" => b"synthetic corrupt native journal".to_vec(),
+                "restored" => restored,
+                _ => committed,
+            };
+            std::fs::write(
+                root.join(crate::secrets::owned_file::WORKBUDDY_NATIVE_JOURNAL_FILE),
+                bytes,
+            )
+            .unwrap();
+            let before = crate::secrets::transition::fence_test_support::tree(fixture.home.path());
+            let prepared =
+                prepare_snapshot(snapshot, source(), "remote recovery password", &expected)
+                    .unwrap();
+            let result = finalize(&root, prepared, &MemoryKeyStore::default(), false);
+            if matches!(phase, "restored" | "committed") {
+                let restored = result.unwrap();
+                assert_eq!(
+                    inspect(&root, &restored.read().unwrap()).unwrap(),
+                    Disposition::Clear
+                );
+                assert!(pending_record(&root).unwrap().is_none());
+            } else {
+                assert!(
+                    result.is_err(),
+                    "{phase} must block original bootstrap installation"
+                );
+                assert_eq!(
+                    before,
+                    crate::secrets::transition::fence_test_support::tree(fixture.home.path())
+                );
             }
         }
     }
