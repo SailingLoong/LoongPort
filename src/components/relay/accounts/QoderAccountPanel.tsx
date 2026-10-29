@@ -14,6 +14,7 @@ import { QoderCnDeviceLogin } from "@/components/providers/qoder/QoderCnDeviceLo
 import { QoderDailyClaim } from "@/components/providers/qoder/QoderDailyClaim";
 import { QoderCnCampaigns } from "@/components/providers/qoder/QoderCnCampaigns";
 import type { Provider } from "@/types";
+import type { AppId } from "@/lib/api/types";
 
 function sourceGeneration(provider: Provider): string | undefined {
   const state = (provider.meta as { qoderCampaignState?: unknown } | undefined)
@@ -24,7 +25,7 @@ function sourceGeneration(provider: Provider): string | undefined {
 }
 
 /** Present original Provider records, never create a second account or credential owner. */
-export function QoderAccountPanel() {
+export function QoderAccountPanel({ defaultApp }: { defaultApp?: AppId }) {
   const active = usePreservedViewActive();
   const openApplication = useContext(AccountApplicationNavigation);
   const query = useQuery({
@@ -77,6 +78,7 @@ export function QoderAccountPanel() {
       ) : (
         <AccountWorkspace
           accounts={accounts}
+          showApplicationNavigation={false}
           label={(provider) => provider.name}
           identityDetails={(provider) => (
             <p className="mt-1 text-xs text-muted-foreground">
@@ -141,6 +143,10 @@ export function QoderAccountPanel() {
                   sourceGeneration={generation}
                   disabled={!active}
                   onOpenApp={openApplication}
+                  defaultApp={defaultApp}
+                  onOpenDefault={
+                    openApplication ? () => openApplication() : undefined
+                  }
                 />
               </>
             );

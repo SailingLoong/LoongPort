@@ -92,6 +92,7 @@ jobs:
         if: matrix.kind == 'zcode'
         run: |
           export ZCODE_LAYOUT_OUTPUT="$RUNNER_TEMP/zcode-layout"
+          export UNIFIED_LAYOUT_COLLECT=0
           pnpm exec vite build --config tests/browser/vite.config.mjs
           python3 -m http.server 4314 --bind 127.0.0.1 --directory "$ZCODE_LAYOUT_OUTPUT" > "$RUNNER_TEMP/zcode-layout-server.log" 2>&1 &
           server_pid=$!
@@ -103,15 +104,31 @@ jobs:
           export PLAYWRIGHT_MODULE="$RUNNER_TEMP/docs-browser/node_modules/playwright-core/index.mjs"
           git rev-parse HEAD > "$RUNNER_TEMP/docs-ui-artifact/zcode-layout-source.txt"
           node tests/browser/run-zcode-layout.mjs | tee "$RUNNER_TEMP/docs-ui-artifact/zcode-layout-results.jsonl"
-          UNIFIED_LAYOUT_SOURCE_SHA="$(git rev-parse HEAD)"
-          export UNIFIED_LAYOUT_SOURCE_SHA
-          export UNIFIED_LAYOUT_OUTPUT="$RUNNER_TEMP/docs-ui-artifact/unified-accounts"
-          node tests/browser/run-unified-accounts.mjs
           pnpm exec vitest run --config tests/browser/applications-c2.vitest.config.mts
           APPLICATIONS_C2_SOURCE_SHA="$(git rev-parse HEAD)"
           export APPLICATIONS_C2_SOURCE_SHA
           export APPLICATIONS_C2_OUTPUT="$RUNNER_TEMP/docs-ui-artifact/applications-c2"
           node tests/browser/run-applications-c2.mjs
+      - name: Check current unified account screenshots
+        if: matrix.kind == 'zcode'
+        run: |
+          export UNIFIED_LAYOUT_COLLECT=1
+          export UNIFIED_LAYOUT_STRICT=1
+          node --test tests/browser/screenshot-source.test.mjs
+          export ZCODE_LAYOUT_OUTPUT="$RUNNER_TEMP/unified-account-layout"
+          pnpm exec vite build --config tests/browser/vite.config.mjs
+          python3 -m http.server 4314 --bind 127.0.0.1 --directory "$ZCODE_LAYOUT_OUTPUT" > "$RUNNER_TEMP/unified-layout-server.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid"' EXIT
+          curl --fail --silent --show-error --retry 30 --retry-connrefused \
+            --retry-delay 1 http://127.0.0.1:4314/tests/browser/unified-accounts.html > /dev/null
+          BROWSER_EXECUTABLE="$(command -v google-chrome)"
+          export BROWSER_EXECUTABLE
+          export PLAYWRIGHT_MODULE="$RUNNER_TEMP/docs-browser/node_modules/playwright-core/index.mjs"
+          UNIFIED_LAYOUT_SOURCE_SHA="$(git rev-parse HEAD)"
+          export UNIFIED_LAYOUT_SOURCE_SHA
+          export UNIFIED_LAYOUT_OUTPUT="$RUNNER_TEMP/docs-ui-artifact/unified-accounts"
+          node tests/browser/run-unified-accounts.mjs
       - name: Save short-lived review artifacts
         if: always()
         uses: actions/upload-artifact@v7

@@ -141,7 +141,7 @@ export function AddHubPage({
                 onOpenApp ? (app = sourceAppId) => onOpenApp(app) : undefined
               }
             >
-              <QoderAccountPanel />
+              <QoderAccountPanel defaultApp={sourceAppId} />
             </AccountApplicationNavigation.Provider>
           ) : sourceIntent.kind === "vendor" ? (
             <OfficialApiPage

@@ -47,11 +47,15 @@ export function QoderApplicationEntry({
   provider,
   sourceGeneration,
   onOpenApp,
+  defaultApp,
+  onOpenDefault,
   disabled = false,
 }: {
   provider: Provider;
   sourceGeneration?: string;
   onOpenApp?: (app: AppId) => void;
+  defaultApp?: AppId;
+  onOpenDefault?: () => void;
   disabled?: boolean;
 }) {
   const { t } = useTranslation();
@@ -67,23 +71,42 @@ export function QoderApplicationEntry({
   });
   const sources = qoderApplicationSources(provider, query.data ?? []);
   return (
-    <AccountDetailSection title="当前配置用于哪些应用">
+    <AccountDetailSection
+      title={t("qoderApplicationEntry.title", {
+        defaultValue: "当前配置用于哪些应用",
+      })}
+    >
       <p className="text-xs text-muted-foreground">
-        仅显示当前 Codex
-        供应商配置的已验证应用绑定。保存配置不代表推理已接通，实际运行仍需验证。
+        {t("qoderApplicationEntry.description", {
+          defaultValue:
+            "仅显示当前 Codex 供应商配置的已验证应用绑定。保存配置不代表推理已接通，实际运行仍需验证。",
+        })}
       </p>
       {!onOpenApp && (
         <p className="text-xs text-muted-foreground">
-          当前页面无法打开原应用，请返回账号管理页面查看。
+          {t("qoderApplicationEntry.unavailable", {
+            defaultValue: "当前页面无法打开原应用，请返回账号管理页面查看。",
+          })}
         </p>
       )}
       {disabled ? null : query.isPending ? (
-        <p role="status">正在读取应用绑定…</p>
+        <p role="status">
+          {t("qoderApplicationEntry.loading", {
+            defaultValue: "正在读取应用绑定…",
+          })}
+        </p>
       ) : query.error ? (
-        <p role="alert">应用绑定读取失败，请在原应用中查看配置。</p>
+        <p role="alert">
+          {t("qoderApplicationEntry.error", {
+            defaultValue: "应用绑定读取失败，请在原应用中查看配置。",
+          })}
+        </p>
       ) : sources.length === 0 ? (
         <p className="text-sm text-muted-foreground">
-          当前配置暂无后端确认的应用绑定，请在 Codex 原配置中查看。
+          {t("qoderApplicationEntry.empty", {
+            defaultValue:
+              "当前配置暂无后端确认的应用绑定，请在 Codex 原配置中查看。",
+          })}
         </p>
       ) : (
         sources.map((source) => (
@@ -126,6 +149,22 @@ export function QoderApplicationEntry({
           </article>
         ))
       )}
+      {onOpenDefault &&
+        (defaultApp !== "codex" ||
+          !query.isSuccess ||
+          sources.length === 0) && (
+          <Button variant="outline" onClick={onOpenDefault}>
+            {defaultApp
+              ? t("qoderApplicationEntry.defaultNavigationNamed", {
+                  defaultValue: "到 {{app}} 中查看与配置",
+                  app: getAppDisplayName(defaultApp, t),
+                })
+              : t("qoderApplicationEntry.defaultNavigation", {
+                  defaultValue: "到应用中查看与配置",
+                })}
+            <ArrowRight className="ml-2 h-4 w-4" />
+          </Button>
+        )}
     </AccountDetailSection>
   );
 }

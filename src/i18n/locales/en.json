@@ -1,4 +1,14 @@
 {
+  "qoderApplicationEntry": {
+    "defaultNavigationNamed": "View and configure in {{app}}",
+    "defaultNavigation": "View and configure in the application",
+    "title": "Applications using this configuration",
+    "description": "Only verified application bindings for the current Codex provider configuration are shown. Saving a configuration does not establish inference; verify it with an actual request.",
+    "unavailable": "This page cannot open the original application. Return to account management to view it.",
+    "loading": "Loading application bindings…",
+    "error": "Could not load application bindings. Check the configuration in the original application.",
+    "empty": "No backend-confirmed application bindings for this configuration. Check the original Codex configuration."
+  },
   "claimSettings": {
     "title": "Automatic claims management",
     "heading": "Automatic claims",

@@ -174,6 +174,9 @@ it("AddHub actual Qoder boundary forwards repeated clicks to original app", asyn
   );
   expect(await screen.findByText("model-a")).toBeInTheDocument();
   expect(screen.queryByText("model-b")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("region", { name: "用于哪些应用" }),
+  ).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: /model-a/ }));
   fireEvent.click(screen.getByRole("button", { name: /model-a/ }));
   expect(open.mock.calls).toEqual([["codex"], ["codex"]]);
@@ -200,6 +203,9 @@ it("Services actual Qoder platform forwards to original app", async () => {
     </QueryClientProvider>,
   );
   fireEvent.click(await screen.findByRole("button", { name: /model-a/ }));
+  expect(
+    screen.queryByRole("region", { name: "用于哪些应用" }),
+  ).not.toBeInTheDocument();
   expect(open).toHaveBeenCalledWith("codex");
 });
 it("AddHub without a navigation callback disables the binding and explains why", async () => {
@@ -249,4 +255,82 @@ it("Services Qoder binding refreshes after the existing sources query invalidati
   });
   expect(await screen.findByText("new-model")).toBeInTheDocument();
   expect(screen.queryByText("old-model")).not.toBeInTheDocument();
+});
+it("AddHub preserves the original default navigation when Codex has no confirmed binding", async () => {
+  vi.mocked(serviceSourcesApi.list).mockResolvedValue([]);
+  const open = vi.fn();
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  render(
+    <QueryClientProvider client={client}>
+      <AddHubPage
+        sourceAppId="codex"
+        onBack={vi.fn()}
+        onAddProvider={vi.fn()}
+        onOpenApp={open}
+        entryRequest={{
+          id: 1,
+          tab: "accounts",
+          intent: { kind: "account-boundary", platform: "qoder" },
+        }}
+      />
+    </QueryClientProvider>,
+  );
+  await screen.findByText(/暂无后端确认的应用绑定/);
+  fireEvent.click(
+    screen.getByRole("button", { name: "到 Codex 中查看与配置" }),
+  );
+  expect(open).toHaveBeenCalledExactlyOnceWith("codex");
+});
+it("Services keeps the original non-Codex destination alongside the verified Codex binding", async () => {
+  vi.mocked(serviceSourcesApi.list).mockResolvedValue([
+    source("a", "model-a"),
+  ] as never);
+  const open = vi.fn();
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  render(
+    <QueryClientProvider client={client}>
+      <ServicesPage
+        appId="gemini"
+        platform="qoder"
+        onOpenApp={open}
+        onOpenAddHub={vi.fn()}
+      />
+    </QueryClientProvider>,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: /model-a/ }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "到 Gemini 中查看与配置" }),
+  );
+  expect(open.mock.calls).toEqual([["codex"], ["gemini"]]);
+});
+it("AddHub preserves the default app navigation when sources fail", async () => {
+  vi.mocked(serviceSourcesApi.list).mockRejectedValue(new Error("synthetic"));
+  const open = vi.fn();
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  render(
+    <QueryClientProvider client={client}>
+      <AddHubPage
+        sourceAppId="codex"
+        onBack={vi.fn()}
+        onAddProvider={vi.fn()}
+        onOpenApp={open}
+        entryRequest={{
+          id: 1,
+          tab: "accounts",
+          intent: { kind: "account-boundary", platform: "qoder" },
+        }}
+      />
+    </QueryClientProvider>,
+  );
+  await screen.findByText(/应用绑定读取失败/);
+  fireEvent.click(
+    screen.getByRole("button", { name: "到 Codex 中查看与配置" }),
+  );
+  expect(open).toHaveBeenCalledExactlyOnceWith("codex");
 });
