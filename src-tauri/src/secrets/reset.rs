@@ -426,8 +426,20 @@ fn fingerprint_with_device(
     }
     Ok(hex::encode(digest.finalize()))
 }
+// Key-loss reset has no original storage context. Any registered native marker,
+// including an opaque terminal receipt or non-regular entry, retains its original
+// recovery owner; never interpret it using the replacement key.
+fn ensure_native_reset_allowed(root: &Path) -> Result<(), AppError> {
+    let path = root.join(super::owned_file::WORKBUDDY_NATIVE_JOURNAL_FILE);
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(AppError::io(&path, error)),
+        Ok(_) => Err(AppError::Config("secret.recovery_required".into())),
+    }
+}
 pub(crate) fn preview(root: &Path) -> Result<ResetPreview, AppError> {
     ensure_legacy_reset_scope(root)?;
+    ensure_native_reset_allowed(root)?;
     if regular(&intent_path(root)?)? {
         return Err(AppError::Config("secret.recovery_required".into()));
     }
@@ -561,6 +573,7 @@ fn reset_with_hook(
 ) -> Result<PathBuf, AppError> {
     ensure_legacy_reset_scope(root)?;
     super::owned_file::ensure_zcode_reset_allowed(root)?;
+    ensure_native_reset_allowed(root)?;
     let journal = intent_path(root)?;
     if regular(&journal)? {
         return Err(AppError::Config("secret.recovery_required".into()));
@@ -578,6 +591,7 @@ fn reset_with_hook(
     super::transition::ensure_legacy_metadata(next.metadata())?;
     let id = uuid::Uuid::new_v4().to_string();
     let (stage, _, archive_path) = locations(root, &id)?;
+    ensure_native_reset_allowed(root)?;
     crate::config::ensure_private_directory(&stage)?;
     let archive = copy_and_archive(root, &stage, &next, &id, &settings, &device)?;
     session::write_durable(&archive_path, &archive)?;
@@ -698,6 +712,7 @@ fn finish(
     super::transition::ensure_legacy_metadata(&intent.metadata)?;
     super::transition::ensure_legacy_metadata(next.metadata())?;
     super::owned_file::ensure_zcode_reset_allowed(root)?;
+    ensure_native_reset_allowed(root)?;
     if let Some(device) = &manifest.device {
         device.validate_binding(root)?;
     }
@@ -705,6 +720,8 @@ fn finish(
     // The original source can already have moved to previous on re-entry.
     ensure_legacy_reset_scope(&stage)?;
     ensure_legacy_reset_scope(&previous)?;
+    ensure_native_reset_allowed(&stage)?;
+    ensure_native_reset_allowed(&previous)?;
     let archive_bytes = read_optional(&archive_path)?;
     if hash(&archive_bytes) != manifest.archive_hash {
         return Err(invalid());
@@ -725,6 +742,13 @@ fn finish(
         .any(super::owned_file::is_zcode_reset_archive_member)
     {
         return Err(AppError::Config("secret.zcode_recovery_required".into()));
+    }
+    // Like the existing Zcode gate, authenticated original native material blocks
+    // every phase, including committed cleanup after the live owner moved away.
+    if zip.file_names().any(|name| {
+        name.strip_prefix("data/") == Some(super::owned_file::WORKBUDDY_NATIVE_JOURNAL_FILE)
+    }) {
+        return Err(AppError::Config("secret.recovery_required".into()));
     }
     if let Some(device) = &manifest.device {
         device.validate_archive(&mut zip)?;
@@ -1314,3 +1338,7 @@ mod cleanup_fence_tests;
 pub(crate) fn verify_legacy_reset_cleanup_case(case: &str) {
     cleanup_fence_tests::verify(case);
 }
+
+#[cfg(test)]
+#[path = "reset_native_admission_tests.rs"]
+mod native_admission_tests;
