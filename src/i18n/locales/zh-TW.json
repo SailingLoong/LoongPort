@@ -1,4 +1,14 @@
 {
+  "qoderApplicationEntry": {
+    "defaultNavigationNamed": "前往 {{app}} 查看與設定",
+    "defaultNavigation": "前往應用程式查看與設定",
+    "title": "目前設定用於哪些應用程式",
+    "description": "僅顯示目前 Codex 供應商設定經驗證的應用程式綁定。儲存設定不代表推理已接通，仍須透過實際執行驗證。",
+    "unavailable": "目前頁面無法開啟原應用程式，請返回帳號管理頁面查看。",
+    "loading": "正在讀取應用程式綁定…",
+    "error": "讀取應用程式綁定失敗，請在原應用程式中查看設定。",
+    "empty": "目前設定暫無後端確認的應用程式綁定，請在 Codex 原設定中查看。"
+  },
   "app": {
     "title": "LoongPort",
     "description": "Claude Code / Codex / Gemini CLI 全方位輔助工具"

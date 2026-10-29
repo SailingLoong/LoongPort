@@ -1,4 +1,14 @@
 {
+  "qoderApplicationEntry": {
+    "defaultNavigationNamed": "到 {{app}} 中查看与配置",
+    "defaultNavigation": "到应用中查看与配置",
+    "title": "当前配置用于哪些应用",
+    "description": "仅显示当前 Codex 供应商配置的已验证应用绑定。保存配置不代表推理已接通，实际运行仍需验证。",
+    "unavailable": "当前页面无法打开原应用，请返回账号管理页面查看。",
+    "loading": "正在读取应用绑定…",
+    "error": "应用绑定读取失败，请在原应用中查看配置。",
+    "empty": "当前配置暂无后端确认的应用绑定，请在 Codex 原配置中查看。"
+  },
   "claimSettings": {
     "title": "自动领取管理",
     "heading": "自动领取",

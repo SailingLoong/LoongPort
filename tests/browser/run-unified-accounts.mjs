@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { assertScreenshotSource } from "./screenshot-source.mjs";
 import {
   platformAccountFilterName,
   nativeAccountKeyboardSteps,
@@ -63,13 +67,49 @@ const { chromium } = await import(
 const output =
   process.env.UNIFIED_LAYOUT_OUTPUT ?? "artifacts/unified-accounts";
 const source = process.env.UNIFIED_LAYOUT_SOURCE_SHA;
+// Local scoped runs do not replace the default full CI suite.
+const qoderOnly = process.env.UNIFIED_LAYOUT_QODER_ONLY === "1";
 assert.match(
   source ?? "",
   /^[0-9a-f]{40}$/,
   "Exact current-checkout source SHA is required",
 );
+assert.equal(
+  execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+  source,
+  "Screenshot source must be the current checkout",
+);
+const response = await fetch(
+  "http://127.0.0.1:4314/unified-source-evidence.json",
+);
+if (!response.ok)
+  throw new Error("Screenshot build source evidence is unavailable");
+const builtSource = await response.json();
+const sourceEvidence = assertScreenshotSource(
+  fileURLToPath(new URL("../..", import.meta.url)),
+  builtSource,
+  { strict: process.env.UNIFIED_LAYOUT_STRICT === "1" },
+);
 await mkdir(output, { recursive: true });
 await writeFile(path.join(output, "source-sha.txt"), `${source}\n`);
+await writeFile(
+  path.join(output, "source-evidence.json"),
+  JSON.stringify(
+    {
+      ...sourceEvidence,
+      coverage: qoderOnly ? "qoder-only" : "full",
+      builtDirtyPaths: builtSource.dirtyPaths,
+    },
+    null,
+    2,
+  ),
+);
+const coverage = qoderOnly ? "qoder-only" : "full";
+const verificationPath = path.join(output, "verification-status.json");
+await writeFile(
+  verificationPath,
+  JSON.stringify({ status: "running", sourceEvidence, coverage }, null, 2),
+);
 const browser = await chromium.launch({
   headless: true,
   chromiumSandbox: true,
@@ -78,6 +118,7 @@ const browser = await chromium.launch({
     : {}),
 });
 const results = [];
+let completed = false;
 try {
   for (const variant of [
     { width: 1440, height: 800, language: "en", dark: false },
@@ -94,7 +135,9 @@ try {
     );
     const t = (key) =>
       key.split(".").reduce((value, part) => value[part], translations);
-    for (const scenario of ["empty", "populated", "add", "native"]) {
+    for (const scenario of qoderOnly
+      ? []
+      : ["empty", "populated", "add", "native"]) {
       const context = await browser.newContext({
         viewport: { width: variant.width, height: variant.height },
       });
@@ -669,6 +712,7 @@ try {
         assert.deepEqual(unexpectedRequests, []);
         results.push({
           source,
+          sourceEvidence,
           scenario,
           ...variant,
           filename,
@@ -716,9 +760,262 @@ try {
       }
     }
   }
+  // Capture the real Qoder account detail in both existing owners. Fixture IPC
+  // is synthetic and the navigation callback only records the requested app.
+  for (const variant of [
+    { width: 1440, height: 800, language: "en", dark: false },
+    { width: 959, height: 650, language: "zh", dark: true },
+  ]) {
+    const translations = JSON.parse(
+      await readFile(
+        new URL(
+          `../../src/i18n/locales/${variant.language}.json`,
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    const labels = translations.qoderApplicationEntry;
+    for (const entry of ["qoder-services", "qoder-add"]) {
+      for (const state of ["bound", "unknown", "error"]) {
+        const context = await browser.newContext({
+          viewport: { width: variant.width, height: variant.height },
+        });
+        const errors = [],
+          unexpectedRequests = [];
+        await context.route("**/*", (route) => {
+          const url = new URL(route.request().url());
+          if (
+            url.hostname === "127.0.0.1" &&
+            url.port === "4314" &&
+            route.request().method() === "GET"
+          )
+            return route.continue();
+          unexpectedRequests.push(url.origin);
+          return route.abort();
+        });
+        const page = await context.newPage();
+        page.on("pageerror", (error) => errors.push(error.message));
+        page.on("console", (message) => {
+          if (message.type() === "error") errors.push(message.text());
+        });
+        try {
+          await page.goto(
+            `http://127.0.0.1:4314/tests/browser/unified-accounts.html?scenario=${entry}&qoderState=${state}&lang=${variant.language}&dark=${variant.dark}`,
+          );
+          await page.waitForFunction(() => window.unifiedLayout?.checkout);
+          assert.equal(
+            await page.evaluate(() => window.unifiedLayout.checkout),
+            builtSource.head,
+            "Served build must match its source evidence",
+          );
+          const panel = page.getByRole("region", {
+            name: labels.title,
+            exact: true,
+          });
+          await panel.waitFor();
+          const content =
+            state === "bound"
+              ? "synthetic-qoder-model"
+              : state === "unknown"
+                ? labels.empty
+                : labels.error;
+          await panel.getByText(content, { exact: true }).waitFor();
+          assert.equal(
+            await page
+              .getByRole("region", { name: "用于哪些应用", exact: true })
+              .count(),
+            0,
+            "Qoder must not duplicate the generic section",
+          );
+          assert.equal(
+            await panel
+              .getByText("synthetic-other-model", { exact: true })
+              .count(),
+            0,
+            "Another Provider binding must not leak",
+          );
+          const binding = panel.getByRole("button", {
+            name: /synthetic-qoder-model/,
+          });
+          const fallback = panel.getByRole("button", {
+            name: labels.defaultNavigationNamed.replace("{{app}}", "Codex"),
+            exact: true,
+          });
+          assert.equal(await binding.count(), state === "bound" ? 1 : 0);
+          assert.equal(await fallback.count(), state === "bound" ? 0 : 1);
+          await page.evaluate(() => document.fonts.ready);
+          await panel.scrollIntoViewIfNeeded();
+          const geometry = await panel.evaluate((el) => {
+            const rect = el.getBoundingClientRect(),
+              clipped = [];
+            const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+            for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+              if (!node.textContent.trim()) continue;
+              const range = document.createRange();
+              range.selectNodeContents(node);
+              for (const box of range.getClientRects()) {
+                if (!box.width) continue;
+                const bounds = {
+                  left: 0,
+                  top: 0,
+                  right: innerWidth,
+                  bottom: innerHeight,
+                };
+                for (
+                  let parent = node.parentElement;
+                  parent;
+                  parent = parent.parentElement
+                ) {
+                  const style = getComputedStyle(parent),
+                    r = parent.getBoundingClientRect();
+                  if (/hidden|clip|auto|scroll/.test(style.overflowX)) {
+                    bounds.left = Math.max(bounds.left, r.left);
+                    bounds.right = Math.min(bounds.right, r.right);
+                  }
+                  if (/hidden|clip|auto|scroll/.test(style.overflowY)) {
+                    bounds.top = Math.max(bounds.top, r.top);
+                    bounds.bottom = Math.min(bounds.bottom, r.bottom);
+                  }
+                }
+                if (
+                  box.left < bounds.left - 0.5 ||
+                  box.right > bounds.right + 0.5 ||
+                  box.top < bounds.top - 0.5 ||
+                  box.bottom > bounds.bottom + 0.5
+                )
+                  clipped.push(node.textContent.trim());
+              }
+            }
+            return {
+              x: rect.x,
+              y: rect.y,
+              width: rect.width,
+              height: rect.height,
+              clipped,
+            };
+          });
+          assert.deepEqual(
+            geometry.clipped,
+            [],
+            "Qoder entry text must not be clipped",
+          );
+          const filename = `${entry}-${state}-${variant.width}-${variant.language}-${variant.dark ? "dark" : "light"}.png`;
+          await page.screenshot({
+            path: path.join(output, filename),
+            fullPage: false,
+          });
+          await (state === "bound" ? binding : fallback).click();
+          if (entry === "qoder-services")
+            await page
+              .getByRole("button", { name: "管理原有 Qoder 配置", exact: true })
+              .click();
+          assert.deepEqual(
+            await page.evaluate(() => window.unifiedLayout.navigationCalls),
+            entry === "qoder-services" ? ["codex", "codex"] : ["codex"],
+          );
+          assert.deepEqual(
+            await page.evaluate(() => window.unifiedLayout.rejectedCommands),
+            [],
+          );
+          assert.deepEqual(errors, []);
+          assert.deepEqual(unexpectedRequests, []);
+          const screenshotSha256 = createHash("sha256")
+            .update(await readFile(path.join(output, filename)))
+            .digest("hex");
+          results.push({
+            source,
+            sourceEvidence,
+            scenario: entry,
+            state,
+            ...variant,
+            filename,
+            screenshotSha256,
+            geometry,
+            components: [
+              "src/components/relay/accounts/QoderAccountPanel.tsx",
+              "src/components/relay/accounts/QoderApplicationEntry.tsx",
+              entry === "qoder-services"
+                ? "src/components/relay/accounts/ServicesPage.tsx"
+                : "src/components/relay/AddHubPage.tsx",
+            ],
+            errors,
+            unexpectedRequests,
+          });
+          await writeFile(
+            path.join(output, "results.json"),
+            JSON.stringify(results, null, 2),
+          );
+        } catch (error) {
+          const failureName = `failure-${entry}-${state}-${variant.width}-${variant.language}`;
+          await page
+            .screenshot({ path: path.join(output, `${failureName}.png`) })
+            .catch(() => {});
+          await writeFile(
+            path.join(output, `${failureName}.json`),
+            JSON.stringify(
+              {
+                source,
+                entry,
+                state,
+                ...variant,
+                error: String(error),
+                errors,
+                unexpectedRequests,
+              },
+              null,
+              2,
+            ),
+          );
+          throw error;
+        } finally {
+          await context.close();
+        }
+      }
+    }
+  }
+  assertScreenshotSource(
+    fileURLToPath(new URL("../..", import.meta.url)),
+    builtSource,
+    { strict: process.env.UNIFIED_LAYOUT_STRICT === "1" },
+  );
+  completed = true;
+  await writeFile(
+    verificationPath,
+    JSON.stringify(
+      {
+        status: "passed",
+        sourceEvidence,
+        coverage,
+        screenshots: results.length,
+      },
+      null,
+      2,
+    ),
+  );
   console.log(
-    JSON.stringify({ source, screenshots: results.length, status: "passed" }),
+    JSON.stringify({
+      source,
+      sourceEvidence,
+      coverage,
+      screenshots: results.length,
+      status: "passed",
+    }),
   );
 } finally {
+  if (!completed)
+    await writeFile(
+      verificationPath,
+      JSON.stringify(
+        {
+          status: "failed",
+          sourceEvidence,
+          coverage,
+          screenshots: results.length,
+        },
+        null,
+        2,
+      ),
+    );
   await browser.close();
 }

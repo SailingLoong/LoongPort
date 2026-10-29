@@ -1954,6 +1954,12 @@ function App() {
                   }
                   firstVisit={addHubEntries[app]?.firstVisit}
                   onBack={goBack}
+                  onOpenApp={(targetApp) =>
+                    setCurrentView(
+                      targetApp === "codex-image" ? "image" : "providers",
+                      targetApp,
+                    )
+                  }
                   onAddProvider={addProvider}
                 />
               </PreservedView>

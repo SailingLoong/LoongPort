@@ -1,4 +1,10 @@
-import { AccountWorkspace, AccountDetailSections } from "./AccountWorkspace";
+import { useContext } from "react";
+import {
+  AccountWorkspace,
+  AccountDetailSections,
+  AccountApplicationNavigation,
+} from "./AccountWorkspace";
+import { QoderApplicationEntry } from "./QoderApplicationEntry";
 import { usePreservedViewActive } from "@/components/ui/PreservedView";
 import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -8,6 +14,7 @@ import { QoderCnDeviceLogin } from "@/components/providers/qoder/QoderCnDeviceLo
 import { QoderDailyClaim } from "@/components/providers/qoder/QoderDailyClaim";
 import { QoderCnCampaigns } from "@/components/providers/qoder/QoderCnCampaigns";
 import type { Provider } from "@/types";
+import type { AppId } from "@/lib/api/types";
 
 function sourceGeneration(provider: Provider): string | undefined {
   const state = (provider.meta as { qoderCampaignState?: unknown } | undefined)
@@ -18,8 +25,9 @@ function sourceGeneration(provider: Provider): string | undefined {
 }
 
 /** Present original Provider records, never create a second account or credential owner. */
-export function QoderAccountPanel() {
+export function QoderAccountPanel({ defaultApp }: { defaultApp?: AppId }) {
   const active = usePreservedViewActive();
+  const openApplication = useContext(AccountApplicationNavigation);
   const query = useQuery({
     queryKey: ["providers", "codex"],
     enabled: active,
@@ -70,6 +78,7 @@ export function QoderAccountPanel() {
       ) : (
         <AccountWorkspace
           accounts={accounts}
+          showApplicationNavigation={false}
           label={(provider) => provider.name}
           identityDetails={(provider) => (
             <p className="mt-1 text-xs text-muted-foreground">
@@ -84,50 +93,62 @@ export function QoderAccountPanel() {
           {(provider) => {
             const generation = sourceGeneration(provider);
             return (
-              <AccountDetailSections
-                key={`${provider.id}:${generation ?? ""}`}
-                authorization={
-                  provider.meta?.providerType === "qoder_cn_device" ? (
-                    <QoderCnDeviceLogin
-                      providerId={provider.id}
-                      sourceGeneration={generation}
-                      disabled={!active}
-                    />
-                  ) : (
-                    <p className="text-sm text-muted-foreground">
-                      授权与连接操作沿用原配置，请在“Qoder
-                      推理身份”中查看实际状态。
-                    </p>
-                  )
-                }
-                entitlements={
-                  provider.meta?.providerType === "qoder_sdk" ? (
-                    <QoderDailyClaim
-                      providerId={provider.id}
-                      disabled={!active || query.isFetching}
-                    />
-                  ) : (
-                    <>
-                      <QoderCnCampaigns
+              <>
+                <AccountDetailSections
+                  key={`${provider.id}:${generation ?? ""}`}
+                  authorization={
+                    provider.meta?.providerType === "qoder_cn_device" ? (
+                      <QoderCnDeviceLogin
                         providerId={provider.id}
                         sourceGeneration={generation}
+                        disabled={!active}
+                      />
+                    ) : (
+                      <p className="text-sm text-muted-foreground">
+                        授权与连接操作沿用原配置，请在“Qoder
+                        推理身份”中查看实际状态。
+                      </p>
+                    )
+                  }
+                  entitlements={
+                    provider.meta?.providerType === "qoder_sdk" ? (
+                      <QoderDailyClaim
+                        providerId={provider.id}
                         disabled={!active || query.isFetching}
                       />
-                      <p className="text-sm text-muted-foreground">
-                        免费福利可在“CN
-                        活动状态”中单独领取，自动领取需单独开启；活动已领取不代表今日签到成功。
-                      </p>
-                    </>
-                  )
-                }
-                inference={
-                  <QoderInferenceIdentity
-                    providerId={provider.id}
-                    sourceGeneration={generation}
-                    disabled={!active || query.isFetching}
-                  />
-                }
-              />
+                    ) : (
+                      <>
+                        <QoderCnCampaigns
+                          providerId={provider.id}
+                          sourceGeneration={generation}
+                          disabled={!active || query.isFetching}
+                        />
+                        <p className="text-sm text-muted-foreground">
+                          免费福利可在“CN
+                          活动状态”中单独领取，自动领取需单独开启；活动已领取不代表今日签到成功。
+                        </p>
+                      </>
+                    )
+                  }
+                  inference={
+                    <QoderInferenceIdentity
+                      providerId={provider.id}
+                      sourceGeneration={generation}
+                      disabled={!active || query.isFetching}
+                    />
+                  }
+                />
+                <QoderApplicationEntry
+                  provider={provider}
+                  sourceGeneration={generation}
+                  disabled={!active}
+                  onOpenApp={openApplication}
+                  defaultApp={defaultApp}
+                  onOpenDefault={
+                    openApplication ? () => openApplication() : undefined
+                  }
+                />
+              </>
             );
           }}
         </AccountWorkspace>

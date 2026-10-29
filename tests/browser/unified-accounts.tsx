@@ -30,7 +30,11 @@ import "@/index.css";
 
 // Browser-only presentation fixture: no native configuration, login or writes.
 const params = new URLSearchParams(location.search);
+declare const __UNIFIED_LAYOUT_CHECKOUT__: string;
 const scenario = params.get("scenario") ?? "populated";
+const qoderReview = scenario === "qoder-services" || scenario === "qoder-add";
+const qoderState = params.get("qoderState") ?? "bound";
+const navigationCalls: string[] = [];
 const language = params.get("lang") === "zh" ? "zh" : "en";
 const rejectedCommands: string[] = [];
 const alignment = scenario === "alignment";
@@ -264,7 +268,8 @@ mockIPC(
       case "get_providers":
         if (alignmentControls.failReads)
           throw new Error("Synthetic read failure");
-        return alignment && (payload as { app: string }).app === "codex"
+        return (alignment || qoderReview) &&
+          (payload as { app: string }).app === "codex"
           ? {
               "synthetic-qoder": {
                 id: "synthetic-qoder",
@@ -275,7 +280,53 @@ mockIPC(
             }
           : {};
       case "get_service_sources":
-        return [];
+        if (!qoderReview || qoderState === "unknown") return [];
+        if (qoderState === "error")
+          throw new Error("Synthetic source read failure");
+        return [
+          {
+            sourceId: "synthetic-qoder-source",
+            account: {
+              kind: "nativeAccount",
+              platform: "qoder_cn",
+              id: "synthetic-account",
+            },
+            name: "Synthetic Qoder configuration",
+            serviceName: null,
+            accountLabel: null,
+            configurationName: null,
+            bindings: [
+              {
+                appId: "codex",
+                providerId: "synthetic-qoder",
+                model: "synthetic-qoder-model",
+                usageState: "current",
+                canSelect: false,
+              },
+            ],
+          },
+          {
+            sourceId: "synthetic-other-qoder-source",
+            account: {
+              kind: "nativeAccount",
+              platform: "qoder_cn",
+              id: "synthetic-other-account",
+            },
+            name: "Synthetic other Qoder configuration",
+            serviceName: null,
+            accountLabel: null,
+            configurationName: null,
+            bindings: [
+              {
+                appId: "codex",
+                providerId: "synthetic-other-provider",
+                model: "synthetic-other-model",
+                usageState: "current",
+                canSelect: false,
+              },
+            ],
+          },
+        ];
       case "relay_list_directory":
         return { items: [], syncedAt: 0 };
       case "get_settings":
@@ -318,6 +369,11 @@ const client = new QueryClient({
 Object.assign(window, {
   unifiedLayout: {
     rejectedCommands,
+    checkout:
+      typeof __UNIFIED_LAYOUT_CHECKOUT__ === "undefined"
+        ? "unrecorded"
+        : __UNIFIED_LAYOUT_CHECKOUT__,
+    navigationCalls,
     alignmentControls,
     automaticStatusReads,
     completeAutomaticCheck,
@@ -327,15 +383,27 @@ Object.assign(window, {
 
 function Fixture() {
   const [view, setView] = useState<"services" | "addHub">(
-    scenario === "add" ? "addHub" : "services",
+    scenario === "add" || scenario === "qoder-add" ? "addHub" : "services",
   );
   const [platform, setPlatform] = useState<AccountPlatform | undefined>(
-    undefined,
+    scenario === "qoder-services" ? "qoder" : undefined,
   );
   const [entryRequest, setEntryRequest] = useState<{
     id: number;
     tab: AddHubTab;
-  }>({ id: 0, tab: "accounts" });
+    intent?: { kind: "account-boundary"; platform: "qoder" };
+  }>({
+    id: 0,
+    tab: "accounts",
+    ...(scenario === "qoder-add"
+      ? {
+          intent: {
+            kind: "account-boundary" as const,
+            platform: "qoder" as const,
+          },
+        }
+      : {}),
+  });
   const openAdd = (next: AddHubTab) => {
     setEntryRequest((entry) => ({ id: entry.id + 1, tab: next }));
     setView("addHub");
@@ -385,6 +453,9 @@ function Fixture() {
           <AddHubPage
             sourceAppId="codex"
             entryRequest={entryRequest}
+            onOpenApp={
+              qoderReview ? (app) => navigationCalls.push(app) : undefined
+            }
             onBack={() => setView("services")}
             onAddProvider={async () => {
               throw new Error("Synthetic fixture does not save providers");
@@ -401,7 +472,9 @@ function Fixture() {
             platform={platform}
             onOpenPlatform={setPlatform}
             onOpenAddHub={openAdd}
-            onOpenApp={() => undefined}
+            onOpenApp={(app) => {
+              if (qoderReview) navigationCalls.push(app);
+            }}
             onBack={back}
           />
         </PreservedView>
