@@ -369,7 +369,10 @@ const client = new QueryClient({
 Object.assign(window, {
   unifiedLayout: {
     rejectedCommands,
-    checkout: __UNIFIED_LAYOUT_CHECKOUT__,
+    checkout:
+      typeof __UNIFIED_LAYOUT_CHECKOUT__ === "undefined"
+        ? "unrecorded"
+        : __UNIFIED_LAYOUT_CHECKOUT__,
     navigationCalls,
     alignmentControls,
     automaticStatusReads,

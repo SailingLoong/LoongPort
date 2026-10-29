@@ -18,6 +18,10 @@ beforeAll(async () => {
   await import("../browser/unified-accounts");
 });
 
+it("marks the fixture source unrecorded without the screenshot build injection", () => {
+  expect((window as any).unifiedLayout.checkout).toBe("unrecorded");
+});
+
 for (const provider of ["workbuddy", "minimaxCode"] as const) {
   it(`serves ${provider} native-shaped snapshots and re-reads changed state`, async () => {
     const read = () =>

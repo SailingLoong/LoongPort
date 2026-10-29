@@ -123,10 +123,10 @@ test("legacy captures run before and independently of unified strict checks", ()
   assert.match(shared, /run-applications-c2\.mjs/);
   assert.doesNotMatch(
     shared,
-    /UNIFIED_LAYOUT_STRICT|screenshot-source\.test|run-unified-accounts/,
+    /UNIFIED_LAYOUT_STRICT|screenshot-source\.node|run-unified-accounts/,
   );
   assert.match(shared, /UNIFIED_LAYOUT_COLLECT=0/);
   assert.match(unified, /UNIFIED_LAYOUT_STRICT=1/);
-  assert.match(unified, /screenshot-source\.test/);
+  assert.match(unified, /screenshot-source\.node/);
   assert.match(unified, /run-unified-accounts\.mjs/);
 });

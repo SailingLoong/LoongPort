@@ -114,7 +114,7 @@ jobs:
         run: |
           export UNIFIED_LAYOUT_COLLECT=1
           export UNIFIED_LAYOUT_STRICT=1
-          node --test tests/browser/screenshot-source.test.mjs
+          node --test tests/browser/screenshot-source.node.mjs
           export ZCODE_LAYOUT_OUTPUT="$RUNNER_TEMP/unified-account-layout"
           pnpm exec vite build --config tests/browser/vite.config.mjs
           python3 -m http.server 4314 --bind 127.0.0.1 --directory "$ZCODE_LAYOUT_OUTPUT" > "$RUNNER_TEMP/unified-layout-server.log" 2>&1 &
