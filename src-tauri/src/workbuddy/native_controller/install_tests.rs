@@ -349,6 +349,20 @@ async fn installed_source_uses_the_official_shared_auth_root_instead_of_product_
 }
 #[tokio::test]
 async fn installed_source_rejects_changed_build_and_framework_alias_before_native_writes() {
+    use std::os::unix::fs::MetadataExt;
+
+    fn revision(m: &std::fs::Metadata) -> (u64, u64, u32, u64, i64, i64, i64, i64) {
+        (
+            m.dev(),
+            m.ino(),
+            m.uid(),
+            m.len(),
+            m.mtime(),
+            m.mtime_nsec(),
+            m.ctime(),
+            m.ctime_nsec(),
+        )
+    }
     for kind in [
         "asar",
         "unpacked-config",
@@ -361,6 +375,7 @@ async fn installed_source_rejects_changed_build_and_framework_alias_before_nativ
         let f = InstalledFixture::new().await;
         let mut origin = f.origin().unwrap();
         let auth = std::fs::read(f.f.auth()).unwrap();
+        let mut diagnostic = None;
         match kind {
             "framework-alias" => {
                 let p = f
@@ -387,11 +402,16 @@ async fn installed_source_rejects_changed_build_and_framework_alias_before_nativ
                 };
                 let p = f.bundle.join(ARTIFACTS[i].path);
                 let mut bytes = std::fs::read(&p).unwrap();
+                let before = revision(&std::fs::metadata(&p).unwrap());
+                let original = bytes.clone();
                 bytes[0] ^= 1;
-                std::fs::write(p, bytes).unwrap();
+                std::fs::write(&p, bytes).unwrap();
+                let after = revision(&std::fs::metadata(&p).unwrap());
+                let changed = std::fs::read(&p).unwrap() != original;
+                diagnostic = Some((before, after, changed));
             }
         }
-        assert!(origin.verify_stopped().is_err(), "admitted {kind}");
+        assert!(origin.verify_stopped().is_err(), "admitted {kind}; synthetic revision (dev, ino, uid, size, mtime, mtime_nsec, ctime, ctime_nsec), before/after/content_changed: {diagnostic:?}");
         assert_eq!(std::fs::read(f.f.auth()).unwrap(), auth);
         assert!(!f
             .f
