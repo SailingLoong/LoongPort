@@ -4,6 +4,52 @@ use crate::provider::{Provider, ProviderMeta};
 use axum::http::StatusCode;
 use serde_json::{json, Value};
 
+#[derive(Clone)]
+pub(crate) struct PhaseTrace {
+    id: u64,
+    start: std::time::Instant,
+}
+
+impl PhaseTrace {
+    pub(crate) fn from_headers(headers: &http::HeaderMap) -> Option<Self> {
+        let id = headers
+            .get("x-loopback-fixture-id")?
+            .to_str()
+            .ok()?
+            .parse()
+            .ok()?;
+        Some(Self {
+            id,
+            start: std::time::Instant::now(),
+        })
+    }
+
+    pub(crate) fn emit(&self, phase: &'static str) {
+        eprintln!(
+            "loopback server phase={phase} id={} elapsed_ms={}",
+            self.id,
+            self.start.elapsed().as_millis()
+        );
+    }
+}
+
+tokio::task_local! { static GUARD_TRACE: Option<PhaseTrace>; }
+
+pub(crate) async fn traced_guard<F: std::future::Future>(
+    trace: Option<PhaseTrace>,
+    future: F,
+) -> F::Output {
+    GUARD_TRACE.scope(trace, future).await
+}
+
+pub(crate) fn guard_phase(phase: &'static str) {
+    let _ = GUARD_TRACE.try_with(|trace| {
+        if let Some(trace) = trace {
+            trace.emit(phase);
+        }
+    });
+}
+
 // Emit only known error class names and boolean flags, never error text or URLs.
 fn safe_request_error(error: &reqwest::Error) -> String {
     let mut classes = Vec::new();
@@ -166,6 +212,8 @@ async fn assert_rejected(listen_address: &str, hosts: &[&str]) {
         .build()
         .unwrap();
     for (index, host) in hosts.iter().enumerate() {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let trace_id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let full_url = index % 2 == 1;
         let stream = index % 2 == 0;
         let base_url = if full_url {
@@ -189,12 +237,13 @@ async fn assert_rejected(listen_address: &str, hosts: &[&str]) {
         db.save_provider("codex", &provider).unwrap();
         db.set_current_provider("codex", &provider.id).unwrap();
         eprintln!(
-            "loopback fixture phase=provider_ready index={index} elapsed_ms={}",
+            "loopback fixture phase=provider_ready id={trace_id} index={index} elapsed_ms={}",
             fixture_start.elapsed().as_millis()
         );
         let before = proxy.get_status().await.total_requests;
         let request = client
             .post(format!("http://{}:{}/v1/responses", client_host, info.port))
+            .header("x-loopback-fixture-id", trace_id.to_string())
             .json(&json!({
                 "model": "gpt-5",
                 "stream": stream,
@@ -203,7 +252,7 @@ async fn assert_rejected(listen_address: &str, hosts: &[&str]) {
         // Bound the regression itself if the guard is ever removed: stop
         // after the first internal request instead of letting the loop grow.
         eprintln!(
-            "loopback fixture phase=request_ready index={index} fixture_elapsed_ms={}",
+            "loopback fixture phase=request_ready id={trace_id} index={index} fixture_elapsed_ms={}",
             fixture_start.elapsed().as_millis()
         );
         let request_start = std::time::Instant::now();
@@ -216,7 +265,7 @@ async fn assert_rejected(listen_address: &str, hosts: &[&str]) {
                     let summary = safe_request_error(&error);
                     let status = proxy.get_status().await;
                     proxy.stop().await.unwrap();
-                    panic!("request failed: {summary}; index={index}; request_elapsed_ms={request_elapsed}; fixture_elapsed_ms={fixture_elapsed}; total_requests={}, active_connections={}", status.total_requests, status.active_connections);
+                    panic!("request failed: {summary}; id={trace_id}; index={index}; request_elapsed_ms={request_elapsed}; fixture_elapsed_ms={fixture_elapsed}; total_requests={}, active_connections={}", status.total_requests, status.active_connections);
                 }
             },
             _ = async {
@@ -228,12 +277,12 @@ async fn assert_rejected(listen_address: &str, hosts: &[&str]) {
                 panic!("provider request looped back into the proxy");
             }
         };
-        eprintln!("loopback fixture phase=response_headers index={index} request_elapsed_ms={} fixture_elapsed_ms={}", request_start.elapsed().as_millis(), fixture_start.elapsed().as_millis());
+        eprintln!("loopback fixture phase=response_headers id={trace_id} index={index} request_elapsed_ms={} fixture_elapsed_ms={}", request_start.elapsed().as_millis(), fixture_start.elapsed().as_millis());
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let error: Value = response.json().await.unwrap_or_else(|error| {
             panic!("response body read failed: {}", safe_request_error(&error))
         });
-        eprintln!("loopback fixture phase=response_body index={index} request_elapsed_ms={} fixture_elapsed_ms={}", request_start.elapsed().as_millis(), fixture_start.elapsed().as_millis());
+        eprintln!("loopback fixture phase=response_body id={trace_id} index={index} request_elapsed_ms={} fixture_elapsed_ms={}", request_start.elapsed().as_millis(), fixture_start.elapsed().as_millis());
         assert!(
             error.to_string().contains("own proxy listener"),
             "unexpected rejection body"
@@ -259,7 +308,7 @@ async fn assert_rejected(listen_address: &str, hosts: &[&str]) {
         .await
         .expect("rejected request releases its connection");
         eprintln!(
-            "loopback fixture phase=connection_released index={index} fixture_elapsed_ms={}",
+            "loopback fixture phase=connection_released id={trace_id} index={index} fixture_elapsed_ms={}",
             fixture_start.elapsed().as_millis()
         );
     }
