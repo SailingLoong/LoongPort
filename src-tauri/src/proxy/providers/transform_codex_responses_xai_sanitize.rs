@@ -31,6 +31,9 @@ const RECURSIVE_UNSUPPORTED_FIELDS: &[&str] = &["external_web_access"];
 /// Top-level request fields xAI rejects regardless of model.
 const TOP_LEVEL_UNSUPPORTED_FIELDS: &[&str] = &["prompt_cache_retention", "safety_identifier"];
 
+/// `include` markers emitted by Codex that xAI's Responses API rejects.
+const XAI_UNSUPPORTED_INCLUDE_MARKERS: &[&str] = &["output.encrypted_content"];
+
 /// Top-level sampling fields rejected specifically by grok-4.5.
 const GROK_45_UNSUPPORTED_FIELDS: &[&str] = &[
     "presence_penalty",
@@ -154,6 +157,12 @@ pub(crate) fn sanitize_xai_responses_request(body: &mut Value) -> bool {
         changed |= remove_top_level_field(body, field);
     }
 
+    // 1.5 Codex 0.163+ 会在 include 里请求回放用途的输出令牌（如
+    //     output.encrypted_content），xAI 对不认识的标记整体 400。只剔不支持的
+    //     标记、保序保留其余标记（新支持的 xAI 特性能继续生效）；剔完为空时
+    //     连 include 键一起移除。
+    changed |= filter_unsupported_include_markers(body);
+
     // 2. grok-4.5 additionally rejects these sampling knobs.
     if request_targets_grok_45(body) {
         for field in GROK_45_UNSUPPORTED_FIELDS {
@@ -182,6 +191,32 @@ pub(crate) fn sanitize_xai_responses_request(body: &mut Value) -> bool {
 
     // 6. Whitelist the tool types and clean a now-dangling `tool_choice`.
     changed |= filter_unsupported_tools(body);
+
+    changed
+}
+
+fn filter_unsupported_include_markers(body: &mut Value) -> bool {
+    let mut remove_empty_include = false;
+    let changed = match body.get_mut("include").and_then(Value::as_array_mut) {
+        Some(include) => {
+            let original_len = include.len();
+            include.retain(|item| {
+                !item
+                    .as_str()
+                    .is_some_and(|marker| XAI_UNSUPPORTED_INCLUDE_MARKERS.contains(&marker))
+            });
+            let changed = include.len() != original_len;
+            remove_empty_include = changed && include.is_empty();
+            changed
+        }
+        None => false,
+    };
+
+    if remove_empty_include {
+        if let Some(body) = body.as_object_mut() {
+            body.remove("include");
+        }
+    }
 
     changed
 }
@@ -528,6 +563,40 @@ mod tests {
         assert!(sanitize_xai_responses_request(&mut body));
         assert!(body.get("prompt_cache_retention").is_none());
         assert!(body.get("safety_identifier").is_none());
+    }
+
+    #[test]
+    fn filters_unsupported_include_marker_preserving_other_values() {
+        let mut body = json!({
+            "model": "grok-4.7",
+            "include": [
+                "reasoning.encrypted_content",
+                "output.encrypted_content",
+                "web_search_call.action.sources"
+            ]
+        });
+
+        assert!(sanitize_xai_responses_request(&mut body));
+        assert_eq!(
+            body["include"],
+            json!([
+                "reasoning.encrypted_content",
+                "web_search_call.action.sources"
+            ])
+        );
+        assert!(!sanitize_xai_responses_request(&mut body));
+    }
+
+    #[test]
+    fn drops_include_when_only_unsupported_marker_remains() {
+        let mut body = json!({
+            "model": "grok-4.7",
+            "include": ["output.encrypted_content"]
+        });
+
+        assert!(sanitize_xai_responses_request(&mut body));
+        assert!(body.get("include").is_none());
+        assert!(!sanitize_xai_responses_request(&mut body));
     }
 
     #[test]
