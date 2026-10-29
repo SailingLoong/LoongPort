@@ -35,6 +35,17 @@ pub(crate) enum Credential {
         snapshot: StoredNativeSnapshot,
     },
 }
+impl Credential {
+    /// Non-secret local row version, never source authenticity or admission.
+    pub(in crate::workbuddy) fn native_incarnation(&self) -> Option<uuid::Uuid> {
+        match self {
+            Self::Api(_) => None,
+            Self::NativeOnly(snapshot) | Self::ApiWithNative { snapshot, .. } => {
+                snapshot.incarnation
+            }
+        }
+    }
+}
 impl From<String> for Credential {
     fn from(value: String) -> Self {
         Self::Api(value)
@@ -106,6 +117,17 @@ impl Account {
     }
     pub(in crate::workbuddy) fn same_native_scope(&self, context: &NativeContext) -> bool {
         matches!(&self.credential, Credential::NativeOnly(snapshot) if snapshot.context()==context)
+    }
+    pub(in crate::workbuddy) fn native_for_controller(
+        &self,
+        permit: &crate::workbuddy::native_controller::ReadPermit,
+    ) -> Result<native::NativeSnapshot, Failure> {
+        let snapshot = self.native_snapshot().ok_or(Failure::UnsupportedContext)?;
+        if snapshot.incarnation.is_none() || !permit.allows(snapshot.context()) {
+            return Err(Failure::UnsupportedContext);
+        }
+        native::capture(snapshot.bytes(), snapshot.context())
+            .map_err(|_| Failure::UnsupportedContext)
     }
     pub(crate) fn is_api(&self) -> bool {
         matches!(

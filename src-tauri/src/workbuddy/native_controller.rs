@@ -1,0 +1,207 @@
+//! Internal persistent-target -> original native prepare/Admission/apply/recover.
+//! No production source/process adapter, IPC or real client invocation. Original
+//! native Admission pins are Unix-only; other platforms fail before journal writes.
+use super::{
+    native::{self, NativeContext},
+    native_owner::{self, Disposition},
+    native_source::{Catalog, Receipt, SelectionKey},
+    native_transaction::{
+        self as transaction, Admission, Failure, FileIo, JournalOwner, Outcome, Paths,
+    },
+};
+use crate::secrets::storage::StorageIdentity;
+use std::path::{Path, PathBuf};
+
+mod sealed {
+    pub trait Sealed {}
+}
+/// A reviewed local source/process adapter owns actual source, realm/key-context
+/// and stopped verification, including physical source identity. Path strings or
+/// stored metadata alone are not proof.
+/// Implementations are sealed here; only explicit fixture ports exist so far.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) trait ControlledSource: sealed::Sealed {
+    fn root(&self) -> &Path;
+    fn context(&self) -> &NativeContext;
+    fn verify_stopped(&mut self) -> Result<(), Failure>;
+}
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) struct Controller<'a> {
+    pub catalog: Catalog<'a>,
+}
+/// Data selection only, not a source proof or execution ticket.
+pub(super) struct Selection {
+    receipt: Receipt,
+}
+/// No Clone/Debug/serde: execution retains the original sealed Admission pin.
+pub(super) struct Plan {
+    receipt: Receipt,
+    storage: StorageIdentity,
+    epoch: u64,
+    selector: String,
+    root: PathBuf,
+    context: NativeContext,
+    ticket: Admission,
+}
+/// Private-construction access witness. Stored data cannot directly mint a native
+/// snapshot; only the controller creates this after a sealed source verification.
+pub(super) struct ReadPermit {
+    context: NativeContext,
+}
+impl ReadPermit {
+    pub(super) fn allows(&self, context: &NativeContext) -> bool {
+        self.context == *context
+    }
+}
+fn verify_bound(
+    source: &mut impl ControlledSource,
+    root: &Path,
+    context: &NativeContext,
+) -> Result<(), Failure> {
+    source.verify_stopped()?;
+    if source.root() != root || source.context() != context {
+        return Err(Failure::SourceChanged);
+    }
+    Ok(())
+}
+fn scope(source: &mut impl ControlledSource) -> Result<(PathBuf, NativeContext, Paths), Failure> {
+    source.verify_stopped()?;
+    let root = source.root().to_path_buf();
+    let context = source.context().clone();
+    verify_bound(source, &root, &context)?;
+    let paths = Paths::at(&root)?;
+    Ok((root, context, paths))
+}
+#[cfg_attr(not(test), allow(dead_code))]
+impl Controller<'_> {
+    pub(super) async fn select(&self, key: &SelectionKey) -> Result<Selection, Failure> {
+        Ok(Selection {
+            receipt: self.catalog.select(key).await?,
+        })
+    }
+    pub(super) async fn prepare(
+        &self,
+        target: &Selection,
+        source: &mut impl ControlledSource,
+        io: &mut dyn FileIo,
+    ) -> Result<Plan, Failure> {
+        if !cfg!(unix) {
+            return Err(Failure::UnsafePath);
+        }
+        let (root, context, paths) = scope(source)?;
+        native_owner::with_selected_owner(
+            self.catalog.session,
+            self.catalog.identity,
+            self.catalog.epoch,
+            self.catalog.selection,
+            |owner| {
+                verify_bound(source, &root, &context)?;
+                let row = target
+                    .receipt
+                    .read_under_owner(owner, self.catalog.identity.store_id())?;
+                let permit = ReadPermit {
+                    context: context.clone(),
+                };
+                let selected = row
+                    .account
+                    .native_for_controller(&permit)
+                    .map_err(|_| Failure::RequestConflict)?;
+                let before = transaction::observe(io, &paths)?;
+                let current =
+                    native::capture(before.auth_bytes().ok_or(Failure::SourceChanged)?, &context)
+                        .map_err(|_| Failure::SourceChanged)?;
+                let prepared =
+                    native::prepare(&current, &selected).map_err(|_| Failure::RequestConflict)?;
+                verify_bound(source, &root, &context)?;
+                // Pin the actual original native root before creating its registered owner.
+                // Admission cannot be reconstructed from stored bytes at apply time.
+                // Existing initialization/CAS are reused, never a second journal.
+                let disposition = owner.disposition()?;
+                if disposition == Disposition::Pending {
+                    return Err(Failure::RecoveryRequired);
+                }
+                // Validate platform/root pin without writing the journal first.
+                let root_pin = transaction::validate_admission_root(&paths)?;
+                if disposition == Disposition::Absent {
+                    owner.initialize()?;
+                }
+                let (stamp, _) = owner.load()?;
+                let request = uuid::Uuid::new_v4().to_string();
+                let ticket =
+                    Admission::preview(&paths, &context, &stamp, &request, &before, &prepared)?;
+                drop(root_pin);
+                verify_bound(source, &root, &context)?;
+                Ok(Plan {
+                    receipt: target.receipt.clone(),
+                    storage: self.catalog.identity.clone(),
+                    epoch: self.catalog.epoch,
+                    selector: self.catalog.selection.selection_digest().into(),
+                    root,
+                    context,
+                    ticket,
+                })
+            },
+        )
+        .await
+    }
+    pub(super) async fn apply(
+        &self,
+        plan: &Plan,
+        source: &mut impl ControlledSource,
+        io: &mut dyn FileIo,
+    ) -> Result<Outcome, Failure> {
+        if !cfg!(unix) {
+            return Err(Failure::UnsafePath);
+        }
+        if *self.catalog.identity != plan.storage
+            || self.catalog.epoch != plan.epoch
+            || self.catalog.selection.selection_digest() != plan.selector
+        {
+            return Err(Failure::SourceChanged);
+        }
+        verify_bound(source, &plan.root, &plan.context)?;
+        let paths = Paths::at(&plan.root)?;
+        native_owner::with_selected_owner(
+            self.catalog.session,
+            self.catalog.identity,
+            self.catalog.epoch,
+            self.catalog.selection,
+            |owner| {
+                verify_bound(source, &plan.root, &plan.context)?;
+                plan.receipt
+                    .read_under_owner(owner, self.catalog.identity.store_id())?;
+                let mut stopped = || verify_bound(source, &plan.root, &plan.context).is_ok();
+                transaction::apply(&paths, io, owner, &mut stopped, &plan.context, &plan.ticket)
+            },
+        )
+        .await
+    }
+    pub(super) async fn recover(
+        &self,
+        source: &mut impl ControlledSource,
+        io: &mut dyn FileIo,
+    ) -> Result<Outcome, Failure> {
+        if !cfg!(unix) {
+            return Err(Failure::UnsafePath);
+        }
+        let (root, context, paths) = scope(source)?;
+        native_owner::with_selected_owner(
+            self.catalog.session,
+            self.catalog.identity,
+            self.catalog.epoch,
+            self.catalog.selection,
+            |owner| {
+                verify_bound(source, &root, &context)?;
+                // Recovery consumes its persisted original Stamp, not a fabricated
+                // refreshed account selection or a newly initialized journal.
+                let (stamp, _) = owner.load()?;
+                let mut stopped = || verify_bound(source, &root, &context).is_ok();
+                transaction::recover(&paths, io, owner, &mut stopped, &stamp, &context)
+            },
+        )
+        .await
+    }
+}
+#[cfg(all(test, unix))]
+#[path = "native_controller_tests.rs"]
+mod tests;

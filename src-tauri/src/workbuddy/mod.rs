@@ -44,3 +44,5 @@ mod native_account_tests;
 mod native_source;
 #[cfg(test)]
 mod native_source_tests;
+
+mod native_controller;

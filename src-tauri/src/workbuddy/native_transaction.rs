@@ -24,6 +24,11 @@ pub(crate) struct Image {
     auth: Option<Zeroizing<Vec<u8>>>,
     marker: Option<Zeroizing<Vec<u8>>>,
 }
+impl Image {
+    pub(super) fn auth_bytes(&self) -> Option<&[u8]> {
+        self.auth.as_deref().map(|bytes| bytes.as_slice())
+    }
+}
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {
     Prepared,
@@ -108,6 +113,9 @@ fn bind_root(paths: &Paths) -> Result<(RootIdentity, std::fs::File), Failure> {
     {
         Err(Failure::UnsafePath)
     }
+}
+pub(super) fn validate_admission_root(paths: &Paths) -> Result<std::fs::File, Failure> {
+    bind_root(paths).map(|(_, pin)| pin)
 }
 /// Sealed preview intent. No Debug/serialization or mutable intent accessors.
 /// Trusted UI/owner must create it at preview, not rebuild it at execution.

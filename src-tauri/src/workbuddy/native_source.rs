@@ -240,6 +240,16 @@ pub(super) struct Catalog<'a> {
 /// Data lookup fence reuses original generation + credential equality, including
 /// the persisted v2 row lifetime. Legacy v1 data never issues a lifetime receipt.
 /// Private/zeroizing credential retention; no serialization or native execution admission.
+/// Non-secret persistent choice of one existing row lifetime. The original
+/// incarnation is required on reselect; ID/generation alone cannot renew it.
+/// This data is neither verified source provenance nor an Admission ticket.
+#[derive(Clone, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SelectionKey {
+    pub(super) id: String,
+    pub(super) generation: u64,
+    pub(super) incarnation: uuid::Uuid,
+}
 #[derive(Clone)]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) struct Receipt {
@@ -249,6 +259,17 @@ pub(super) struct Receipt {
     credential: Credential,
 }
 impl Receipt {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn selection_key(&self) -> Result<SelectionKey, Failure> {
+        Ok(SelectionKey {
+            id: self.id.clone(),
+            generation: self.generation,
+            incarnation: self
+                .credential
+                .native_incarnation()
+                .ok_or(Failure::RequestConflict)?,
+        })
+    }
     fn matches(&self, row: &SavedAccount, owner: &str) -> bool {
         row.account.has_native_lifetime()
             && self.id == row.account.id(owner)
@@ -256,9 +277,52 @@ impl Receipt {
             && self.generation == row.generation
             && self.credential == row.account.credential
     }
+    pub(super) fn read_under_owner(
+        &self,
+        owner: &super::native_owner::Owner<'_>,
+        store_id: &str,
+    ) -> Result<SavedAccount, Failure> {
+        let rows = owner.load_accounts()?;
+        let mut matches = rows
+            .into_iter()
+            .filter(|row| row.account.id(store_id) == self.id);
+        let row = matches.next().ok_or(Failure::RequestConflict)?;
+        if matches.next().is_some() || !self.matches(&row, store_id) {
+            return Err(Failure::RequestConflict);
+        }
+        Ok(row)
+    }
 }
 #[cfg_attr(not(test), allow(dead_code))]
 impl Catalog<'_> {
+    pub(super) async fn select(&self, key: &SelectionKey) -> Result<Receipt, Failure> {
+        super::native_owner::with_selected_owner(
+            self.session,
+            self.identity,
+            self.epoch,
+            self.selection,
+            |owner| {
+                let rows = owner.load_accounts()?;
+                let mut matches = rows
+                    .into_iter()
+                    .filter(|row| row.account.id(self.identity.store_id()) == key.id);
+                let row = matches.next().ok_or(Failure::RequestConflict)?;
+                if matches.next().is_some()
+                    || row.generation != key.generation
+                    || row.account.credential.native_incarnation() != Some(key.incarnation)
+                {
+                    return Err(Failure::RequestConflict);
+                }
+                Ok(Receipt {
+                    id: key.id.clone(),
+                    generation: key.generation,
+                    realm: row.account.domain.host().into(),
+                    credential: row.account.credential.clone(),
+                })
+            },
+        )
+        .await
+    }
     pub(super) async fn save(
         &self,
         observation: &Observation,
