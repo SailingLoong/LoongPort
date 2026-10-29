@@ -6,6 +6,9 @@ use super::super::{
 use super::*;
 use crate::workbuddy::model::Domain;
 
+#[path = "capture_tests.rs"]
+mod capture_tests;
+
 const ARTIFACTS: &[Artifact] = &[
     Artifact {
         path: "Contents/Info.plist",

@@ -7,7 +7,8 @@ use std::path::{Component, Path, PathBuf};
 use zeroize::Zeroizing;
 
 const LIMIT: u64 = 4 * 1024 * 1024;
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) enum Failure {
     UnsafePath,
     // Remove when the concrete Files IO backend has a runtime transaction caller.

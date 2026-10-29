@@ -195,6 +195,16 @@ pub(super) struct Observation {
 }
 #[cfg_attr(not(test), allow(dead_code))]
 impl Observation {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "gui"))]
+    pub(super) fn realm_at(path: &Path) -> Result<Domain, Failure> {
+        let pair = read_pair(path).map_err(|_| Failure::SourceChanged)?;
+        if pair.marker.is_some() {
+            return Err(Failure::RequestConflict);
+        }
+        let auth = pair.auth.as_ref().ok_or(Failure::RequestConflict)?;
+        let realm = super::native::observe(&auth.bytes).map_err(|_| Failure::RequestConflict)?;
+        Domain::parse(realm).map_err(|_| Failure::RequestConflict)
+    }
     pub(super) fn read(path: &Path, context: &NativeContext) -> Result<Self, Failure> {
         if !path.is_absolute()
             || path.components().any(|c| {
@@ -245,11 +255,16 @@ pub(super) struct Catalog<'a> {
 /// This data is neither verified source provenance nor an Admission ticket.
 #[derive(Clone, Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-#[cfg(unix)]
-pub(super) struct SelectionKey {
+pub(crate) struct SelectionKey {
     pub(super) id: String,
     pub(super) generation: u64,
     pub(super) incarnation: uuid::Uuid,
+}
+#[derive(Serialize)]
+pub(crate) struct CapturedAccount {
+    selection: SelectionKey,
+    label: String,
+    realm: String,
 }
 #[derive(Clone)]
 #[cfg_attr(not(test), allow(dead_code))]
@@ -260,6 +275,14 @@ pub(super) struct Receipt {
     credential: Credential,
 }
 impl Receipt {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "gui"))]
+    pub(super) fn view(&self, label: &str) -> Result<CapturedAccount, Failure> {
+        Ok(CapturedAccount {
+            selection: self.selection_key()?,
+            label: label.into(),
+            realm: self.realm.clone(),
+        })
+    }
     #[cfg_attr(not(test), allow(dead_code))]
     #[cfg(unix)]
     pub(super) fn selection_key(&self) -> Result<SelectionKey, Failure> {
@@ -299,6 +322,34 @@ impl Receipt {
 #[cfg_attr(not(test), allow(dead_code))]
 impl Catalog<'_> {
     #[cfg(unix)]
+    pub(super) async fn list_captures(&self) -> Result<Vec<CapturedAccount>, Failure> {
+        super::native_owner::with_selected_owner(
+            self.session,
+            self.identity,
+            self.epoch,
+            self.selection,
+            |owner| {
+                let rows = owner.load_accounts()?;
+                Ok(rows
+                    .into_iter()
+                    .filter_map(|row| {
+                        let incarnation = row.account.credential.native_incarnation()?;
+                        Some(CapturedAccount {
+                            selection: SelectionKey {
+                                id: row.account.id(self.identity.store_id()),
+                                generation: row.generation,
+                                incarnation,
+                            },
+                            label: row.account.label,
+                            realm: row.account.domain.host().into(),
+                        })
+                    })
+                    .collect())
+            },
+        )
+        .await
+    }
+    #[cfg(unix)]
     pub(super) async fn select(&self, key: &SelectionKey) -> Result<Receipt, Failure> {
         super::native_owner::with_selected_owner(
             self.session,
@@ -333,12 +384,23 @@ impl Catalog<'_> {
         expected: Option<&Receipt>,
         label: &str,
     ) -> Result<Receipt, Failure> {
+        self.save_checked(observation, expected, label, || Ok(()))
+            .await
+    }
+    pub(super) async fn save_checked(
+        &self,
+        observation: &Observation,
+        expected: Option<&Receipt>,
+        label: &str,
+        mut verify_source: impl FnMut() -> Result<(), Failure>,
+    ) -> Result<Receipt, Failure> {
         super::native_owner::with_selected_owner(
             self.session,
             self.identity,
             self.epoch,
             self.selection,
             |owner| {
+                verify_source()?;
                 observation.verify()?;
                 let mut rows = owner.load_accounts()?;
                 let domain = Domain::parse(&observation.context.realm)
@@ -389,7 +451,16 @@ impl Catalog<'_> {
                     realm: domain.host().into(),
                     credential: row.account.credential.clone(),
                 };
-                owner.save_accounts(rows, || observation.verify())?;
+                let mut verification = Ok(());
+                let saved = owner.save_accounts(rows, || {
+                    verification = verify_source().and_then(|_| observation.verify());
+                    verification
+                        .as_ref()
+                        .map(|_| ())
+                        .map_err(|_| Failure::SourceChanged)
+                });
+                verification?;
+                saved?;
                 Ok(receipt)
             },
         )

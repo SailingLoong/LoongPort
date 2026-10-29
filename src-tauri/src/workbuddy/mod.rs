@@ -41,6 +41,7 @@ pub(crate) mod native_preview;
 #[cfg(test)]
 mod native_account_tests;
 
+pub(crate) mod native_capture;
 mod native_source;
 #[cfg(test)]
 mod native_source_tests;

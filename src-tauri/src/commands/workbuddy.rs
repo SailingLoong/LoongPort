@@ -197,3 +197,21 @@ pub(crate) async fn preview_workbuddy_native_capture(
         .await
         .map_err(|_| crate::workbuddy::native_preview::PreviewError::UnreadableSource)?
 }
+
+#[tauri::command]
+pub(crate) async fn capture_workbuddy_native_account(
+    state: State<'_, AppState>,
+    input: crate::workbuddy::native_capture::Input,
+) -> Result<crate::workbuddy::native_capture::Saved, crate::workbuddy::native_capture::Failure> {
+    crate::workbuddy::native_capture::capture(state.db.clone(), input).await
+}
+
+#[tauri::command]
+pub(crate) async fn list_workbuddy_native_captures(
+    state: State<'_, AppState>,
+) -> Result<
+    crate::workbuddy::native_capture::CurrentCaptures,
+    crate::workbuddy::native_capture::Failure,
+> {
+    crate::workbuddy::native_capture::list(state.db.secret_session()).await
+}

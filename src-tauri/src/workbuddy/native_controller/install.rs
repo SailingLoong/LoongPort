@@ -379,3 +379,19 @@ pub(super) fn open(bundle: &Path, realm: Domain) -> Result<Source, Failure> {
     source.verify_stopped()?;
     Ok(source)
 }
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "gui"))]
+pub(super) fn open_capture(bundle: &Path) -> Result<Source, Failure> {
+    let (uid, home) = crate::zcode_accounts::native_context::native_user_home()
+        .map_err(|_| Failure::SourceChanged)?;
+    let mut origin = Origin::at(bundle, &home, uid, Domain::WorkBuddy, ARTIFACTS)?;
+    let realm = crate::workbuddy::native_source::Observation::realm_at(
+        &origin.root.join("workbuddy-desktop.info"),
+    )?;
+    origin.context.realm = realm.host().into();
+    origin.verify_unchanged()?;
+    let scope = process::Scope::at(bundle, &bundle.join("Contents/MacOS/Electron"))?;
+    let mut source = process::ProcessBound::new(origin, scope, process::MacProcesses);
+    source.verify_stopped()?;
+    Ok(source)
+}

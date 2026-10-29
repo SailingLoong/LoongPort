@@ -100,6 +100,37 @@ fn scope(source: &mut impl ControlledSource) -> Result<(PathBuf, NativeContext, 
 }
 #[cfg_attr(not(test), allow(dead_code))]
 impl Controller<'_> {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "gui"))]
+    pub(super) async fn capture_installed(
+        &self,
+        bundle: &Path,
+        expected: Option<&SelectionKey>,
+        label: &str,
+    ) -> Result<Receipt, Failure> {
+        let mut source = install::open_capture(bundle)?;
+        self.capture(&mut source, expected, label).await
+    }
+    pub(super) async fn capture(
+        &self,
+        source: &mut impl ControlledSource,
+        expected: Option<&SelectionKey>,
+        label: &str,
+    ) -> Result<Receipt, Failure> {
+        let (root, context, _) = scope(source)?;
+        let observation = super::native_source::Observation::read(
+            &root.join("workbuddy-desktop.info"),
+            &context,
+        )?;
+        let expected = match expected {
+            Some(key) => Some(self.catalog.select(key).await?),
+            None => None,
+        };
+        self.catalog
+            .save_checked(&observation, expected.as_ref(), label, || {
+                verify_bound(source, &root, &context)
+            })
+            .await
+    }
     /// Production source construction is fixed to the reviewed public build;
     /// neither caller-supplied context strings nor fixture pins are accepted.
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
