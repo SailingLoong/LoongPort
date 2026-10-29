@@ -48,6 +48,15 @@ vi.mock("@/components/JsonEditor", () => ({
     />
   ),
 }));
+async function cleanupSnippetForm(
+  unmount: () => void,
+  client: ReturnType<typeof createTestQueryClient>,
+) {
+  unmount();
+  await client.cancelQueries();
+  client.clear();
+}
+
 describe("ProviderForm draft retention", () => {
   it.each([
     "claude",
@@ -97,7 +106,9 @@ describe("ProviderForm draft retention", () => {
   );
 });
 
-it("keeps an open Claude snippet readable when the backend cache freezes its write capability", async () => {
+it("keeps an open Claude snippet readable when the backend cache freezes its write capability", async ({
+  onTestFinished,
+}) => {
   const client = createTestQueryClient();
   client.setQueryData(["applicationRouting", "claude"], {
     modeState: {
@@ -110,6 +121,8 @@ it("keeps an open Claude snippet readable when the backend cache freezes its wri
   const save = vi
     .spyOn(configApi, "setCommonConfigSnippet")
     .mockResolvedValue(undefined);
+  // The runner ends ownership even when this async test body times out.
+  onTestFinished(() => save.mockRestore());
   const { unmount } = render(
     <QueryClientProvider client={client}>
       <ProviderForm
@@ -164,10 +177,7 @@ it("keeps an open Claude snippet readable when the backend cache freezes its wri
       ).not.toBeInTheDocument(),
     );
   } finally {
-    unmount();
-    await client.cancelQueries();
-    client.clear();
-    save.mockRestore();
+    await cleanupSnippetForm(unmount, client);
   }
 });
 
@@ -224,7 +234,9 @@ it("preserves a frozen provider's existing common-config flag when saving ordina
   }
 });
 
-it("allows explicit legacy common snippet save and revokes an open editor when the same app loses its protocol", async () => {
+it("allows explicit legacy common snippet save and revokes an open editor when the same app loses its protocol", async ({
+  onTestFinished,
+}) => {
   const client = createTestQueryClient();
   const legacy = {
     modeState: {
@@ -241,6 +253,8 @@ it("allows explicit legacy common snippet save and revokes an open editor when t
   const save = vi
     .spyOn(configApi, "setCommonConfigSnippet")
     .mockResolvedValue(undefined);
+  // The runner ends ownership even when this async test body times out.
+  onTestFinished(() => save.mockRestore());
   const { unmount } = render(
     <QueryClientProvider client={client}>
       <ProviderForm
@@ -281,10 +295,7 @@ it("allows explicit legacy common snippet save and revokes an open editor when t
     );
     expect(save).toHaveBeenCalledOnce();
   } finally {
-    unmount();
-    await client.cancelQueries();
-    client.clear();
-    save.mockRestore();
+    await cleanupSnippetForm(unmount, client);
   }
 });
 
@@ -362,5 +373,91 @@ it("saves Gemini env after alternating native field and raw editor changes", asy
     unmount();
     await client.cancelQueries();
     client.clear();
+  }
+});
+
+it("keeps the next real form's save spy when the previous form's query cleanup completes late", async ({
+  onTestFinished,
+}) => {
+  const olderClient = createTestQueryClient();
+  const olderSave = vi
+    .spyOn(configApi, "setCommonConfigSnippet")
+    .mockResolvedValue(undefined);
+  onTestFinished(() => olderSave.mockRestore());
+  const older = render(
+    <QueryClientProvider client={olderClient}>
+      <ProviderForm
+        appId="claude"
+        submitLabel="save"
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+      />
+    </QueryClientProvider>,
+  );
+  await screen.findByRole("button", { name: "claudeConfig.editCommonConfig" });
+  let finishCancellation!: () => void;
+  const cancellation = new Promise<void>((resolve) => {
+    finishCancellation = resolve;
+  });
+  const olderCancellation = vi
+    .spyOn(olderClient, "cancelQueries")
+    .mockReturnValueOnce(cancellation);
+  const olderCleanup = cleanupSnippetForm(older.unmount, olderClient);
+
+  const newerClient = createTestQueryClient();
+  const newerSave = vi
+    .spyOn(configApi, "setCommonConfigSnippet")
+    .mockResolvedValue(undefined);
+  onTestFinished(() => newerSave.mockRestore());
+  const legacy = {
+    modeState: {
+      status: "ready",
+      canWrite: true,
+      writeProtocol: "legacy",
+      blockedReason: null,
+    },
+  };
+  newerClient.setQueryData(["applicationRouting", "claude"], legacy);
+  vi.mocked(applicationRoutingApi.get).mockResolvedValue(legacy as any);
+  const newer = render(
+    <QueryClientProvider client={newerClient}>
+      <ProviderForm
+        appId="claude"
+        submitLabel="save"
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+      />
+    </QueryClientProvider>,
+  );
+  try {
+    await waitFor(() =>
+      expect(
+        screen.getByRole("checkbox", {
+          name: "claudeConfig.writeCommonConfig",
+        }),
+      ).toBeEnabled(),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "claudeConfig.editCommonConfig" }),
+    );
+    fireEvent.change(
+      screen.getAllByRole("textbox", { name: "configuration JSON" }).at(-1)!,
+      { target: { value: '{"safe":"changed"}' } },
+    );
+    finishCancellation();
+    await olderCleanup;
+    expect(configApi.setCommonConfigSnippet).toBe(newerSave);
+    await userEvent.click(screen.getByRole("button", { name: "common.save" }));
+    await waitFor(() =>
+      expect(newerSave).toHaveBeenCalledWith("claude", '{"safe":"changed"}'),
+    );
+  } finally {
+    finishCancellation();
+    await olderCleanup;
+    olderCancellation.mockRestore();
+    olderClient.clear();
+    newer.unmount();
+    await newerClient.cancelQueries();
+    newerClient.clear();
   }
 });
