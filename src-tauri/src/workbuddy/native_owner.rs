@@ -143,6 +143,8 @@ impl<'a> Owner<'a> {
         }
         Ok(())
     }
+    // Account model/store exist only in the full WorkBuddy module (lib.rs).
+    #[cfg(any(feature = "gui", test))]
     fn check_accounts(&self) -> Result<(), Failure> {
         self.check()?;
         if self.disposition()? == Disposition::Pending {
@@ -150,6 +152,7 @@ impl<'a> Owner<'a> {
         }
         Ok(())
     }
+    #[cfg(any(feature = "gui", test))]
     pub(super) fn load_accounts(&self) -> Result<Vec<super::model::SavedAccount>, Failure> {
         self.check_accounts()?;
         let (session, _, _) = self.selected.ok_or(Failure::SourceChanged)?;
@@ -158,6 +161,7 @@ impl<'a> Owner<'a> {
         self.check_accounts()?;
         Ok(rows)
     }
+    #[cfg(any(feature = "gui", test))]
     pub(super) fn save_accounts(
         &self,
         rows: Vec<super::model::SavedAccount>,
