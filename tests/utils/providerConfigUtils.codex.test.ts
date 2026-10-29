@@ -530,3 +530,63 @@ describe("Codex TOML utils", () => {
     expect(extractCodexExperimentalBearerToken(input)).toBe("top-level-key");
   });
 });
+
+describe("setCodexBaseUrl with array-of-tables sections", () => {
+  it("writes base_url inside [model_providers.custom] when [[skills.config]] follows", () => {
+    // 回归：[[skills.config]] 是 array-of-tables 头（[[...]]），节正则不识别时
+    // 区间越过它，base_url 被追加到 skills 内容之后——落进 skills.config[0]
+    // 而不是 model_providers.custom。
+    const input = [
+      'model_provider = "custom"',
+      'model = "gpt-5.5"',
+      "",
+      "[model_providers.custom]",
+      'name = "custom"',
+      'wire_api = "responses"',
+      "requires_openai_auth = true",
+      "",
+      "[[skills.config]]",
+      'path = "/path/to/some-skill/SKILL.md"',
+      "enabled = false",
+      "",
+    ].join("\n");
+
+    const result = setCodexBaseUrl(input, "https://relay.example.com/v1");
+
+    // base_url 必须在 [model_providers.custom] 内，即 [[skills.config]] 头之前
+    const baseUrlLine = 'base_url = "https://relay.example.com/v1"';
+    const baseUrlIndex = result.indexOf(baseUrlLine);
+    const skillsHeaderIndex = result.indexOf("[[skills.config]]");
+    expect(baseUrlIndex).toBeGreaterThan(-1);
+    expect(skillsHeaderIndex).toBeGreaterThan(-1);
+    expect(baseUrlIndex).toBeLessThan(skillsHeaderIndex);
+
+    // 往返：extractCodexBaseUrl 必须能在 custom 表里找到它
+    expect(extractCodexBaseUrl(result)).toBe("https://relay.example.com/v1");
+  });
+
+  it("writes base_url inside [model_providers.custom] when [[skills.config]] precedes it", () => {
+    const input = [
+      'model_provider = "custom"',
+      'model = "gpt-5.5"',
+      "",
+      "[[skills.config]]",
+      'path = "/path/to/some-skill/SKILL.md"',
+      "enabled = false",
+      "",
+      "[model_providers.custom]",
+      'name = "custom"',
+      'wire_api = "responses"',
+      "",
+    ].join("\n");
+
+    const result = setCodexBaseUrl(input, "https://relay.example.com/v1");
+
+    const baseUrlIndex = result.indexOf(
+      'base_url = "https://relay.example.com/v1"',
+    );
+    const skillsHeaderIndex = result.indexOf("[[skills.config]]");
+    expect(baseUrlIndex).toBeGreaterThan(skillsHeaderIndex);
+    expect(extractCodexBaseUrl(result)).toBe("https://relay.example.com/v1");
+  });
+});

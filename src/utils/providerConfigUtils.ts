@@ -436,7 +436,10 @@ export const hasTomlCommonConfigSnippet = (
 
 // Table comments do not change scope; otherwise editing one gateway can consume
 // assignments from the next annotated provider or profile table. Keep CRLF valid.
-const TOML_SECTION_HEADER_PATTERN = /^\s*\[([^\]\r\n]+)\]\s*(?:#.*)?\s*$/;
+// `[{1,2}`…`]{1,2}` 同时识别 array-of-tables 头（[[...]]）：不识别时该节区间会
+// 越过它，写入落到上一节的末尾（如 skills.config[0]）而不是目标表内。
+const TOML_SECTION_HEADER_PATTERN =
+  /^\s*\[{1,2}([^\]\r\n]+)\]{1,2}\s*(?:#.*)?\s*$/;
 const TOML_BASE_URL_PATTERN =
   /^\s*base_url\s*=\s*(?:"((?:\\.|[^"\\\r\n])*)"|'([^'\r\n]*)')\s*(?:#.*)?$/;
 const TOML_EXPERIMENTAL_BEARER_TOKEN_PATTERN =
