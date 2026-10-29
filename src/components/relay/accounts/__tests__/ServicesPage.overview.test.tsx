@@ -31,6 +31,18 @@ vi.mock("../useAccountPlatformPresence", () => ({
             value: {
               claimState: "claimed",
               credited: 999,
+              lastSuccessfulClaim: {
+                confirmedAtMs: Date.now() - 1000,
+                timeSource: "localReconciled",
+                credited: 20,
+                unit: "points",
+              },
+              creditExpiryStatus: "known",
+              nextKnownCreditExpiry: {
+                expiresAtMs: Date.now() + 86400000,
+                remaining: 60,
+                unit: "points",
+              },
               autoClaimEnabled: false,
               credits: { totalRemaining: null },
             },
@@ -118,7 +130,10 @@ it("shows four facts without converting a successful claim into inference or bal
     expect(within(card).getByText(label)).toBeVisible();
   expect(within(card).getByText("未验证")).toBeVisible();
   expect(within(card).getByText("自动领取未开启")).toBeVisible();
-  expect(within(card).queryByText(/999|已接通|已连接/)).not.toBeInTheDocument();
+  expect(within(card).getByText(/本地确认时间.*\+20 积分/)).toBeVisible();
+  expect(within(card).getByText(/剩余 60 积分/)).toBeVisible();
+  expect(within(card).queryByText(/\+999/)).not.toBeInTheDocument();
+  expect(within(card).queryByText(/已接通|已连接/)).not.toBeInTheDocument();
 });
 
 it("serializes repeated refresh actions until the owner reads finish", async () => {

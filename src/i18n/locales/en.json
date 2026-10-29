@@ -1,4 +1,19 @@
 {
+  "accountRewardGlance": {
+    "confirmationTime": "Local confirmation time",
+    "expiryPending": "Expiry data awaiting update",
+    "lastSuccess": "Latest success",
+    "nextExpiry": "Next expiry",
+    "noSuccess": "No verifiable successful claim",
+    "noExpiry": "Expiry time not provided",
+    "timeUnknown": "Time not recorded",
+    "amountUnknown": "Amount not provided",
+    "unitUnknown": "Unit not provided",
+    "workbuddyCredits": "credits",
+    "points": "points",
+    "remaining": "Remaining {{amount}}",
+    "pending": "Data awaiting update"
+  },
   "qoderApplicationEntry": {
     "defaultNavigationNamed": "View and configure in {{app}}",
     "defaultNavigation": "View and configure in the application",

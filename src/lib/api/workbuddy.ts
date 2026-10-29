@@ -20,6 +20,21 @@ export interface WorkBuddyAccount {
   canClaim: boolean;
   claimState: WorkBuddyClaimState;
   credited: number | null;
+  /** Optional persisted facts from the WorkBuddy owner; absent on older snapshots. */
+  lastSuccessfulClaim?: {
+    confirmedAtMs: number | null;
+    timeSource: "localReconciled" | null;
+    credited: number | null;
+    unit: string | null;
+  } | null;
+  /** `known` requires an actual credit expiry, never a reset or activity deadline. */
+  creditExpiryStatus?: "known" | "unavailable" | "stale";
+  /** Earliest future actual expiry batch with remaining credit, when known. */
+  nextKnownCreditExpiry?: {
+    expiresAtMs: number;
+    remaining: number | null;
+    unit: string | null;
+  } | null;
   credits: {
     totalRemaining: number | null;
     nearestExpiry: number | null;
