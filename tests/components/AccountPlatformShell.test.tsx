@@ -1,4 +1,4 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { providersApi } from "@/lib/api/providers";
 import { zcodeAccountsApi } from "@/lib/api/zcodeAccounts";
@@ -12,6 +12,14 @@ import {
 } from "@/components/relay/accounts/useAccountPlatformPresence";
 import type { ServiceAccount } from "@/components/relay/accounts/useServiceAccounts";
 import { ServicesPage } from "@/components/relay/accounts/ServicesPage";
+import producerJson from "../fixtures/workbuddy/synthetic-account-views.json.txt?raw";
+import type { WorkBuddyAccount } from "@/lib/api/workbuddy";
+import type { PlatformPresenceSnapshot } from "@/components/relay/accounts/useAccountPlatformPresence";
+
+const producer = JSON.parse(producerJson) as Record<
+  "known" | "unknown" | "stale",
+  WorkBuddyAccount
+>;
 const savedServices = vi.hoisted(() => [] as ServiceAccount[]);
 const serviceRead = vi.hoisted(() => ({ error: null as Error | null }));
 const native = vi.hoisted(() =>
@@ -693,4 +701,110 @@ it("marks the retained OpenCode summary unknown when its existing service invent
   expect(
     screen.queryByText("private inventory details"),
   ).not.toBeInTheDocument();
+});
+
+it("renders the serialized WorkBuddy producer facts through IPC, inventory, query and the real account card", async () => {
+  // The producer generated these snapshots at the two recorded clocks; do not rewrite their dates.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(1800000000000);
+  let current = producer.known;
+  native.mockImplementation(async (command) =>
+    command === "list_workbuddy_accounts" ? [current] : defaultRead(command),
+  );
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const user = userEvent.setup();
+  const { unmount } = render(
+    <QueryClientProvider client={client}>
+      <ServicesPage appId="codex" onOpenAddHub={vi.fn()} onOpenApp={vi.fn()} />
+    </QueryClientProvider>,
+  );
+  const storedAccount = () =>
+    client
+      .getQueryData<PlatformPresenceSnapshot>(accountPlatformPresenceKey)
+      ?.accounts?.find(
+        (row) => row.source === "workbuddy" && row.id === current.id,
+      );
+  try {
+    const card = within(
+      await screen.findByRole("button", { name: "查看 Synthetic account" }),
+    );
+    expect(card.getByText(/本地确认时间.*\+20 积分/)).toBeVisible();
+    expect(card.getByText(/剩余 30 积分/)).toBeVisible();
+    expect(card.getByText("30")).toBeVisible();
+    expect(card.getByText("未验证")).toBeVisible();
+    expect(card.queryByText(/workbuddy:credits/)).not.toBeInTheDocument();
+    expect(storedAccount()?.snapshot).toEqual({
+      kind: "workbuddy",
+      value: producer.known,
+    });
+
+    current = producer.stale;
+    vi.setSystemTime(1800000020000);
+    await user.click(screen.getByRole("button", { name: "刷新状态" }));
+    await waitFor(() => expect(card.getByText("到期数据待更新")).toBeVisible());
+    expect(card.getByText(/本地确认时间.*\+20 积分/)).toBeVisible();
+    expect(card.queryByText(/剩余 30 积分/)).not.toBeInTheDocument();
+    expect(storedAccount()?.snapshot).toEqual({
+      kind: "workbuddy",
+      value: producer.stale,
+    });
+    expect(
+      native.mock.calls.every(([command]) =>
+        [
+          "list_workbuddy_accounts",
+          "list_workbuddy_inference_accounts",
+          "list_trae_accounts",
+          "list_minimax_code_accounts",
+          "auth_get_status",
+          "get_providers",
+          "get_zcode_account_library",
+        ].includes(command),
+      ),
+    ).toBe(true);
+  } finally {
+    unmount();
+    await client.cancelQueries();
+    client.clear();
+    vi.useRealTimers();
+  }
+});
+
+it("keeps the serialized unknown WorkBuddy producer snapshot unknown on the real overview", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(1800000000000);
+  native.mockImplementation(async (command) =>
+    command === "list_workbuddy_accounts"
+      ? [producer.unknown]
+      : defaultRead(command),
+  );
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const { unmount } = render(
+    <QueryClientProvider client={client}>
+      <ServicesPage appId="codex" onOpenAddHub={vi.fn()} onOpenApp={vi.fn()} />
+    </QueryClientProvider>,
+  );
+  try {
+    const card = within(
+      await screen.findByRole("button", { name: "查看 Synthetic account" }),
+    );
+    expect(card.getByText("暂无可核实成功领取记录")).toBeVisible();
+    expect(card.getByText("到期时间未提供")).toBeVisible();
+    expect(
+      card.queryByText(/\+20|剩余 30|本地确认时间|workbuddy:credits/),
+    ).not.toBeInTheDocument();
+    expect(
+      client
+        .getQueryData<PlatformPresenceSnapshot>(accountPlatformPresenceKey)
+        ?.accounts?.find((row) => row.source === "workbuddy")?.snapshot,
+    ).toEqual({ kind: "workbuddy", value: producer.unknown });
+  } finally {
+    unmount();
+    await client.cancelQueries();
+    client.clear();
+    vi.useRealTimers();
+  }
 });

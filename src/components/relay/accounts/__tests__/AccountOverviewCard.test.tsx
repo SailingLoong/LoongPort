@@ -1,5 +1,5 @@
-import { render, screen, within } from "@testing-library/react";
-import { expect, it } from "vitest";
+import { act, render, screen, within } from "@testing-library/react";
+import { expect, it, vi } from "vitest";
 import { AccountOverviewCard } from "../AccountOverviewCard";
 import type { PlatformAccountSummary } from "../useAccountPlatformPresence";
 
@@ -23,7 +23,7 @@ function setup(
       unavailable={unavailable}
     />,
   );
-  return within(screen.getByRole("button", { name: "查看 Example account" }));
+  return within(screen.getByRole("button", { name: `查看 ${account.label}` }));
 }
 
 it("keeps sparse legacy WorkBuddy snapshots unknown instead of crashing", () => {
@@ -98,4 +98,416 @@ it("shows a failed inventory read as unknown rather than current cached health",
   );
   expect(card.getAllByText("未知")).toHaveLength(4);
   expect(card.queryByText(/已授权|50|开启/)).not.toBeInTheDocument();
+});
+
+it("shows owner-confirmed claim and actual expiry facts", () => {
+  const now = Date.now();
+  const card = setup({
+    kind: "workbuddy",
+    value: {
+      claimState: "unconfirmed",
+      credited: 999,
+      lastSuccessfulClaim: {
+        confirmedAtMs: now - 60000,
+        timeSource: "localReconciled",
+        credited: 100,
+        unit: "points",
+      },
+      creditExpiryStatus: "known",
+      nextKnownCreditExpiry: {
+        expiresAtMs: now + 86400000,
+        remaining: 120,
+        unit: "points",
+      },
+    },
+  });
+  expect(card.getByText("最近成功")).toBeVisible();
+  expect(card.getByText("即将到期")).toBeVisible();
+  expect(card.getByText(/本地确认时间.*\+100 积分/)).toBeVisible();
+  expect(card.getByText(/剩余 120 积分/)).toBeVisible();
+  expect(card.queryByText(/\+999/)).not.toBeInTheDocument();
+});
+
+it("never turns checks, already-claimed status, balance or reset-like package dates into confirmed facts", () => {
+  const card = setup({
+    kind: "workbuddy",
+    value: {
+      claimState: "alreadyClaimed",
+      credited: 900,
+      credits: {
+        totalRemaining: 1234,
+        nearestExpiry: Date.now() + 100000,
+        packages: [{ expireAt: Date.now() + 100000, remaining: 77 }],
+      },
+    },
+  });
+  expect(card.getByText("暂无可核实成功领取记录")).toBeVisible();
+  expect(card.getByText("到期时间未提供")).toBeVisible();
+  expect(card.queryByText(/\+900|剩余 77/)).not.toBeInTheDocument();
+});
+
+it("shows old confirmed WorkBuddy and MiniMax amounts without inventing a time or unit", () => {
+  const wb = setup({
+    kind: "workbuddy",
+    value: {
+      claimState: "claimed",
+      credited: 25,
+      lastCheckedAt: 1900000000000,
+    },
+  });
+  expect(wb.getByText(/时间未记录.*\+25 单位未提供/)).toBeVisible();
+  const mm = setup(
+    {
+      kind: "minimax",
+      value: {
+        operation: {
+          status: "claimed",
+          startedAt: 1900000000000,
+          creditAmount: 50,
+        },
+        entitlement: { tokenPlanExpiresAt: 1900000000000 },
+      },
+    },
+    { id: "minimax", label: "MiniMax" },
+  );
+  expect(mm.getByText(/时间未记录.*\+50 单位未提供/)).toBeVisible();
+  expect(mm.getByText("到期时间未提供")).toBeVisible();
+});
+
+it.each(["alreadyClaimed", "pending", "unknown"])(
+  "does not treat MiniMax %s as success",
+  (status) => {
+    const card = setup({
+      kind: "minimax",
+      value: { operation: { status, startedAt: Date.now(), creditAmount: 50 } },
+    });
+    expect(card.getByText("暂无可核实成功领取记录")).toBeVisible();
+  },
+);
+
+it("keeps success time, value and unit independently unknown", () => {
+  const card = setup({
+    kind: "workbuddy",
+    value: {
+      lastSuccessfulClaim: {
+        confirmedAtMs: Date.now() - 1000,
+        timeSource: null,
+        credited: 25,
+        unit: null,
+      },
+    },
+  });
+  expect(card.getByText("时间未记录 · +25 单位未提供")).toBeVisible();
+});
+
+it("keeps a known date without an amount and supports a supplied unit", () => {
+  const card = setup({
+    kind: "workbuddy",
+    value: {
+      lastSuccessfulClaim: {
+        confirmedAtMs: Date.now() - 1000,
+        timeSource: "localReconciled",
+        credited: null,
+        unit: null,
+      },
+      creditExpiryStatus: "known",
+      nextKnownCreditExpiry: {
+        expiresAtMs: Date.now() + 10000,
+        remaining: null,
+        unit: null,
+      },
+    },
+  });
+  expect(card.getByText(/本地确认时间.*额度未提供/)).toBeVisible();
+  expect(card.getByText(/剩余 额度未提供/)).toBeVisible();
+});
+
+it.each(["stale", "known"])(
+  "shows expiry as pending for %s data without a valid future batch",
+  (status) => {
+    const card = setup({
+      kind: "workbuddy",
+      value: { creditExpiryStatus: status, nextKnownCreditExpiry: null },
+    });
+    expect(card.getByText("到期数据待更新")).toBeVisible();
+  },
+);
+
+it("does not display expiry data when its owner says unavailable", () => {
+  const card = setup({
+    kind: "workbuddy",
+    value: {
+      creditExpiryStatus: "unavailable",
+      nextKnownCreditExpiry: {
+        expiresAtMs: Date.now() + 10000,
+        remaining: 99,
+        unit: "points",
+      },
+    },
+  });
+  expect(card.getByText("到期时间未提供")).toBeVisible();
+  expect(card.queryByText(/剩余 99/)).not.toBeInTheDocument();
+});
+
+it.each([
+  { expiresAtMs: Date.now() - 1000, remaining: 5, unit: "points" },
+  { expiresAtMs: Number.NaN, remaining: 5, unit: "points" },
+  { expiresAtMs: Date.now() + 10000, remaining: 0, unit: "points" },
+  { expiresAtMs: Date.now() + 10000, remaining: -1, unit: "points" },
+])(
+  "does not show an expired, malformed or depleted batch",
+  (nextKnownCreditExpiry) => {
+    const card = setup({
+      kind: "workbuddy",
+      value: { creditExpiryStatus: "known", nextKnownCreditExpiry },
+    });
+    expect(card.getByText("到期数据待更新")).toBeVisible();
+  },
+);
+
+it("stops displaying a future batch when its expiry passes without claiming or refreshing", () => {
+  vi.useFakeTimers();
+  try {
+    const card = setup({
+      kind: "workbuddy",
+      value: {
+        creditExpiryStatus: "known",
+        nextKnownCreditExpiry: {
+          expiresAtMs: Date.now() + 1000,
+          remaining: 42,
+          unit: "points",
+        },
+      },
+    });
+    expect(card.getByText(/剩余 42 积分/)).toBeVisible();
+    act(() => vi.advanceTimersByTime(1001));
+    expect(card.getByText("到期数据待更新")).toBeVisible();
+    expect(card.queryByText(/剩余 42/)).not.toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("hides cached facts when the owner read is unavailable", () => {
+  const card = setup(
+    {
+      kind: "workbuddy",
+      value: {
+        claimState: "claimed",
+        credited: 25,
+        lastSuccessfulClaim: {
+          confirmedAtMs: Date.now() - 1000,
+          timeSource: "localReconciled",
+          credited: 100,
+          unit: "points",
+        },
+        creditExpiryStatus: "known",
+        nextKnownCreditExpiry: {
+          expiresAtMs: Date.now() + 10000,
+          remaining: 120,
+          unit: "points",
+        },
+      },
+    },
+    {},
+    true,
+  );
+  expect(card.getByText("最近成功")).toBeVisible();
+  expect(card.getByText("即将到期")).toBeVisible();
+  expect(card.queryByText(/\+100|剩余 120|\+25/)).not.toBeInTheDocument();
+});
+
+it.each([
+  ["zh", "最近成功", "即将到期", "暂无可核实成功领取记录", "到期时间未提供"],
+  ["zh-TW", "最近成功", "即將到期", "暫無可核實成功領取紀錄", "到期時間未提供"],
+  [
+    "en",
+    "Latest success",
+    "Next expiry",
+    "No verifiable successful claim",
+    "Expiry time not provided",
+  ],
+  [
+    "ja",
+    "直近の成功",
+    "次の期限",
+    "確認できる受取成功の記録なし",
+    "有効期限は未提供",
+  ],
+])(
+  "renders the new reward rows in %s",
+  async (language, lastLabel, expiryLabel, noSuccess, noExpiry) => {
+    const i18next = (await import("i18next")).default.createInstance();
+    const { I18nextProvider } = await import("react-i18next");
+    const resources = {
+      zh: (await import("@/i18n/locales/zh.json")).default,
+      "zh-TW": (await import("@/i18n/locales/zh-TW.json")).default,
+      en: (await import("@/i18n/locales/en.json")).default,
+      ja: (await import("@/i18n/locales/ja.json")).default,
+    };
+    await i18next.init({
+      lng: language,
+      resources: Object.fromEntries(
+        Object.entries(resources).map(([key, translation]) => [
+          key,
+          { translation },
+        ]),
+      ),
+      interpolation: { escapeValue: false },
+    });
+    const account = {
+      id: "example",
+      label: "Example account",
+      source: "workbuddy",
+      platform: "workbuddy",
+      snapshot: { kind: "workbuddy", value: {} },
+    } as unknown as PlatformAccountSummary;
+    render(
+      <I18nextProvider i18n={i18next}>
+        <AccountOverviewCard account={account} onOpen={() => {}} />
+      </I18nextProvider>,
+    );
+    for (const text of [lastLabel, expiryLabel, noSuccess, noExpiry])
+      expect(screen.getByText(text)).toBeVisible();
+  },
+);
+
+it("cancels the old expiry display timer when the account changes", () => {
+  vi.useFakeTimers();
+  try {
+    const account = {
+      id: "old",
+      label: "Old",
+      source: "workbuddy",
+      platform: "workbuddy",
+      snapshot: {
+        kind: "workbuddy",
+        value: {
+          creditExpiryStatus: "known",
+          nextKnownCreditExpiry: {
+            expiresAtMs: Date.now() + 1000,
+            remaining: 42,
+            unit: "points",
+          },
+        },
+      },
+    } as unknown as PlatformAccountSummary;
+    const { rerender } = render(
+      <AccountOverviewCard account={account} onOpen={() => {}} />,
+    );
+    expect(screen.getByText(/剩余 42 积分/)).toBeVisible();
+    const replacement = {
+      ...account,
+      id: "new",
+      label: "New",
+      snapshot: {
+        kind: "workbuddy",
+        value: { creditExpiryStatus: "unavailable" },
+      },
+    } as unknown as PlatformAccountSummary;
+    rerender(<AccountOverviewCard account={replacement} onOpen={() => {}} />);
+    expect(vi.getTimerCount()).toBe(0);
+    act(() => vi.advanceTimersByTime(1001));
+    expect(screen.getByText("到期时间未提供")).toBeVisible();
+    expect(screen.queryByText(/剩余 42/)).not.toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("localizes the confirmed WorkBuddy credit unit without changing unknown units", () => {
+  const card = setup({
+    kind: "workbuddy",
+    value: {
+      lastSuccessfulClaim: {
+        confirmedAtMs: null,
+        timeSource: null,
+        credited: 100,
+        unit: "workbuddy:credits",
+      },
+      creditExpiryStatus: "known",
+      nextKnownCreditExpiry: {
+        expiresAtMs: Date.now() + 86400000,
+        remaining: 120,
+        unit: "workbuddy:credits",
+      },
+    },
+  });
+  expect(card.getByText(/\+100 积分/)).toBeVisible();
+  expect(card.getByText(/剩余 120 积分/)).toBeVisible();
+  expect(card.queryByText(/workbuddy:credits/)).not.toBeInTheDocument();
+});
+
+it("leaves an unrecognized explicitly supplied unit unchanged", () => {
+  const card = setup({
+    kind: "workbuddy",
+    value: {
+      lastSuccessfulClaim: {
+        confirmedAtMs: null,
+        timeSource: null,
+        credited: 100,
+        unit: "example:tokens",
+      },
+    },
+  });
+  expect(card.getByText(/\+100 example:tokens/)).toBeVisible();
+});
+
+it.each([
+  ["zh", "积分"],
+  ["zh-TW", "點數"],
+  ["en", "credits"],
+  ["ja", "クレジット"],
+])("displays the WorkBuddy unit in %s", async (language, unit) => {
+  const i18next = (await import("i18next")).default.createInstance();
+  const { I18nextProvider } = await import("react-i18next");
+  const resources = {
+    zh: (await import("@/i18n/locales/zh.json")).default,
+    "zh-TW": (await import("@/i18n/locales/zh-TW.json")).default,
+    en: (await import("@/i18n/locales/en.json")).default,
+    ja: (await import("@/i18n/locales/ja.json")).default,
+  };
+  await i18next.init({
+    lng: language,
+    resources: Object.fromEntries(
+      Object.entries(resources).map(([key, translation]) => [
+        key,
+        { translation },
+      ]),
+    ),
+    interpolation: { escapeValue: false },
+  });
+  const account = {
+    id: "example",
+    label: "Example",
+    source: "workbuddy",
+    platform: "workbuddy",
+    snapshot: {
+      kind: "workbuddy",
+      value: {
+        lastSuccessfulClaim: {
+          confirmedAtMs: null,
+          timeSource: null,
+          credited: 100,
+          unit: "workbuddy:credits",
+        },
+        creditExpiryStatus: "known",
+        nextKnownCreditExpiry: {
+          expiresAtMs: Date.now() + 86400000,
+          remaining: 120,
+          unit: "workbuddy:credits",
+        },
+      },
+    },
+  } as unknown as PlatformAccountSummary;
+  render(
+    <I18nextProvider i18n={i18next}>
+      <AccountOverviewCard account={account} onOpen={() => {}} />
+    </I18nextProvider>,
+  );
+  expect(
+    screen.getByText((text) => text.includes(`+100 ${unit}`)),
+  ).toBeVisible();
+  expect(screen.getByText(new RegExp(`120 ${unit}`))).toBeVisible();
+  expect(screen.queryByText(/workbuddy:credits/)).not.toBeInTheDocument();
 });

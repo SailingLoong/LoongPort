@@ -205,7 +205,7 @@ pub(crate) async fn verify(case: &str) {
         }
         #[cfg(unix)]
         "zcode" => return crate::proxy::zcode_shared_fixture::verify("plaintext_two_apps").await,
-        "minimax" | "workbuddy" => {}
+        "minimax" | "workbuddy" | "workbuddy_restore" => {}
         _ => panic!("unknown shared-storage fixture: {case}"),
     }
     let _home = TestHome::new().unwrap();
@@ -230,7 +230,10 @@ pub(crate) async fn verify(case: &str) {
     let state = crate::store::AppState::new(db).unwrap();
     match case {
         "minimax" => crate::minimax_code::shared_flow_fixture::verify(&state, "ordered").await,
-        "workbuddy" => crate::workbuddy::shared_routing_fixture::verify(&state, "ordered").await,
+        "workbuddy" => crate::workbuddy::shared_routing_fixture::verify(&state, "mixed").await,
+        "workbuddy_restore" => {
+            crate::workbuddy::shared_routing_fixture::verify(&state, "restored_mixed").await
+        }
         _ => unreachable!(),
     }
 }

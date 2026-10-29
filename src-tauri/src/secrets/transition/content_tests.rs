@@ -679,6 +679,11 @@ pub(crate) async fn verify_pool_restore(case: &str) {
     pool_restore_consumer_tests::verify(case).await;
 }
 
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+pub(crate) async fn restore_pool_fixture(db: Arc<Database>, group_id: &str) -> Arc<Database> {
+    pool_restore_consumer_tests::restore_group(db, group_id).await
+}
+
 #[cfg(test)]
 mod native_content_admission {
     use crate::app_store::isolated_scope::{

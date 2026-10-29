@@ -1,4 +1,19 @@
 {
+  "accountRewardGlance": {
+    "confirmationTime": "ローカル確認時刻",
+    "expiryPending": "期限データの更新待ち",
+    "lastSuccess": "直近の成功",
+    "nextExpiry": "次の期限",
+    "noSuccess": "確認できる受取成功の記録なし",
+    "noExpiry": "有効期限は未提供",
+    "timeUnknown": "時刻は未記録",
+    "amountUnknown": "額は未提供",
+    "unitUnknown": "単位は未提供",
+    "workbuddyCredits": "クレジット",
+    "points": "ポイント",
+    "remaining": "残り {{amount}}",
+    "pending": "データ更新待ち"
+  },
   "claimSettings": {
     "title": "自動受取の管理",
     "heading": "自動受取",

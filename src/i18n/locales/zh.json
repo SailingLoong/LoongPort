@@ -1,4 +1,19 @@
 {
+  "accountRewardGlance": {
+    "confirmationTime": "本地确认时间",
+    "expiryPending": "到期数据待更新",
+    "lastSuccess": "最近成功",
+    "nextExpiry": "即将到期",
+    "noSuccess": "暂无可核实成功领取记录",
+    "noExpiry": "到期时间未提供",
+    "timeUnknown": "时间未记录",
+    "amountUnknown": "额度未提供",
+    "unitUnknown": "单位未提供",
+    "workbuddyCredits": "积分",
+    "points": "积分",
+    "remaining": "剩余 {{amount}}",
+    "pending": "数据待更新"
+  },
   "claimSettings": {
     "title": "自动领取管理",
     "heading": "自动领取",

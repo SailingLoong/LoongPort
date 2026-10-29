@@ -300,6 +300,56 @@ pub(crate) async fn verify(state: &AppState, case: &str) {
         &members,
     )
     .unwrap();
+    let restored_state = if case == "restored_mixed" {
+        for app in [AppType::Claude, AppType::Codex] {
+            groups::set_target(
+                &mut state.db.conn.lock().unwrap(),
+                app.as_str(),
+                groups::RouteTarget::OrderedGroup {
+                    group_id: group.id.clone(),
+                },
+                None,
+                Some(group.revision),
+            )
+            .unwrap();
+        }
+        let bindings = groups::bindings(&state.db.conn.lock().unwrap()).unwrap();
+        let providers = [AppType::Claude, AppType::Codex].map(|app| {
+            ["workbuddy", "minimax_code"].map(|platform| {
+                state
+                    .db
+                    .get_provider_by_id(&format!("{platform}-{}", app.as_str()), app.as_str())
+                    .unwrap()
+                    .unwrap()
+            })
+        });
+        let db = crate::secrets::transition::content_tests::restore_pool_fixture(
+            state.db.clone(),
+            &group.id,
+        )
+        .await;
+        assert_eq!(
+            groups::bindings(&db.conn.lock().unwrap()).unwrap(),
+            bindings
+        );
+        for (index, app) in [AppType::Claude, AppType::Codex].into_iter().enumerate() {
+            for (position, platform) in ["workbuddy", "minimax_code"].into_iter().enumerate() {
+                let restored = db
+                    .get_provider_by_id(&format!("{platform}-{}", app.as_str()), app.as_str())
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    serde_json::to_value(restored).unwrap(),
+                    serde_json::to_value(&providers[index][position]).unwrap()
+                );
+            }
+        }
+        crate::settings::unlock_settings_for_test(db.secrets.clone()).unwrap();
+        Some(AppState::new(db).unwrap())
+    } else {
+        None
+    };
+    let state = restored_state.as_ref().unwrap_or(state);
     let calls = Arc::new(Mutex::new(Vec::new()));
     let wc = calls.clone();
     let mc = calls.clone();
@@ -336,9 +386,24 @@ pub(crate) async fn verify(state: &AppState, case: &str) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let wt = WorkBuddyTransport::loopback(state.db.secret_session(), &origin).unwrap();
-    let mt = crate::minimax_code::inference::FixtureTransport::loopback(&mm_owner, &origin)
-        .await
-        .unwrap();
+    let fresh_owner = if case == "restored_mixed" {
+        Some(
+            crate::minimax_code::inference::FixtureTransport::reopen_owner(
+                state.db.secret_session(),
+                "synthetic-mm-b",
+            )
+            .await
+            .unwrap(),
+        )
+    } else {
+        None
+    };
+    let mt = crate::minimax_code::inference::FixtureTransport::loopback(
+        fresh_owner.as_ref().unwrap_or(&mm_owner),
+        &origin,
+    )
+    .await
+    .unwrap();
     if case == "refresh" {
         WorkBuddyTransport::mutate_fixture_grant(
             state.db.secret_session(),
@@ -528,18 +593,28 @@ pub(crate) async fn verify(state: &AppState, case: &str) {
                 group_id: group.id.clone(),
             }
         };
-        groups::set_target(
-            &mut state.db.conn.lock().unwrap(),
-            app.as_str(),
-            target.clone(),
-            None,
-            if matches!(target, groups::RouteTarget::OrderedGroup { .. }) {
-                Some(group.revision)
-            } else {
-                None
-            },
-        )
-        .unwrap();
+        if case != "restored_mixed" {
+            groups::set_target(
+                &mut state.db.conn.lock().unwrap(),
+                app.as_str(),
+                target.clone(),
+                None,
+                if matches!(target, groups::RouteTarget::OrderedGroup { .. }) {
+                    Some(group.revision)
+                } else {
+                    None
+                },
+            )
+            .unwrap();
+        } else {
+            assert_eq!(
+                groups::binding(&state.db.conn.lock().unwrap(), app.as_str())
+                    .unwrap()
+                    .unwrap()
+                    .target,
+                target
+            );
+        }
         let proxy = crate::proxy::server::ProxyServer::new(
             crate::proxy::ProxyConfig::default(),
             state.db.clone(),
@@ -609,7 +684,10 @@ pub(crate) async fn verify(state: &AppState, case: &str) {
         let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
             .unwrap();
-        if matches!(case, "mixed" | "paused_group" | "wb_skip" | "mm_manual") {
+        if matches!(
+            case,
+            "mixed" | "restored_mixed" | "paused_group" | "wb_skip" | "mm_manual"
+        ) {
             assert_eq!(
                 status,
                 StatusCode::OK,
@@ -633,7 +711,9 @@ pub(crate) async fn verify(state: &AppState, case: &str) {
     state.proxy_service.stop_with_restore().await.unwrap();
     server.abort();
     let expected = match case {
-        "mixed" | "paused_group" | "mm_manual" => vec!["minimax_code", "minimax_code"],
+        "mixed" | "restored_mixed" | "paused_group" | "mm_manual" => {
+            vec!["minimax_code", "minimax_code"]
+        }
         "wb_skip" | "revive" | "replace" => vec!["minimax_code"],
         _ => vec![],
     };

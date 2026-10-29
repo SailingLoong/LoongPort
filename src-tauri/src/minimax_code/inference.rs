@@ -692,6 +692,37 @@ pub(crate) struct FixtureTransport {
 }
 #[cfg(any(test, feature = "test-hooks"))]
 impl FixtureTransport {
+    #[cfg(all(feature = "gui", feature = "test-hooks"))]
+    pub(crate) async fn reopen_owner(
+        session: &SecretSession,
+        account_id: &str,
+    ) -> Result<FixtureOwner, Failure> {
+        if !account_id.starts_with("synthetic-") {
+            return Err(Failure::UnsupportedContext);
+        }
+        let root = session
+            .root()
+            .canonicalize()
+            .map_err(|_| Failure::StorageUnavailable)?;
+        catalog::access(session, None, |document, binding| {
+            if !document
+                .accounts
+                .iter()
+                .any(|account| account.id == account_id)
+            {
+                return Err(Failure::UnsupportedContext);
+            }
+            Ok((
+                FixtureOwner {
+                    root,
+                    binding: binding.clone(),
+                    account_ids: Arc::new(vec![account_id.to_owned()]),
+                },
+                false,
+            ))
+        })
+        .await
+    }
     pub(crate) async fn loopback(owner: &FixtureOwner, origin: &str) -> Result<Self, Failure> {
         let url = url::Url::parse(origin).map_err(|_| Failure::UnsupportedContext)?;
         if url.scheme() != "http"
