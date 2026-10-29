@@ -26,7 +26,7 @@ pub(crate) struct CurrentCaptures {
     activation_available: bool,
 }
 impl CurrentCaptures {
-    #[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(test, unix), all(target_os = "macos", target_arch = "aarch64")))]
     pub(super) fn unknown(accounts: Vec<CapturedAccount>) -> Self {
         Self {
             accounts,
@@ -39,7 +39,7 @@ impl CurrentCaptures {
 // This is the concrete capture scheduling boundary: the selector and vault
 // binding belong to the submitted action, before the blocking worker queues.
 #[cfg(any(
-    test,
+    all(test, unix),
     all(feature = "gui", target_os = "macos", target_arch = "aarch64")
 ))]
 pub(super) fn schedule_capture<R: Send + 'static>(
@@ -86,7 +86,7 @@ pub(crate) async fn capture(
     {
         let runtime = tokio::runtime::Handle::current();
         let worker_db = db.clone();
-        return schedule_capture(
+        schedule_capture(
             db.secret_session(),
             || {
                 crate::secrets::protection::generation::capture_current_selection()
@@ -116,7 +116,7 @@ pub(crate) async fn capture(
             },
         )?
         .await
-        .map_err(|_| Failure::Io)?;
+        .map_err(|_| Failure::Io)?
     }
     #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
     {
@@ -144,7 +144,7 @@ pub(crate) async fn list(
         }
         .list_captures()
         .await?;
-        return Ok(CurrentCaptures::unknown(accounts));
+        Ok(CurrentCaptures::unknown(accounts))
     }
     #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
     {

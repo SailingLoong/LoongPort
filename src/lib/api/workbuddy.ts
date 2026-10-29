@@ -1,4 +1,162 @@
 import { invoke } from "@tauri-apps/api/core";
+export interface WorkBuddyNativeSelectionKey {
+  id: string;
+  generation: number;
+  incarnation: string;
+}
+export interface WorkBuddyNativeCaptureAccount {
+  selection: WorkBuddyNativeSelectionKey;
+  label: string;
+  realm: string;
+}
+export interface WorkBuddyNativeCaptureInput {
+  label: string;
+  expected?: WorkBuddyNativeSelectionKey | null;
+}
+export interface WorkBuddyNativeCaptureSaved {
+  state: "saved";
+  account: WorkBuddyNativeCaptureAccount;
+  activationAvailable: false;
+}
+export interface WorkBuddyNativeCaptureList {
+  accounts: WorkBuddyNativeCaptureAccount[];
+  /** A catalog snapshot never proves the outcome of a lost request. */
+  requestOutcome: "unknown";
+  activationAvailable: false;
+}
+const nativeCaptureFailures = [
+  "unsafePath",
+  "io",
+  "journal",
+  "sourceChanged",
+  "recoveryRequired",
+  "requestConflict",
+  "rolledBack",
+] as const;
+export type WorkBuddyNativeCaptureFailure =
+  | (typeof nativeCaptureFailures)[number]
+  | "invalidInput"
+  | "invalidResponse"
+  | "unknown"
+  | "cancelled";
+/** Local errors retain no transport payload or credentials. */
+export class WorkBuddyNativeCaptureError extends Error {
+  constructor(public readonly code: WorkBuddyNativeCaptureFailure) {
+    super(code);
+    this.name = "WorkBuddyNativeCaptureError";
+  }
+}
+function nativeRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+function nativeSelection(value: unknown): WorkBuddyNativeSelectionKey {
+  const v = nativeRecord(value);
+  if (
+    typeof v.id !== "string" ||
+    !v.id.trim() ||
+    typeof v.generation !== "number" ||
+    !Number.isSafeInteger(v.generation) ||
+    v.generation < 0 ||
+    typeof v.incarnation !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      v.incarnation,
+    )
+  )
+    throw new WorkBuddyNativeCaptureError("invalidResponse");
+  return { id: v.id, generation: v.generation, incarnation: v.incarnation };
+}
+function nativeCaptureAccount(value: unknown): WorkBuddyNativeCaptureAccount {
+  const v = nativeRecord(value);
+  if (typeof v.label !== "string" || typeof v.realm !== "string")
+    throw new WorkBuddyNativeCaptureError("invalidResponse");
+  return {
+    selection: nativeSelection(v.selection),
+    label: v.label,
+    realm: v.realm,
+  };
+}
+function nativeCaptureInput(value: WorkBuddyNativeCaptureInput) {
+  const v = nativeRecord(value);
+  try {
+    if (
+      typeof v.label !== "string" ||
+      Object.keys(v).some((key) => !["label", "expected"].includes(key))
+    )
+      throw new Error();
+    if (
+      v.expected != null &&
+      Object.keys(nativeRecord(v.expected)).some(
+        (key) => !["id", "generation", "incarnation"].includes(key),
+      )
+    )
+      throw new Error();
+    return {
+      label: v.label,
+      expected: v.expected == null ? null : nativeSelection(v.expected),
+    };
+  } catch {
+    throw new WorkBuddyNativeCaptureError("invalidInput");
+  }
+}
+/** Abort stops this caller's wait only. It never cancels/replays the backend worker. */
+function nativeCaptureRequest<T>(
+  command: string,
+  args: Record<string, unknown> | undefined,
+  decode: (value: unknown) => T,
+  signal?: AbortSignal,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (operation: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", cancel);
+      operation();
+    };
+    const cancel = () =>
+      finish(() => reject(new WorkBuddyNativeCaptureError("cancelled")));
+    if (signal?.aborted) {
+      cancel();
+      return;
+    }
+    signal?.addEventListener("abort", cancel, { once: true });
+    const failed = (cause: unknown) => {
+      const message =
+        typeof cause === "string"
+          ? cause
+          : cause instanceof Error
+            ? cause.message
+            : undefined;
+      const code =
+        nativeCaptureFailures.find((value) => value === message) ?? "unknown";
+      finish(() => reject(new WorkBuddyNativeCaptureError(code)));
+    };
+    try {
+      const pending =
+        args === undefined
+          ? invoke<unknown>(command)
+          : invoke<unknown>(command, args);
+      pending
+        .then((value) => {
+          if (settled) return;
+          try {
+            const decoded = decode(value);
+            finish(() => resolve(decoded));
+          } catch {
+            finish(() =>
+              reject(new WorkBuddyNativeCaptureError("invalidResponse")),
+            );
+          }
+        })
+        .catch(failed);
+    } catch (cause) {
+      failed(cause);
+    }
+  });
+}
+
 export type WorkBuddyClaimState =
   | "unconfirmed"
   | "available"
@@ -106,4 +264,43 @@ export const workbuddyApi = {
     invoke<{ state: "saved" | "waiting" }>("finish_workbuddy_authorization", {
       flowId,
     }),
+  captureNative: async (
+    input: WorkBuddyNativeCaptureInput,
+    signal?: AbortSignal,
+  ) =>
+    nativeCaptureRequest<WorkBuddyNativeCaptureSaved>(
+      "capture_workbuddy_native_account",
+      { input: nativeCaptureInput(input) },
+      (value) => {
+        const v = nativeRecord(value);
+        if (v.state !== "saved" || v.activationAvailable !== false)
+          throw new Error();
+        return {
+          state: "saved",
+          account: nativeCaptureAccount(v.account),
+          activationAvailable: false,
+        };
+      },
+      signal,
+    ),
+  listNativeCaptures: (signal?: AbortSignal) =>
+    nativeCaptureRequest<WorkBuddyNativeCaptureList>(
+      "list_workbuddy_native_captures",
+      undefined,
+      (value) => {
+        const v = nativeRecord(value);
+        if (
+          !Array.isArray(v.accounts) ||
+          v.requestOutcome !== "unknown" ||
+          v.activationAvailable !== false
+        )
+          throw new Error();
+        return {
+          accounts: v.accounts.map(nativeCaptureAccount),
+          requestOutcome: "unknown",
+          activationAvailable: false,
+        };
+      },
+      signal,
+    ),
 };
