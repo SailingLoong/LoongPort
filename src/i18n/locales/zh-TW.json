@@ -1,4 +1,19 @@
 {
+  "accountRewardGlance": {
+    "confirmationTime": "本地確認時間",
+    "expiryPending": "到期資料待更新",
+    "lastSuccess": "最近成功",
+    "nextExpiry": "即將到期",
+    "noSuccess": "暫無可核實成功領取紀錄",
+    "noExpiry": "到期時間未提供",
+    "timeUnknown": "時間未記錄",
+    "amountUnknown": "額度未提供",
+    "unitUnknown": "單位未提供",
+    "workbuddyCredits": "點數",
+    "points": "點數",
+    "remaining": "剩餘 {{amount}}",
+    "pending": "資料待更新"
+  },
   "qoderApplicationEntry": {
     "defaultNavigationNamed": "前往 {{app}} 查看與設定",
     "defaultNavigation": "前往應用程式查看與設定",

@@ -1,0 +1,99 @@
+{
+  "known": {
+    "generation": 0,
+    "autoClaimEnabled": false,
+    "autoClaimRevision": 0,
+    "autoClaimPolicyVersion": 1,
+    "canSetAutomatic": true,
+    "autoClaimBlocked": false,
+    "id": "74f462c9f0ce4e8a1db04c6192a133a0dc475cb049654314ccdb9ba16f1564c2",
+    "label": "Synthetic account",
+    "credits": {
+      "totalRemaining": 30.0,
+      "nearestExpiry": 1800000010000,
+      "updatedAt": 1800000000000,
+      "packages": [
+        {
+          "id": "synthetic-credit-batch",
+          "name": "",
+          "remaining": 30.0,
+          "expireAt": 1800000010000
+        }
+      ]
+    },
+    "claimState": "claimed",
+    "credited": 20.0,
+    "canRefresh": true,
+    "canClaim": false,
+    "lastSuccessfulClaim": {
+      "confirmedAtMs": 1800000000000,
+      "timeSource": "localReconciled",
+      "credited": 20.0,
+      "unit": "workbuddy:credits"
+    },
+    "creditExpiryStatus": "known",
+    "nextKnownCreditExpiry": {
+      "expiresAtMs": 1800000010000,
+      "remaining": 30.0,
+      "unit": "workbuddy:credits"
+    }
+  },
+  "unknown": {
+    "generation": 0,
+    "autoClaimEnabled": false,
+    "autoClaimRevision": 0,
+    "autoClaimPolicyVersion": 1,
+    "canSetAutomatic": true,
+    "autoClaimBlocked": false,
+    "id": "70818d397ea2f2385db8dba080cf15a736fecdd9d7376abf8d9c82e4908a4de3",
+    "label": "Synthetic account",
+    "credits": {
+      "totalRemaining": null,
+      "nearestExpiry": null,
+      "updatedAt": null,
+      "packages": []
+    },
+    "claimState": "unconfirmed",
+    "credited": null,
+    "canRefresh": true,
+    "canClaim": true,
+    "lastSuccessfulClaim": null,
+    "creditExpiryStatus": "unavailable",
+    "nextKnownCreditExpiry": null
+  },
+  "stale": {
+    "generation": 0,
+    "autoClaimEnabled": false,
+    "autoClaimRevision": 0,
+    "autoClaimPolicyVersion": 1,
+    "canSetAutomatic": true,
+    "autoClaimBlocked": false,
+    "id": "74f462c9f0ce4e8a1db04c6192a133a0dc475cb049654314ccdb9ba16f1564c2",
+    "label": "Synthetic account",
+    "credits": {
+      "totalRemaining": 30.0,
+      "nearestExpiry": 1800000010000,
+      "updatedAt": 1800000000000,
+      "packages": [
+        {
+          "id": "synthetic-credit-batch",
+          "name": "",
+          "remaining": 30.0,
+          "expireAt": 1800000010000
+        }
+      ]
+    },
+    "claimState": "claimed",
+    "credited": 20.0,
+    "canRefresh": true,
+    "canClaim": false,
+    "lastSuccessfulClaim": {
+      "confirmedAtMs": 1800000000000,
+      "timeSource": "localReconciled",
+      "credited": 20.0,
+      "unit": "workbuddy:credits"
+    },
+    "creditExpiryStatus": "stale",
+    "nextKnownCreditExpiry": null
+  }
+}
