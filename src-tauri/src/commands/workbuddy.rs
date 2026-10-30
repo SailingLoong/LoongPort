@@ -257,3 +257,52 @@ pub(crate) async fn inspect_workbuddy_native_recovery(
 > {
     crate::workbuddy::native_activation::recovery_state(state.db.secret_session()).await
 }
+
+#[tauri::command]
+pub(crate) async fn prepare_workbuddy_native_attachment(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<crate::workbuddy::native_attachment::View, crate::workbuddy::native_attachment::Reason>
+{
+    crate::workbuddy::native_attachment::prepare(
+        state.workbuddy_native_attachment.clone(),
+        state.db.clone(),
+        id,
+    )
+    .await
+}
+#[tauri::command]
+pub(crate) async fn confirm_workbuddy_native_attachment(
+    state: State<'_, AppState>,
+    flow_id: String,
+) -> Result<crate::workbuddy::native_attachment::View, crate::workbuddy::native_attachment::Reason>
+{
+    crate::workbuddy::native_attachment::confirm(
+        state.workbuddy_native_attachment.clone(),
+        state.db.clone(),
+        flow_id,
+    )
+    .await
+}
+#[tauri::command]
+pub(crate) fn inspect_workbuddy_native_attachment(
+    state: State<'_, AppState>,
+    flow_id: Option<String>,
+) -> crate::workbuddy::native_attachment::View {
+    crate::workbuddy::native_attachment::inspect(
+        &state.workbuddy_native_attachment,
+        &state.db.secrets,
+        flow_id.as_deref(),
+    )
+}
+#[tauri::command]
+pub(crate) fn cancel_workbuddy_native_attachment(
+    state: State<'_, AppState>,
+    flow_id: String,
+) -> crate::workbuddy::native_attachment::View {
+    crate::workbuddy::native_attachment::cancel(
+        &state.workbuddy_native_attachment,
+        &state.db.secrets,
+        &flow_id,
+    )
+}

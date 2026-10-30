@@ -1,9 +1,28 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, expect, it, vi } from "vitest";
 import { StrictMode } from "react";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  render as rtlRender,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { WorkBuddyAccounts } from "@/components/workbuddy/WorkBuddyAccounts";
 import type { WorkBuddyAccount } from "@/lib/api/workbuddy";
+const render = (ui: React.ReactElement) => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return rtlRender(ui, {
+    // Preserve the original root StrictMode effect-restart semantics.
+    reactStrictMode: ui.type === StrictMode,
+    wrapper: ({ children }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    ),
+  });
+};
 const api = vi.hoisted(() => ({
   previewNative: vi.fn(),
   automaticStatus: vi.fn(),

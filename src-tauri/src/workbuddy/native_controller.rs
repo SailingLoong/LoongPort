@@ -485,3 +485,89 @@ impl Controller<'_> {
 #[cfg(all(test, unix))]
 #[path = "native_controller_tests.rs"]
 mod tests;
+
+/// Opaque one-use attachment plan: original row FD plus reviewed observation.
+/// This is neither native activation admission nor an account/journal owner.
+#[cfg(any(
+    all(test, unix),
+    all(target_os = "macos", target_arch = "aarch64", feature = "gui")
+))]
+pub(super) struct AttachPlan {
+    capability: super::native_source::ApiAttachCapability,
+    observation: super::native_source::Observation,
+    root: PathBuf,
+    context: NativeContext,
+}
+/// The concrete factory's held pins survive the UI review; callers cannot forge
+/// a source from a renderer-provided path, realm, or stored credential.
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "gui"))]
+pub(super) struct InstalledAttachPlan {
+    plan: AttachPlan,
+    source: install::Source,
+}
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "gui"))]
+impl InstalledAttachPlan {
+    pub(super) fn review(&self) -> (&str, &str, &str, std::time::Instant) {
+        self.plan.capability.review()
+    }
+}
+#[cfg(any(
+    all(test, unix),
+    all(target_os = "macos", target_arch = "aarch64", feature = "gui")
+))]
+impl Controller<'_> {
+    pub(super) async fn prepare_attach(
+        &self,
+        id: &str,
+        source: &mut impl ControlledSource,
+    ) -> Result<AttachPlan, Failure> {
+        let (root, context, _) = scope(source)?;
+        let observation = super::native_source::Observation::read(
+            &root.join("workbuddy-desktop.info"),
+            &context,
+        )?;
+        let capability = self.catalog.prepare_api_attach(id).await?;
+        // Recheck the original pins and observed pair after waiting for the owner.
+        verify_bound(source, &root, &context)?;
+        observation.verify()?;
+        Ok(AttachPlan {
+            capability,
+            observation,
+            root,
+            context,
+        })
+    }
+    pub(super) async fn confirm_attach(
+        &self,
+        plan: AttachPlan,
+        source: &mut impl ControlledSource,
+    ) -> Result<Receipt, Failure> {
+        // Do not refresh the retained installation revision after user review.
+        // The original pins must still hold, including after the owner's wait
+        // and immediately before account publication, not merely at preflight.
+        verify_bound(source, &plan.root, &plan.context)?;
+        self.catalog
+            .confirm_api_attach_checked(plan.capability, &plan.observation, || {
+                verify_bound(source, &plan.root, &plan.context)
+            })
+            .await
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "gui"))]
+    pub(super) async fn prepare_attach_installed(
+        &self,
+        id: &str,
+        bundle: &Path,
+    ) -> Result<InstalledAttachPlan, Failure> {
+        let mut source = install::open_capture(bundle)?;
+        let plan = self.prepare_attach(id, &mut source).await?;
+        Ok(InstalledAttachPlan { plan, source })
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "gui"))]
+    pub(super) async fn confirm_attach_installed(
+        &self,
+        prepared: InstalledAttachPlan,
+    ) -> Result<Receipt, Failure> {
+        let InstalledAttachPlan { plan, mut source } = prepared;
+        self.confirm_attach(plan, &mut source).await
+    }
+}

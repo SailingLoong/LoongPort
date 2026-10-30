@@ -443,3 +443,136 @@ fn capture_failures_have_only_fixed_nonsecret_error_codes() {
         assert_eq!(serde_json::to_value(error).unwrap(), json!(wire));
     }
 }
+
+fn api_row_for_attachment(f: &InstalledFixture) -> String {
+    use crate::workbuddy::model::{Account, Domain, SavedAccount};
+    let row = SavedAccount::new(Account {
+        uid: "A".into(),
+        domain: Domain::WorkBuddy,
+        label: "Original API row".into(),
+        credential: "synthetic-API".into(),
+    });
+    let binding = f.f.binding();
+    let id = row.account.id(binding.store_id());
+    store::save(&f.f.session, &binding, vec![row]).unwrap();
+    id
+}
+
+#[tokio::test]
+async fn attach_consumer_verified_source_reaches_original_api_row_without_native_write() {
+    let f = fixture().await;
+    let id = api_row_for_attachment(&f);
+    let binding = f.f.binding();
+    let c = f.f.controller(&binding);
+    let mut source = f.controlled(f.origin().unwrap());
+    let auth = std::fs::read(f.f.auth()).unwrap();
+    let plan = c
+        .prepare_attach(&id, &mut source)
+        .await
+        .expect("prepare sealed attachment");
+    let receipt = c.confirm_attach(plan, &mut source).await.unwrap();
+    assert_eq!(receipt.id, id);
+    let rows = store::load(&f.f.session, &binding).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].account.api_token().unwrap(), "synthetic-API");
+    assert_eq!(rows[0].account.label, "Original API row");
+    assert!(rows[0].account.has_native_lifetime());
+    assert_eq!(std::fs::read(f.f.auth()).unwrap(), auth);
+    no_journal(&f);
+}
+
+#[tokio::test]
+async fn attach_consumer_queued_confirm_rechecks_original_installed_source() {
+    let f = fixture().await;
+    let id = api_row_for_attachment(&f);
+    let binding = f.f.binding();
+    let c = f.f.controller(&binding);
+    let mut source = f.controlled(f.origin().unwrap());
+    let plan = c
+        .prepare_attach(&id, &mut source)
+        .await
+        .expect("prepare sealed attachment");
+    let held = crate::services::sync_protocol::sync_mutex().lock().await;
+    let mut waiting = Box::pin(c.confirm_attach(plan, &mut source));
+    assert!(futures::poll!(&mut waiting).is_pending());
+    mutate_install(&f.bundle, "same-length");
+    let before = accounts(&f);
+    drop(held);
+    assert!(waiting.await.is_err());
+    assert_eq!(accounts(&f), before);
+    no_journal(&f);
+}
+
+#[tokio::test]
+async fn attach_consumer_source_callback_rechecks_at_final_account_publication() {
+    let f = fixture().await;
+    let id = api_row_for_attachment(&f);
+    let binding = f.f.binding();
+    let c = f.f.controller(&binding);
+    let mut source = f.controlled(f.origin().unwrap());
+    let observation = Observation::read(&f.f.auth(), source.context()).unwrap();
+    let capability = c.catalog.prepare_api_attach(&id).await.unwrap();
+    let before = accounts(&f);
+    let mut first = true;
+    let result = c
+        .catalog
+        .confirm_api_attach_checked(capability, &observation, || {
+            source.verify_stopped()?;
+            if first {
+                first = false;
+                mutate_install(&f.bundle, "replace");
+            }
+            Ok(())
+        })
+        .await;
+    assert!(
+        result.is_err(),
+        "attachment published after source preflight became stale"
+    );
+    assert!(!first, "source admission must be invoked");
+    assert_eq!(accounts(&f), before);
+    no_journal(&f);
+}
+
+#[tokio::test]
+async fn attach_consumer_reviewed_plan_does_not_accept_changed_source() {
+    for kind in ["installation", "auth", "marker"] {
+        let f = fixture().await;
+        let id = api_row_for_attachment(&f);
+        let binding = f.f.binding();
+        let c = f.f.controller(&binding);
+        let mut source = f.controlled(f.origin().unwrap());
+        let plan = c.prepare_attach(&id, &mut source).await.unwrap();
+        match kind {
+            "installation" => mutate_install(&f.bundle, "same-length"),
+            "auth" => std::fs::write(f.f.auth(), image("different-uid")).unwrap(),
+            "marker" => std::fs::write(
+                f.f.client.join("workbuddy-desktop.info.logged-out"),
+                b"external-logout",
+            )
+            .unwrap(),
+            _ => unreachable!(),
+        }
+        let before = accounts(&f);
+        assert!(c.confirm_attach(plan, &mut source).await.is_err(), "{kind}");
+        assert_eq!(accounts(&f), before);
+        no_journal(&f);
+    }
+}
+
+#[tokio::test]
+async fn attach_consumer_dropping_review_plan_does_not_write_accounts_or_client() {
+    let f = fixture().await;
+    let id = api_row_for_attachment(&f);
+    let binding = f.f.binding();
+    let c = f.f.controller(&binding);
+    let mut source = f.controlled(f.origin().unwrap());
+    let before = accounts(&f);
+    let auth = std::fs::read(f.f.auth()).unwrap();
+    let plan = c.prepare_attach(&id, &mut source).await.unwrap();
+    assert_eq!(accounts(&f), before);
+    drop(plan);
+    assert_eq!(accounts(&f), before);
+    assert_eq!(std::fs::read(f.f.auth()).unwrap(), auth);
+    no_journal(&f);
+}

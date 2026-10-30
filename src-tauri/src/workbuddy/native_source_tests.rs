@@ -719,3 +719,320 @@ fn native_v2_preserves_legacy_v1_hybrid_and_api_fingerprints() {
         "89b4c7f3bf2b8cc4c9ddb7d67c4ca16c20594aa98b37ddbe078917fde1649eb4"
     );
 }
+
+#[cfg(unix)]
+fn api_attach_row() -> SavedAccount {
+    let mut row = SavedAccount::new(Account {
+        uid: "synthetic-observed".into(),
+        domain: Domain::WorkBuddy,
+        label: "Preserve API label".into(),
+        credential: "synthetic-api-only".into(),
+    });
+    row.credited = Some(12.0);
+    row.inference_consent = Some(false);
+    row.auto_claim_enabled = true;
+    row.auto_claim_policy_version = AUTO_CLAIM_POLICY_VERSION;
+    row.auto_claim_credential = Some(row.credential_binding());
+    row
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn api_attach_capability_preserves_existing_fields_and_valid_consent() {
+    let f = Fixture::new();
+    let b = f.binding();
+    let c = f.catalog(&b);
+    let row = api_attach_row();
+    let id = row.account.id(b.store_id());
+    let before = serde_json::to_value(&row).unwrap();
+    store::save(&f.session, &b, vec![row]).unwrap();
+    let cap = c
+        .prepare_api_attach(&id)
+        .await
+        .expect("prepare existing API row");
+    let (reviewed_id, reviewed_label, reviewed_realm, deadline) = cap.review();
+    assert_eq!(reviewed_id, id);
+    assert!(!reviewed_label.is_empty());
+    assert_eq!(reviewed_realm, "www.workbuddy.cn");
+    assert!(deadline > std::time::Instant::now());
+    let obs = Observation::read(&f.auth, &f.context).unwrap();
+    let receipt = c
+        .confirm_api_attach_checked(cap, &obs, || Ok(()))
+        .await
+        .expect("attach to same held lifetime");
+    let rows = store::load(&f.session, &b).unwrap();
+    let attached = &rows[0];
+    assert_eq!(receipt.id, id);
+    assert_eq!(receipt.generation, 1);
+    assert_eq!(attached.account.api_token().unwrap(), "synthetic-api-only");
+    assert!(attached.account.has_native_lifetime());
+    assert!(attached.automatic_enabled());
+    assert!(!attached.inference_allowed());
+    let mut after = serde_json::to_value(attached).unwrap();
+    for field in ["generation", "auto_claim_credential"] {
+        after[field] = before[field].clone();
+    }
+    after["account"] = before["account"].clone();
+    assert_eq!(
+        after, before,
+        "all other stored facts and grants stay exact"
+    );
+    assert_eq!(attached.account.label, "Preserve API label");
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn api_attach_capability_rejects_store_replacement_recreation_and_owner_change() {
+    for case in ["same", "recreate", "row", "epoch", "source"] {
+        let f = Fixture::new();
+        let b = f.binding();
+        let c = f.catalog(&b);
+        let row = api_attach_row();
+        let id = row.account.id(b.store_id());
+        store::save(&f.session, &b, vec![row.clone()]).unwrap();
+        let cap = c
+            .prepare_api_attach(&id)
+            .await
+            .expect("prepare existing API row");
+        let (reviewed_id, reviewed_label, reviewed_realm, deadline) = cap.review();
+        assert_eq!(reviewed_id, id);
+        assert!(!reviewed_label.is_empty());
+        assert_eq!(reviewed_realm, "www.workbuddy.cn");
+        assert!(deadline > std::time::Instant::now());
+        let obs = Observation::read(&f.auth, &f.context).unwrap();
+        match case {
+            "same" => store::save(&f.session, &b, vec![row]).unwrap(),
+            "recreate" => {
+                store::save(&f.session, &b, vec![]).unwrap();
+                store::save(&f.session, &b, vec![row]).unwrap();
+            }
+            "row" => {
+                let mut changed = row;
+                changed.account.label = "changed".into();
+                store::save(&f.session, &b, vec![changed]).unwrap();
+            }
+            "epoch" => f.session.invalidate_database_leases(),
+            "source" => f.write_auth("changed"),
+            _ => unreachable!(),
+        }
+        let before = f.files();
+        assert!(
+            c.confirm_api_attach_checked(cap, &obs, || Ok(()))
+                .await
+                .is_err(),
+            "{case}"
+        );
+        assert_eq!(f.files(), before, "{case} must not write");
+    }
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn api_attach_capability_does_not_revive_stale_consent() {
+    let f = Fixture::new();
+    let b = f.binding();
+    let c = f.catalog(&b);
+    let mut row = api_attach_row();
+    row.auto_claim_credential = Some("stale".into());
+    let id = row.account.id(b.store_id());
+    store::save(&f.session, &b, vec![row]).unwrap();
+    let cap = c
+        .prepare_api_attach(&id)
+        .await
+        .expect("prepare existing API row");
+    let (reviewed_id, reviewed_label, reviewed_realm, deadline) = cap.review();
+    assert_eq!(reviewed_id, id);
+    assert!(!reviewed_label.is_empty());
+    assert_eq!(reviewed_realm, "www.workbuddy.cn");
+    assert!(deadline > std::time::Instant::now());
+    let obs = Observation::read(&f.auth, &f.context).unwrap();
+    c.confirm_api_attach_checked(cap, &obs, || Ok(()))
+        .await
+        .unwrap();
+    let rows = store::load(&f.session, &b).unwrap();
+    assert!(!rows[0].automatic_enabled());
+    assert!(!rows[0].inference_allowed());
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn api_attach_capability_preserves_shared_grant_and_old_reader_roundtrip() {
+    let f = Fixture::new();
+    let b = f.binding();
+    let c = f.catalog(&b);
+    let mut row = api_attach_row();
+    row.account.credential = Credential::Api(String::new());
+    row.shared_authorization = true;
+    row.inference = Some(
+        serde_json::from_value(json!({
+            "platform":"workbuddy", "domain":"workBuddy", "uid":"synthetic-observed",
+            "grant_id":"synthetic-grant", "credential_version":1,
+            "access":"synthetic-access", "refresh":"synthetic-refresh",
+            "expires_ms":1800000000000_i64, "refresh_expires_ms":null
+        }))
+        .unwrap(),
+    );
+    row.auto_claim_credential = Some(row.credential_binding());
+    let before = serde_json::to_value(&row).unwrap();
+    let id = row.account.id(b.store_id());
+    store::save(&f.session, &b, vec![row]).unwrap();
+    let cap = c
+        .prepare_api_attach(&id)
+        .await
+        .expect("prepare shared API row");
+    let obs = Observation::read(&f.auth, &f.context).unwrap();
+    c.confirm_api_attach_checked(cap, &obs, || Ok(()))
+        .await
+        .unwrap();
+    // model.rs / model/credential.rs / store.rs are byte-identical to exact 84f4.
+    let rows = store::load(&f.session, &b).unwrap();
+    let after = serde_json::to_value(&rows[0]).unwrap();
+    for field in [
+        "inference",
+        "inference_consent",
+        "inference_revision",
+        "shared_authorization",
+        "credits",
+        "credited",
+    ] {
+        assert_eq!(after[field], before[field], "{field}");
+    }
+    assert!(super::inference::valid_grant(
+        rows[0].inference.as_ref().unwrap(),
+        &rows[0]
+    ));
+    assert!(rows[0].automatic_enabled());
+    assert!(!rows[0].inference_allowed());
+    assert_eq!(rows[0].account.api_token().unwrap(), "");
+    assert_eq!(after["account"]["credential_version"], json!(1));
+    assert_eq!(after["account"]["native"]["version"], json!(2));
+    assert!(after["account"]["native"]["incarnation"].is_string());
+    let roundtrip: SavedAccount = serde_json::from_value(after).unwrap();
+    assert!(roundtrip.account.has_native_lifetime());
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn api_attach_capability_refuses_pending_overflow_and_wrong_observed_uid() {
+    for case in ["pending", "overflow", "uid"] {
+        let f = Fixture::new();
+        let b = f.binding();
+        let c = f.catalog(&b);
+        let mut row = api_attach_row();
+        if case == "pending" {
+            row.pending = Some(Attempt::default());
+        }
+        if case == "overflow" {
+            row.generation = u64::MAX;
+        }
+        let id = row.account.id(b.store_id());
+        store::save(&f.session, &b, vec![row]).unwrap();
+        let before = f.files();
+        let cap = c.prepare_api_attach(&id).await;
+        if case == "pending" {
+            assert!(cap.is_err());
+            assert_eq!(f.files(), before);
+            continue;
+        }
+        let cap = cap.unwrap();
+        if case == "uid" {
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&f.auth).unwrap()).unwrap();
+            value["account"]["uid"] = json!("other-synthetic-uid");
+            std::fs::write(&f.auth, serde_json::to_vec(&value).unwrap()).unwrap();
+        }
+        let obs = Observation::read(&f.auth, &f.context).unwrap();
+        assert!(c
+            .confirm_api_attach_checked(cap, &obs, || Ok(()))
+            .await
+            .is_err());
+        assert_eq!(f.files(), before);
+    }
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn api_attach_capability_waiting_on_owner_rechecks_store_and_epoch() {
+    for case in ["store", "epoch", "selector", "native"] {
+        let f = Fixture::new();
+        let b = f.binding();
+        let c = f.catalog(&b);
+        let row = api_attach_row();
+        let id = row.account.id(b.store_id());
+        store::save(&f.session, &b, vec![row.clone()]).unwrap();
+        let cap = c.prepare_api_attach(&id).await.unwrap();
+        let obs = Observation::read(&f.auth, &f.context).unwrap();
+        let guard = crate::services::sync_protocol::sync_mutex().lock().await;
+        use std::future::Future;
+        let mut operation = std::pin::pin!(c.confirm_api_attach_checked(cap, &obs, || Ok(())));
+        let waker = std::task::Waker::noop();
+        assert!(operation
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(waker))
+            .is_pending());
+        match case {
+            "store" => store::save(&f.session, &b, vec![row]).unwrap(),
+            "epoch" => f.session.invalidate_database_leases(),
+            "selector" => std::fs::write(&f.control, b"invalid-selector").unwrap(),
+            "native" => {
+                let vault = f.session.read().unwrap();
+                let pending = super::native_owner::testing::phase_receipts(
+                    f.session.root(),
+                    &vault,
+                    f.auth.parent().unwrap(),
+                )
+                .0;
+                std::fs::write(
+                    f.session
+                        .root()
+                        .join(crate::secrets::owned_file::WORKBUDDY_NATIVE_JOURNAL_FILE),
+                    pending,
+                )
+                .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let before = f.files();
+        drop(guard);
+        assert!(operation.await.is_err());
+        assert_eq!(f.files(), before);
+    }
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn api_attach_capability_expiry_refuses_without_write() {
+    let f = Fixture::new();
+    let b = f.binding();
+    let c = f.catalog(&b);
+    let row = api_attach_row();
+    let id = row.account.id(b.store_id());
+    store::save(&f.session, &b, vec![row]).unwrap();
+    let mut cap = c.prepare_api_attach(&id).await.unwrap();
+    api_attach_testing::expire(&mut cap);
+    let obs = Observation::read(&f.auth, &f.context).unwrap();
+    let before = f.files();
+    assert!(c
+        .confirm_api_attach_checked(cap, &obs, || Ok(()))
+        .await
+        .is_err());
+    assert_eq!(f.files(), before);
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn api_attach_capability_prepare_refuses_native_only_and_hybrid() {
+    let f = Fixture::new();
+    let b = f.binding();
+    let c = f.catalog(&b);
+    let obs = Observation::read(&f.auth, &f.context).unwrap();
+    let receipt = c.save(&obs, None, "Existing native").await.unwrap();
+    let before = f.files();
+    assert!(c.prepare_api_attach(&receipt.id).await.is_err());
+    assert_eq!(f.files(), before);
+    let mut rows = store::load(&f.session, &b).unwrap();
+    let Credential::NativeOnly(snapshot) = &rows[0].account.credential else {
+        panic!("native row");
+    };
+    let hybrid = Credential::ApiWithNative {
+        token: "synthetic-api-only".into(),
+        snapshot: snapshot.clone(),
+    };
+    rows[0].account.credential = hybrid;
+    store::save(&f.session, &b, rows).unwrap();
+    let before = f.files();
+    assert!(c.prepare_api_attach(&receipt.id).await.is_err());
+    assert_eq!(f.files(), before);
+}

@@ -5186,6 +5186,36 @@
         "expired": "登入憑證已過期，請補充授權",
         "paused": "WorkBuddy 模型請求已暫停；帳號管理和國內簽到仍可用"
       }
+    },
+    "attachment": {
+      "title": "附加本機認證",
+      "prepare": "唯讀準備並檢視",
+      "confirm": "確認附加所檢視的認證",
+      "inspect": "查詢本次操作",
+      "close": "關閉／停止等待",
+      "show": "檢視操作",
+      "preparing": "正在唯讀準備…",
+      "ready": "請核對以上後端綁定的帳號名稱與站點，再確認附加。",
+      "applying": "正在附加。關閉只停止等待，不會回復原狀。",
+      "saved": "已附加本機認證。",
+      "unknown": "結果未知。請查詢本次操作，不要假定成功或重試確認。",
+      "cancelled": "已捨棄準備。",
+      "unowned": "無法將後端目前操作槽歸屬於遺失回應的準備請求，不推斷成功或操作許可。",
+      "boundary": "附加保留原 API 帳號，不代表登入有效、用戶端 Current 或推論／點數消費已接通。",
+      "reason": {
+        "unsupportedPlatform": "此平台不支援",
+        "unsafePath": "本機路徑不安全",
+        "io": "本機讀寫失敗",
+        "journal": "操作日誌無法使用",
+        "sourceChanged": "來源已變更，確認的能力已失效",
+        "recoveryRequired": "需要復原",
+        "requestConflict": "操作與目前狀態衝突",
+        "rolledBack": "本機交易已回復"
+      },
+      "reviewCurrent": "重新審閱此目前操作",
+      "previousUnknown": "先前準備請求結果仍未知。此處回執僅歸屬於重新審閱的操作。",
+      "stopTracking": "停止本機追蹤",
+      "stopTrackingHint": "結果仍未知。這只放棄本機等待，不取消背景工作，也不代表操作失敗。新的準備仍由後端核驗是否可執行。"
     }
   },
   "startupUpgrade": {

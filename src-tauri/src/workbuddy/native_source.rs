@@ -232,7 +232,7 @@ impl Observation {
         result.verify()?;
         Ok(result)
     }
-    fn verify(&self) -> Result<(), Failure> {
+    pub(super) fn verify(&self) -> Result<(), Failure> {
         if read_pair(&self.path).map_err(|_| Failure::SourceChanged)? != self.pair {
             return Err(Failure::SourceChanged);
         }
@@ -488,5 +488,214 @@ impl Catalog<'_> {
             },
         )
         .await
+    }
+}
+
+/// Single-use backend capability; never serialized, cloned, or held under an owner lock.
+/// Any participating store replacement invalidates it, even an unrelated row update.
+#[cfg(any(
+    all(test, unix),
+    all(target_os = "macos", target_arch = "aarch64", feature = "gui")
+))]
+pub(super) struct ApiAttachCapability {
+    held: std::fs::File,
+    sample: Sample,
+    root: PathBuf,
+    storage: StorageIdentity,
+    epoch: u64,
+    selection: SelectionSnapshot,
+    id: String,
+    row_digest: [u8; 32],
+    label: String,
+    realm: String,
+    expires_at: std::time::Instant,
+}
+#[cfg(any(
+    all(test, unix),
+    all(target_os = "macos", target_arch = "aarch64", feature = "gui")
+))]
+fn attach_row_digest(row: &SavedAccount) -> Result<[u8; 32], Failure> {
+    use sha2::Digest;
+    let bytes =
+        zeroize::Zeroizing::new(serde_json::to_vec(row).map_err(|_| Failure::RequestConflict)?);
+    Ok(sha2::Sha256::digest(bytes.as_slice()).into())
+}
+#[cfg(any(
+    all(test, unix),
+    all(target_os = "macos", target_arch = "aarch64", feature = "gui")
+))]
+impl ApiAttachCapability {
+    pub(super) fn review(&self) -> (&str, &str, &str, std::time::Instant) {
+        (&self.id, &self.label, &self.realm, self.expires_at)
+    }
+    fn verify(&self, catalog: &Catalog<'_>) -> Result<(), Failure> {
+        if std::time::Instant::now() >= self.expires_at
+            || self.root != catalog.session.root()
+            || self.storage != *catalog.identity
+            || self.epoch != catalog.epoch
+            || self.selection != *catalog.selection
+        {
+            return Err(Failure::SourceChanged);
+        }
+        // Keep held alive through the original owner's final write. Comparing a
+        // saved inode number after dropping its File would reintroduce inode ABA.
+        if identity(&self.held).map_err(|_| Failure::SourceChanged)? != self.sample.identity
+            || read_file(&self.root.join(super::store::FILE), AUTH_LIMIT)
+                .map_err(|_| Failure::SourceChanged)?
+                .as_ref()
+                != Some(&self.sample)
+        {
+            return Err(Failure::SourceChanged);
+        }
+        Ok(())
+    }
+}
+#[cfg(any(
+    all(test, unix),
+    all(target_os = "macos", target_arch = "aarch64", feature = "gui")
+))]
+impl Catalog<'_> {
+    pub(super) async fn prepare_api_attach(
+        &self,
+        id: &str,
+    ) -> Result<ApiAttachCapability, Failure> {
+        super::native_owner::with_selected_owner(
+            self.session,
+            self.identity,
+            self.epoch,
+            self.selection,
+            |owner| {
+                let path = self.session.root().join(super::store::FILE);
+                let held = crate::config_file_io::open_regular_file(&path, AUTH_LIMIT)
+                    .map_err(|_| Failure::SourceChanged)?
+                    .ok_or(Failure::RequestConflict)?;
+                let sample = read_file(&path, AUTH_LIMIT)
+                    .map_err(|_| Failure::SourceChanged)?
+                    .ok_or(Failure::RequestConflict)?;
+                let rows = owner.load_accounts()?;
+                let mut matching = rows
+                    .iter()
+                    .filter(|row| row.account.id(self.identity.store_id()) == id);
+                let row = matching.next().ok_or(Failure::RequestConflict)?;
+                if matching.next().is_some()
+                    || !matches!(row.account.credential, Credential::Api(_))
+                    || row.pending.is_some()
+                {
+                    return Err(Failure::RequestConflict);
+                }
+                let capability = ApiAttachCapability {
+                    held,
+                    sample,
+                    root: self.session.root().to_path_buf(),
+                    storage: self.identity.clone(),
+                    epoch: self.epoch,
+                    selection: self.selection.clone(),
+                    id: id.into(),
+                    row_digest: attach_row_digest(row)?,
+                    label: row.account.label.clone(),
+                    realm: row.account.domain.host().into(),
+                    expires_at: std::time::Instant::now()
+                        .checked_add(std::time::Duration::from_secs(300))
+                        .ok_or(Failure::RequestConflict)?,
+                };
+                capability.verify(self)?;
+                Ok(capability)
+            },
+        )
+        .await
+    }
+    /// Consumes the capability on success AND failure. Stored opaque data is not
+    /// source authentication, native apply admission, or inference permission.
+    pub(super) async fn confirm_api_attach_checked(
+        &self,
+        capability: ApiAttachCapability,
+        observation: &Observation,
+        mut verify_source: impl FnMut() -> Result<(), Failure>,
+    ) -> Result<Receipt, Failure> {
+        super::native_owner::with_selected_owner(
+            self.session,
+            self.identity,
+            self.epoch,
+            self.selection,
+            |owner| {
+                verify_source()?;
+                capability.verify(self)?;
+                observation.verify()?;
+                let mut rows = owner.load_accounts()?;
+                let indices: Vec<_> = rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, row)| row.account.id(self.identity.store_id()) == capability.id)
+                    .map(|(i, _)| i)
+                    .collect();
+                let [index] = indices.as_slice() else {
+                    return Err(Failure::RequestConflict);
+                };
+                let row = &mut rows[*index];
+                if attach_row_digest(row)? != capability.row_digest || row.pending.is_some() {
+                    return Err(Failure::RequestConflict);
+                }
+                let Credential::Api(token) = &row.account.credential else {
+                    return Err(Failure::RequestConflict);
+                };
+                let bytes = &observation
+                    .pair
+                    .auth
+                    .as_ref()
+                    .ok_or(Failure::RequestConflict)?
+                    .bytes;
+                let observed =
+                    Account::from_observation(bytes, &observation.context, &row.account.label)
+                        .map_err(|_| Failure::RequestConflict)?;
+                if observed.uid != row.account.uid || observed.domain != row.account.domain {
+                    return Err(Failure::RequestConflict);
+                }
+                let Credential::NativeOnly(snapshot) = &observed.credential else {
+                    return Err(Failure::RequestConflict);
+                };
+                let automatic = row.automatic_enabled();
+                let credential = Credential::ApiWithNative {
+                    token: token.clone(),
+                    snapshot: snapshot.clone(),
+                };
+                row.generation = row
+                    .generation
+                    .checked_add(1)
+                    .ok_or(Failure::RequestConflict)?;
+                row.account.credential = credential;
+                if automatic {
+                    row.auto_claim_credential = Some(row.credential_binding());
+                }
+                let receipt = Receipt {
+                    id: capability.id.clone(),
+                    generation: row.generation,
+                    realm: row.account.domain.host().into(),
+                    credential: row.account.credential.clone(),
+                };
+                let mut verification = Ok(());
+                let saved = owner.save_accounts(rows, || {
+                    verification = verify_source()
+                        .and_then(|_| capability.verify(self))
+                        .and_then(|_| observation.verify());
+                    verification
+                        .as_ref()
+                        .map(|_| ())
+                        .map_err(|_| Failure::SourceChanged)
+                });
+                verification?;
+                saved?;
+                Ok(receipt)
+            },
+        )
+        .await
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(super) mod api_attach_testing {
+    use super::*;
+    /// Test-only clock adjustment; production capability fields stay private.
+    pub fn expire(capability: &mut ApiAttachCapability) {
+        capability.expires_at = std::time::Instant::now();
     }
 }

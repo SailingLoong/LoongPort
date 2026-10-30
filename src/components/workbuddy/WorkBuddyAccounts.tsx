@@ -1,3 +1,4 @@
+import { WorkBuddyNativeAttachment } from "./WorkBuddyNativeAttachment";
 import { WorkBuddyNativePreview } from "./WorkBuddyNativePreview";
 import { WorkBuddyNativeRecovery } from "./WorkBuddyNativeRecovery";
 import { AutomaticClaimStatus } from "@/components/relay/accounts/AutomaticClaimStatus";
@@ -328,6 +329,10 @@ export function WorkBuddyAccounts({
               const inferencePaused = inferenceState(account.id) === "paused";
               const authorization = (
                 <>
+                  <WorkBuddyNativeAttachment
+                    accountId={account.id}
+                    onAttached={() => void loadAccounts(true)}
+                  />
                   <p role="status">
                     {t(
                       `workbuddy.inference.state.${inferenceState(account.id)}`,

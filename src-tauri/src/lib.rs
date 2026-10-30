@@ -2181,6 +2181,10 @@ pub fn run() {
             commands::delete_pi_prompt_template,
             // Pi native provider and session views
             commands::get_pi_current_state,
+            commands::prepare_workbuddy_native_attachment,
+            commands::confirm_workbuddy_native_attachment,
+            commands::inspect_workbuddy_native_attachment,
+            commands::cancel_workbuddy_native_attachment,
             commands::preview_workbuddy_native_capture,
             commands::capture_workbuddy_native_account,
             commands::list_workbuddy_native_captures,

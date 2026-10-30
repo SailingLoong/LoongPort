@@ -5243,6 +5243,36 @@
         "expired": "登录凭据已过期，请补充授权",
         "paused": "WorkBuddy 模型请求已暂停；账号管理和国内签到仍可用"
       }
+    },
+    "attachment": {
+      "title": "附加本机认证",
+      "prepare": "只读准备并查看",
+      "confirm": "确认附加所查看的认证",
+      "inspect": "查询本次操作",
+      "close": "关闭／停止等待",
+      "show": "查看操作",
+      "preparing": "正在只读准备…",
+      "ready": "请核对以上后端绑定的账号名称和站点，再确认附加。",
+      "applying": "正在附加。关闭只停止等待，不会回滚。",
+      "saved": "已附加本机认证。",
+      "unknown": "结果未知。请查询本次操作，不要假定成功或重试确认。",
+      "cancelled": "已丢弃准备。",
+      "unowned": "无法将后端当前操作槽归属于丢失回包的准备请求，不推断成功或操作许可。",
+      "boundary": "附加保留原 API 账号，不代表登录有效、客户端 Current 或推理／积分消费已接通。",
+      "reason": {
+        "unsupportedPlatform": "此平台不支持",
+        "unsafePath": "本地路径不安全",
+        "io": "本地读写失败",
+        "journal": "操作日志不可用",
+        "sourceChanged": "来源已变化，所确认的能力已失效",
+        "recoveryRequired": "需要恢复",
+        "requestConflict": "操作与当前状态冲突",
+        "rolledBack": "本地事务已回滚"
+      },
+      "reviewCurrent": "重新审阅此当前操作",
+      "previousUnknown": "此前准备请求结果仍未知。此处回执仅归属于重新审阅的操作。",
+      "stopTracking": "停止本地追踪",
+      "stopTrackingHint": "结果仍未知。这只放弃本地等待，不取消后台，也不代表操作失败。新准备仍由后端核验是否可执行。"
     }
   },
   "startupUpgrade": {
