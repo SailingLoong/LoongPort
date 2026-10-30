@@ -47,6 +47,10 @@ pub(crate) fn preflight_structure(conn: &Connection) -> Result<(), AppError> {
     {
         return Err(AppError::Config("secret.database_version_too_new".into()));
     }
+    if super::loongport_schema::read_stored_version(conn)? >= 33 {
+        super::dao::vendor_connection_operations::validate_schema(conn)?;
+        super::dao::vendor_connection_operations::read_rows(conn)?;
+    }
     if super::loongport_schema::read_stored_version(conn)? >= 32 {
         super::dao::relay_setup_operations::validate_schema(conn)?;
         super::dao::relay_setup_operations::read_rows(conn)?;

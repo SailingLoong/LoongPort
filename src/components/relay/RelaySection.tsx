@@ -26,6 +26,8 @@ import type {
   ProviderCatalogDecision,
 } from "@/lib/api/providers";
 import { applicationRoutingApi } from "@/lib/api/applicationRouting";
+import { applicationOverviewApi } from "@/lib/api/applicationOverview";
+import { matchesVendorConnectionTarget } from "@/lib/vendorConnectionIdentity";
 import type { AppId, ProviderSwitchEvent } from "@/lib/api";
 import type {
   RefreshResult,
@@ -46,6 +48,7 @@ import {
 import { getAppLabel } from "@/config/appConfig";
 import { useStreamCheck } from "@/hooks/useStreamCheck";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
+import { usePreservedViewActive } from "@/components/ui/PreservedView";
 
 import { ServiceConfiguration } from "./onboarding/ServiceConfiguration";
 import { ImageTabNotice } from "./ImageTabNotice";
@@ -166,17 +169,39 @@ export function RelaySection({
     catalog?: CatalogPreview;
     quitRequired?: boolean;
     busyKey: string;
+    cancel?: () => void;
     run: (
       quitChatgpt?: boolean,
       decision?: ProviderCatalogDecision,
       previewOnly?: boolean,
     ) => void;
   } | null>(null);
+  const [confirmVendorReview, setConfirmVendorReview] = useState<{
+    run: () => void;
+    cancel?: () => void;
+  } | null>(null);
+  const vendorPromptToken = useRef<symbol | null>(null);
   const switchPending = useRef(false);
   const switchLifecycle = useRef(0);
+  const vendorOperations = useRef<
+    Partial<
+      Record<
+        AppId,
+        {
+          operationId: string;
+          rowId: number;
+          plan: string;
+          providerId: string;
+        }
+      >
+    >
+  >({});
+  const activeApp = useRef(appId);
+  activeApp.current = appId;
   const cancelSwitch = () => {
     switchLifecycle.current += 1;
     setConfirmSwitch(null);
+    setConfirmVendorReview(null);
   };
   useEffect(() => {
     setConfirmSwitch(null);
@@ -234,6 +259,46 @@ export function RelaySection({
   // 异步编辑、恢复默认与切换动作返回时，需要按 id 读取最新的行数据。
   const vendorsRef = useRef<VendorAccountRow[]>([]);
   vendorsRef.current = vendors;
+  const vendorTargetsKey = JSON.stringify(
+    vendors
+      .map((row) => [
+        row.id,
+        row.plans
+          .map((plan) => [plan.planId, plan.providerId, plan.canSwitch])
+          .sort(),
+      ])
+      .sort(),
+  );
+  const vendorSurfaceVisible =
+    !renderAccounts &&
+    !accountActionsOnly &&
+    vendorSupported &&
+    accountFilter?.kind !== "relay" &&
+    (accountSnapshot == null || accountSnapshot.appId === appId);
+  const vendorSurfaceKey = JSON.stringify([
+    vendorSurfaceVisible,
+    accountFilter?.kind ?? null,
+    accountFilter?.id ?? null,
+    accountSnapshot?.appId ?? null,
+  ]);
+  const viewActive = usePreservedViewActive();
+  const vendorOwnerToken = useMemo(
+    () => Symbol("vendor-switch-owner"),
+    [appId, viewActive, vendorTargetsKey, vendorSurfaceKey],
+  );
+  const vendorOwner = useRef({
+    token: vendorOwnerToken,
+    active: viewActive,
+    live: false,
+  });
+  vendorOwner.current.token = vendorOwnerToken;
+  vendorOwner.current.active = viewActive;
+  useEffect(() => {
+    vendorOwner.current.live = true;
+    return () => {
+      vendorOwner.current.live = false;
+    };
+  }, [vendorOwnerToken]);
   // reload 的请求序号 —— 只让最后一次的结果落地，见 `reload` 里的说明。
   const reloadSeqRef = useRef(0);
   const vendorReloadSeqRef = useRef(0);
@@ -564,61 +629,448 @@ export function RelaySection({
   const doVendorSwitch = (
     rowId: number,
     plan: VendorPlanInfo,
-    quitChatgpt?: boolean,
-    catalogDecision?: ProviderCatalogDecision,
-    catalogPreviewOnly = false,
+    reviewedIntent = false,
   ) => {
-    if (switchPending.current) return;
+    const app = appId;
+    const target = {
+      app,
+      rowId,
+      plan: plan.planId,
+      providerId: plan.providerId,
+    };
+    const isCurrentTarget = () =>
+      vendorSurfaceVisible &&
+      (accountFilter?.kind !== "vendor" || accountFilter.id === rowId) &&
+      vendorOwner.current.active &&
+      vendorOwner.current.live &&
+      vendorOwner.current.token === vendorOwnerToken &&
+      activeApp.current === app &&
+      vendorsRef.current.some(
+        (row) =>
+          row.id === rowId &&
+          row.plans.some(
+            (item) =>
+              item.planId === plan.planId &&
+              item.providerId === plan.providerId &&
+              item.canSwitch,
+          ),
+      );
+    if (switchPending.current || !isCurrentTarget()) return;
     switchPending.current = true;
     const generation = switchLifecycle.current;
-    return run(vendorPlanBusyKey("switch", plan.providerId), async () => {
-      try {
-        const result = catalogDecision
-          ? await applicationRoutingApi.apply(
-              appId,
-              {
-                selection: { providerId: plan.providerId },
-                catalogDecision,
-                catalogPreviewOnly,
-              },
-              quitChatgpt,
-            )
-          : await vendorApi.switch(rowId, plan.planId, appId, quitChatgpt);
-        if (generation !== switchLifecycle.current) return;
-        if (
-          catalogPreviewOnly &&
-          (result.status !== "confirmationRequired" ||
-            result.catalog?.choice !== catalogDecision?.choice ||
-            result.catalog?.revision !== catalogDecision?.revision)
-        )
-          throw new Error(t("provider.preview.sourceChanged"));
-        if (result.status === "confirmationRequired") {
-          setConfirmSwitch({
-            name: result.targetName,
-            catalog: result.catalog,
-            quitRequired: result.quitRequired,
-            busyKey: vendorPlanBusyKey("switch", plan.providerId),
-            run: (choice, decision, previewOnly) =>
-              void doVendorSwitch(rowId, plan, choice, decision, previewOnly),
+    const isCurrent = () =>
+      generation === switchLifecycle.current && isCurrentTarget();
+    const busyKey = vendorPlanBusyKey("switch", plan.providerId);
+    const uncertain = () => {
+      if (isCurrent()) {
+        const message = t("loongport.onboarding.cannotVerify");
+        fail(busyKey, message);
+        toast.error(message);
+      }
+    };
+    return run(busyKey, async () => {
+      const offerNewIntentReview = async (operationId: string) => {
+        try {
+          const review = await vendorApi.previewNewConnectionIntent({
+            app,
+            operationId,
+            targetRowId: rowId,
+            targetPlan: plan.planId,
           });
+          if (
+            !isCurrent() ||
+            review.status !== "newIntentReviewRequired" ||
+            review.targetProviderId !== plan.providerId
+          )
+            return;
+          let consumed = false;
+          const promptToken = Symbol("vendor-review");
+          vendorPromptToken.current = promptToken;
+          setConfirmVendorReview({
+            cancel: () => {
+              if (vendorPromptToken.current === promptToken && isCurrent()) {
+                vendorPromptToken.current = null;
+                cancelSwitch();
+              }
+            },
+            run: () => {
+              if (
+                consumed ||
+                vendorPromptToken.current !== promptToken ||
+                switchPending.current ||
+                !isCurrent()
+              )
+                return;
+              consumed = true;
+              switchPending.current = true;
+              void run(busyKey, async () => {
+                let permitted = false;
+                try {
+                  const result = await vendorApi.confirmNewConnectionIntent({
+                    app,
+                    operationId,
+                    targetRowId: rowId,
+                    targetPlan: plan.planId,
+                    reviewToken: review.reviewToken,
+                  });
+                  if (!isCurrent()) return;
+                  if (
+                    result.status !== "newIntentPermitted" ||
+                    result.app !== app
+                  ) {
+                    uncertain();
+                    return;
+                  }
+                  permitted = true;
+                  setConfirmVendorReview(null);
+                  delete vendorOperations.current[app];
+                } catch {
+                  uncertain();
+                } finally {
+                  switchPending.current = false;
+                }
+                // The native review retires only the old operation. A fresh prepare
+                // performs current owner/admission checks before any new write.
+                if (permitted && isCurrent())
+                  void doVendorSwitch(rowId, plan, true);
+              });
+            },
+          });
+        } catch {
+          /* No authoritative review means no replacement action. */
+        }
+      };
+      const reconcile = async (
+        operation: {
+          operationId: string;
+          rowId: number;
+          plan: string;
+          providerId: string;
+        } | null,
+      ) => {
+        const operationId = operation?.operationId ?? null;
+        try {
+          const receipt = await vendorApi.queryConnection(app, operationId);
+          if (!isCurrent()) return "blocked" as const;
+          if (receipt.status === "none" && operationId === null)
+            return "none" as const;
+          if (
+            receipt.status === "unknown" &&
+            "operationState" in receipt &&
+            (receipt.operationState === "reviewed" ||
+              receipt.operationState === "failedBeforeWrite") &&
+            matchesVendorConnectionTarget(
+              receipt,
+              operation ? { app, ...operation } : target,
+            )
+          ) {
+            return "different" as const;
+          }
+          if (
+            receipt.status !== "completed" ||
+            !receipt.completedConfigurationRevision ||
+            !matchesVendorConnectionTarget(
+              receipt,
+              operation
+                ? { app, ...operation }
+                : {
+                    app,
+                    rowId: receipt.rowId,
+                    plan: receipt.plan,
+                    providerId: receipt.providerId,
+                    operationId: receipt.operationId,
+                  },
+            )
+          ) {
+            uncertain();
+            const unresolvedId =
+              operationId ??
+              ("operationId" in receipt && receipt.app === app
+                ? receipt.operationId
+                : undefined);
+            if (unresolvedId) await offerNewIntentReview(unresolvedId);
+            return "blocked" as const;
+          }
+          vendorOperations.current[app] = {
+            operationId: receipt.operationId,
+            rowId: receipt.rowId,
+            plan: receipt.plan,
+            providerId: receipt.providerId,
+          };
+          // A terminal receipt for a different target is not B's success.
+          // A new explicit selection may prepare B; native owner/CAS arbitrates races.
+          if (!matchesVendorConnectionTarget(receipt, target))
+            return "different" as const;
+          const snapshot = await applicationOverviewApi.state(app);
+          if (!isCurrent()) return "blocked" as const;
+          const selected = snapshot.configurations.find(
+            (item) =>
+              item.selection.kind === "vendor" &&
+              item.selection.rowId === rowId &&
+              item.selection.planId === plan.planId &&
+              item.providerId === plan.providerId,
+          );
+          const applied = snapshot.isAdditive
+            ? selected?.presentation.isInConfig
+            : selected?.presentation.isCurrent;
+          if (
+            !applied ||
+            snapshot.configurationRevision !==
+              receipt.completedConfigurationRevision
+          ) {
+            uncertain();
+            let consumed = false;
+            const promptToken = Symbol("vendor-completed-review");
+            vendorPromptToken.current = promptToken;
+            setConfirmVendorReview({
+              cancel: () => {
+                if (vendorPromptToken.current === promptToken && isCurrent()) {
+                  vendorPromptToken.current = null;
+                  cancelSwitch();
+                }
+              },
+              run: () => {
+                if (
+                  consumed ||
+                  vendorPromptToken.current !== promptToken ||
+                  switchPending.current ||
+                  !isCurrent()
+                )
+                  return;
+                consumed = true;
+                setConfirmVendorReview(null);
+                delete vendorOperations.current[app];
+                // Completed receipts are terminal, not unresolved writes to replay.
+                // Explicit user intent is followed by a fresh native preparation.
+                void doVendorSwitch(rowId, plan, true);
+              },
+            });
+            return "blocked" as const;
+          }
+          // The receipt and current configuration agree. This does not prove the client adopted it.
+          toast.success(t("loongport.onboarding.results.success"));
+          await reload();
+          return "completed" as const;
+        } catch {
+          uncertain();
+          return "blocked" as const;
+        }
+      };
+      try {
+        const existing = reviewedIntent
+          ? "none"
+          : await reconcile(vendorOperations.current[app] ?? null);
+        if (!isCurrent() || (existing !== "none" && existing !== "different"))
+          return;
+        const operationId = crypto.randomUUID();
+        const operation = {
+          rowId,
+          plan: plan.planId,
+          providerId: plan.providerId,
+          operationId,
+        };
+        vendorOperations.current[app] = operation;
+        let receipt;
+        try {
+          receipt = await vendorApi.prepareConnection({
+            rowId,
+            plan: plan.planId,
+            app,
+            operationId,
+            catalogDecision: null,
+          });
+        } catch {
+          await reconcile(operation);
           return;
         }
-        setConfirmSwitch(null);
-        const name = plan.planName;
-        toast.success(
-          result.chatgptRelaunched
-            ? t("loongport.switch.doneRelaunched", { name })
-            : result.chatgptWasRunning
-              ? t("loongport.switch.doneNeedsRestart", { name })
-              : t("loongport.switch.done", { name }),
-        );
-        for (const warning of result.warnings) toast.warning(warning);
-        await reload();
-      } catch (e) {
-        if (generation === switchLifecycle.current) {
-          setConfirmSwitch(null);
-          toast.error(String(e));
+        if (!isCurrent()) return;
+        if (
+          receipt.status !== "prepared" ||
+          !matchesVendorConnectionTarget(receipt, { ...target, operationId })
+        ) {
+          await reconcile(operation);
+          return;
         }
+        const dispatchPrepared = async (
+          prepared: typeof receipt,
+          currentOperation: typeof operation,
+          quitChatgpt: boolean | null,
+        ): Promise<void> => {
+          let result;
+          try {
+            result = await vendorApi.switchPreparedConnection({
+              rowId,
+              plan: plan.planId,
+              app,
+              operationId: currentOperation.operationId,
+              expectedRevision: prepared.receiptRevision,
+              quitChatgpt,
+            });
+          } catch {
+            await reconcile(currentOperation);
+            return;
+          }
+          if (!isCurrent()) return;
+          if (result.status !== "confirmationRequired") {
+            await reconcile(currentOperation);
+            return;
+          }
+          const showConfirmation = async (preview: typeof result) => {
+            const catalogReview = preview.catalog
+              ? await vendorApi.previewConnectionReview({
+                  app,
+                  operationId: currentOperation.operationId,
+                })
+              : null;
+            if (!isCurrent()) return false;
+            if (preview.catalog && catalogReview?.status !== "reviewRequired") {
+              uncertain();
+              return false;
+            }
+            let consumed = false;
+            const promptToken = Symbol("vendor-confirmation");
+            vendorPromptToken.current = promptToken;
+            setConfirmSwitch({
+              cancel: () => {
+                if (vendorPromptToken.current === promptToken && isCurrent()) {
+                  vendorPromptToken.current = null;
+                  cancelSwitch();
+                }
+              },
+              name: preview.targetName,
+              catalog: preview.catalog,
+              quitRequired: preview.quitRequired,
+              busyKey,
+              run: (quit, decision, previewOnly) => {
+                if (
+                  consumed ||
+                  vendorPromptToken.current !== promptToken ||
+                  switchPending.current ||
+                  !isCurrent()
+                )
+                  return;
+                consumed = true;
+                switchPending.current = true;
+                void run(busyKey, async () => {
+                  try {
+                    if (previewOnly) {
+                      if (
+                        !decision ||
+                        !preview.catalog ||
+                        decision.revision !== preview.catalog.revision
+                      )
+                        return;
+                      const next = await vendorApi.previewConnectionCatalog({
+                        app,
+                        operationId: currentOperation.operationId,
+                        catalogDecision: decision,
+                        quitChatgpt: quit ?? null,
+                      });
+                      if (!isCurrent()) return;
+                      if (next.status !== "confirmationRequired") {
+                        consumed = false;
+                        uncertain();
+                        return;
+                      }
+                      const replaced = await showConfirmation(next);
+                      if (
+                        !replaced &&
+                        vendorPromptToken.current === promptToken &&
+                        isCurrent()
+                      )
+                        consumed = false;
+                      return;
+                    }
+                    if (preview.catalog) {
+                      if (
+                        !decision ||
+                        decision.choice !== preview.catalog.choice ||
+                        decision.revision !== preview.catalog.revision
+                      )
+                        return;
+                      // Catalog choice is part of a prepared operation's identity.
+                      // Retire the old prepared intent under a fresh native review;
+                      // never mutate/replay it through the generic routing path.
+                      const review = catalogReview;
+                      if (!review || review.status !== "reviewRequired") {
+                        uncertain();
+                        return;
+                      }
+                      const retired = await vendorApi.reviewConnection({
+                        app,
+                        operationId: currentOperation.operationId,
+                        expectedRevision: review.receiptRevision,
+                        observedRevision: review.observedRevision,
+                      });
+                      if (!isCurrent()) return;
+                      if (
+                        retired.status !== "failedBeforeWrite" ||
+                        !matchesVendorConnectionTarget(retired, {
+                          ...target,
+                          operationId: currentOperation.operationId,
+                        })
+                      ) {
+                        uncertain();
+                        return;
+                      }
+                      const nextOperation = {
+                        ...operation,
+                        operationId: crypto.randomUUID(),
+                      };
+                      vendorOperations.current[app] = nextOperation;
+                      const next = await vendorApi.prepareConnection({
+                        rowId,
+                        plan: plan.planId,
+                        app,
+                        operationId: nextOperation.operationId,
+                        catalogDecision: decision,
+                      });
+                      if (!isCurrent()) return;
+                      if (
+                        next.status !== "prepared" ||
+                        !matchesVendorConnectionTarget(next, {
+                          ...target,
+                          operationId: nextOperation.operationId,
+                        })
+                      ) {
+                        await reconcile(nextOperation);
+                        return;
+                      }
+                      setConfirmSwitch(null);
+                      await dispatchPrepared(
+                        next,
+                        nextOperation,
+                        quit ?? false,
+                      );
+                    } else {
+                      setConfirmSwitch(null);
+                      await dispatchPrepared(
+                        prepared,
+                        currentOperation,
+                        quit ?? false,
+                      );
+                    }
+                  } catch {
+                    if (
+                      previewOnly &&
+                      vendorPromptToken.current === promptToken &&
+                      isCurrent()
+                    )
+                      consumed = false;
+                    uncertain();
+                  } finally {
+                    switchPending.current = false;
+                  }
+                });
+              },
+            });
+            return true;
+          };
+          await showConfirmation(result);
+        };
+        await dispatchPrepared(receipt, operation, null);
+      } catch {
+        uncertain();
       } finally {
         switchPending.current = false;
       }
@@ -1368,12 +1820,20 @@ export function RelaySection({
       {/* 「编辑配置」的警告 + cc-switch 编辑页（见 useTierEditGuard）。 */}
       {editDialogs}
 
+      <ConfirmDialog
+        isOpen={confirmVendorReview !== null}
+        title={t("loongport.onboarding.reapply")}
+        message={t("loongport.onboarding.resultsHint")}
+        confirmText={t("loongport.onboarding.reapply")}
+        onConfirm={() => confirmVendorReview?.run()}
+        onCancel={confirmVendorReview?.cancel ?? cancelSwitch}
+      />
       <SwitchTierConfirmDialog
         targetName={confirmSwitch?.name ?? null}
         catalog={confirmSwitch?.catalog}
         quitRequired={confirmSwitch?.quitRequired}
         disabled={Boolean(confirmSwitch && busy.has(confirmSwitch.busyKey))}
-        onCancel={cancelSwitch}
+        onCancel={confirmSwitch?.cancel ?? cancelSwitch}
         onPreviewCatalog={(decision) => {
           if (decision.revision === confirmSwitch?.catalog?.revision)
             confirmSwitch.run(undefined, decision, true);

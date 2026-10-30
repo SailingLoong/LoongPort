@@ -2,6 +2,8 @@ import { useId } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import type { AccountRowVM } from "./accountOverviewProjection";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { useWorkBuddyNativeSwitch } from "./useWorkBuddyNativeSwitch";
 /** Render only projected fields; no snapshot/platform branches or account commands. */
 export function AccountOverviewRow({
   row,
@@ -14,6 +16,7 @@ export function AccountOverviewRow({
 }) {
   const { t } = useTranslation();
   const reasonId = useId();
+  const nativeSwitch = useWorkBuddyNativeSwitch(row, disabled);
   return (
     <article
       aria-label={row.name}
@@ -56,7 +59,12 @@ export function AccountOverviewRow({
         )}
       </dl>
       <div className="flex flex-wrap items-center gap-2 lg:max-w-48">
-        <Button size="sm" disabled aria-describedby={reasonId}>
+        <Button
+          size="sm"
+          disabled={!nativeSwitch.canSwitch}
+          aria-describedby={reasonId}
+          onClick={nativeSwitch.open}
+        >
           {row.switchAction.label}
         </Button>
         <Button
@@ -72,8 +80,76 @@ export function AccountOverviewRow({
           {t("accountsOverview.details")}
         </Button>
         <p id={reasonId} className="w-full text-xs text-muted-foreground">
-          {row.switchAction.reason}
+          {!row.switchAction.enabled && row.switchAction.reason}
         </p>
+        {nativeSwitch.report && (
+          <p role="status">
+            {t(
+              `accountsOverview.nativeSwitch.${nativeSwitch.report.transaction}`,
+              {
+                defaultValue:
+                  nativeSwitch.report.transaction === "applied"
+                    ? "认证文件已切换。"
+                    : "认证文件已是目标内容。",
+              },
+            )}{" "}
+            {t(`accountsOverview.nativeSwitch.${nativeSwitch.report.restart}`, {
+              defaultValue:
+                nativeSwitch.report.restart === "notNeeded"
+                  ? "客户端原本未运行，未启动。"
+                  : nativeSwitch.report.restart === "requested"
+                    ? "已请求启动；账号是否生效待验证。"
+                    : nativeSwitch.report.restart === "failed"
+                      ? "启动失败。"
+                      : "启动结果未知。",
+            })}
+          </p>
+        )}
+        {nativeSwitch.error && (
+          <p role="alert">
+            {t(
+              `accountsOverview.nativeSwitch.error.${nativeSwitch.error.stage}`,
+              {
+                reason: nativeSwitch.error.reason ?? "",
+                defaultValue:
+                  nativeSwitch.error.stage === "outcomeUnknown"
+                    ? "切换结果未知，请先核对原操作，不要重复切换。"
+                    : nativeSwitch.error.stage === "quitRefused"
+                      ? "客户端拒绝退出，未切换认证文件。"
+                      : nativeSwitch.error.stage === "quitTimeout"
+                        ? "客户端退出超时，未切换认证文件。"
+                        : nativeSwitch.error.stage === "writersRemaining"
+                          ? "仍有客户端进程运行，未切换认证文件。"
+                          : nativeSwitch.error.stage === "busy"
+                            ? "另一个切换正在进行，未执行本次切换。"
+                            : nativeSwitch.error.stage === "sourceChanged"
+                              ? "客户端来源已变化，未切换认证文件。"
+                              : nativeSwitch.error.stage === "transaction"
+                                ? `认证文件事务报告异常（${nativeSwitch.error.reason ?? "unknown"}），再次操作前请检查恢复状态。`
+                                : "切换未完成。",
+              },
+            )}
+          </p>
+        )}
+        <ConfirmDialog
+          isOpen={nativeSwitch.confirming}
+          title={t("accountsOverview.nativeSwitch.title", {
+            defaultValue: "确认切换账号",
+          })}
+          message={t("accountsOverview.nativeSwitch.confirm", {
+            name: row.name,
+            defaultValue:
+              "将退出正在运行的 WorkBuddy，切换到 {{name}} 的认证文件，并尝试重开。账号是否生效需另行验证。",
+          })}
+          confirmText={t("accountsOverview.nativeSwitch.action", {
+            defaultValue: "确认切换",
+          })}
+          cancelText={t("common.cancel", { defaultValue: "取消" })}
+          variant="info"
+          pending={nativeSwitch.busy}
+          onConfirm={() => void nativeSwitch.confirm()}
+          onCancel={nativeSwitch.cancel}
+        />
       </div>
     </article>
   );

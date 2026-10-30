@@ -104,6 +104,7 @@ const SYNC_SKIP_TABLES: &[&str] = &[
     "paperclip_run_bindings",
     "qoder_campaign_operations",
     "relay_setup_operations",
+    "vendor_connection_operations",
     "proxy_request_logs",
     "stream_check_logs",
     "provider_health",
@@ -549,6 +550,10 @@ impl Database {
                 connection,
             )?;
             crate::database::dao::relay_setup_operations::preserve_local(current_conn, connection)?;
+            crate::database::dao::vendor_connection_operations::preserve_local(
+                current_conn,
+                connection,
+            )?;
             Self::preserve_qoder_states_on_restore(current_conn, connection, current, next)?;
             crate::secrets::inventory::validate_storage_database(connection, next)
         })?;
@@ -904,7 +909,12 @@ impl Database {
         let backup_path = {
             let mut main_conn = lock_conn!(self.conn);
             super::storage::check_identity(&main_conn, vault)?;
-            let (preserved_bindings, preserved_qoder_operations, preserved_relay_operations) = {
+            let (
+                preserved_bindings,
+                preserved_qoder_operations,
+                preserved_relay_operations,
+                preserved_vendor_operations,
+            ) = {
                 let mut staged_conn = lock_conn!(staged.conn);
                 super::storage_generation::with_private_triggers_disabled(
                     &mut staged_conn,
@@ -921,12 +931,19 @@ impl Database {
                             &main_conn,
                             staged_conn,
                         )?;
+                        crate::database::dao::vendor_connection_operations::preserve_local(
+                            &main_conn,
+                            staged_conn,
+                        )?;
                         Ok((
                             crate::paperclip::bindings::read_rows(staged_conn)?,
                             crate::database::dao::qoder_campaign_operations::read_rows(
                                 staged_conn,
                             )?,
                             crate::database::dao::relay_setup_operations::read_rows(staged_conn)?,
+                            crate::database::dao::vendor_connection_operations::read_rows(
+                                staged_conn,
+                            )?,
                         ))
                     },
                 )?
@@ -946,6 +963,14 @@ impl Database {
                 != preserved_relay_operations
             {
                 return Err(AppError::Config("relaySetup.localOperationsChanged".into()));
+            }
+            crate::database::dao::vendor_connection_operations::validate_schema(&temp_conn)?;
+            if crate::database::dao::vendor_connection_operations::read_rows(&temp_conn)?
+                != preserved_vendor_operations
+            {
+                return Err(AppError::Config(
+                    "vendorConnection.localOperationsChanged".into(),
+                ));
             }
             super::storage_generation::with_private_triggers_disabled(
                 &mut temp_conn,
@@ -2076,6 +2101,10 @@ impl Database {
                 &staging_conn,
             )?;
             crate::database::dao::relay_setup_operations::preserve_local(
+                &main_conn,
+                &staging_conn,
+            )?;
+            crate::database::dao::vendor_connection_operations::preserve_local(
                 &main_conn,
                 &staging_conn,
             )?;

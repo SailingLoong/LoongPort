@@ -1,17 +1,9 @@
-import { useEffect, useRef, useState } from "react";
-import { useTranslation } from "react-i18next";
+import { useZCodeClaimControls } from "./viewmodels/useZCodeClaimControls";
+
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
-import { zcodeClaimApi, type ClaimState } from "@/lib/api/zcodeClaim";
 
-const emptyState: ClaimState = {
-  consentRevision: "",
-  enabled: false,
-  participants: [],
-  records: {},
-  busy: false,
-};
 const reasonText = {
   openOfficialClient: "Open official ZCode, then check again",
   notDue: "Plan is still valid; check after expiry",
@@ -37,148 +29,28 @@ export function ZCodeClaimControls({
   profiles: { id: string; label: string | null }[];
   disabled?: boolean;
 }) {
-  const { t } = useTranslation();
-  const copy = (
-    key: string,
-    fallback: string,
-    values?: Record<string, string>,
-  ) => t(`zcode.claim.${key}`, { defaultValue: fallback, ...values });
-  const [state, setState] = useState<ClaimState>(emptyState);
-  const [draftRevision, setDraftRevision] = useState("");
-  const resetDraft = useRef(false);
-  const [selected, setSelected] = useState<string[]>([]);
-  const [auto, setAuto] = useState(false);
-  const [loaded, setLoaded] = useState(false);
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState(false);
-  const epoch = useRef(0);
-  const operationInFlight = useRef(false);
-  const operationVersion = useRef(0);
-  const backendBusy = useRef(false);
-  const refresh = useRef<(() => void) | null>(null);
-  useEffect(() => {
-    const generation = ++epoch.current;
-    let disposed = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let initialized = false;
-    let reading = false;
-    setState(emptyState);
-    setSelected([]);
-    setDraftRevision("");
-    resetDraft.current = false;
-    setAuto(false);
-    setLoaded(false);
-    setPending(false);
-    setError(false);
-    backendBusy.current = false;
-    operationInFlight.current = false;
-    const poll = async () => {
-      if (disposed || reading || document.hidden) return;
-      reading = true;
-      const readVersion = operationVersion.current;
-      try {
-        const next = await zcodeClaimApi.state(dataRoot);
-        if (
-          !disposed &&
-          generation === epoch.current &&
-          readVersion === operationVersion.current
-        ) {
-          setState(next);
-          backendBusy.current = next.busy;
-          setLoaded(true);
-          setError(false);
-          if (!initialized || resetDraft.current) {
-            setDraftRevision(next.consentRevision);
-            resetDraft.current = false;
-            setSelected(next.participants);
-            setAuto(next.enabled);
-            initialized = true;
-          }
-        }
-      } catch {
-        if (
-          !disposed &&
-          generation === epoch.current &&
-          readVersion === operationVersion.current
-        ) {
-          setError(true);
-        }
-      } finally {
-        reading = false;
-        if (!disposed && !document.hidden)
-          timer = setTimeout(poll, backendBusy.current ? 2000 : 10000);
-      }
-    };
-    const visibility = () => {
-      clearTimeout(timer);
-      if (!document.hidden) void poll();
-    };
-    refresh.current = visibility;
-    document.addEventListener("visibilitychange", visibility);
-    void poll();
-    return () => {
-      disposed = true;
-      ++epoch.current;
-      clearTimeout(timer);
-      refresh.current = null;
-      document.removeEventListener("visibilitychange", visibility);
-    };
-  }, [dataRoot]);
-  const ids = selected.filter((id) =>
-    profiles.some((profile) => profile.id === id),
-  );
-  const claimable = ids.filter((id) => state.records[id]?.canClaim === true);
-  const blocked = disabled || pending || state.busy || !loaded;
-  async function perform(
-    operation: () => Promise<ClaimState>,
-    consent = false,
-  ) {
-    if (operationInFlight.current) return;
-    const generation = epoch.current;
-    operationInFlight.current = true;
-    ++operationVersion.current;
-    setPending(true);
-    setError(false);
-    try {
-      const next = await operation();
-      if (generation === epoch.current) {
-        // Retire reads that started while the command was still pending.
-        ++operationVersion.current;
-        setState(next);
-        if (consent) {
-          setDraftRevision(next.consentRevision);
-          setSelected(next.participants);
-          setAuto(next.enabled);
-        }
-        setError(false);
-        backendBusy.current = next.busy;
-        refresh.current?.();
-      }
-    } catch {
-      if (generation === epoch.current) {
-        ++operationVersion.current;
-        if (consent) {
-          // A failed/uncertain write is never replayed with a newer revision.
-          setDraftRevision("");
-          resetDraft.current = true;
-          refresh.current?.();
-        }
-        setError(true);
-      }
-    } finally {
-      if (generation === epoch.current) {
-        operationInFlight.current = false;
-        setPending(false);
-      }
-    }
-  }
-  const date = (seconds: number | null) => {
-    if (seconds === null) return copy("unknown", "Unknown");
-    const value = new Date(seconds * 1000);
-    return Number.isFinite(value.getTime())
-      ? value.toLocaleString()
-      : copy("unknown", "Unknown");
-  };
+  const {
+    checkSelected,
+    claimSelected,
+    checkAccount,
+    claimAccount,
+    cancelClaims,
+    applyAutomatic,
+    copy,
+    state,
+    draftRevision,
+    selectAccount,
+    auto,
+    setAuto,
+    loaded,
+    pending,
+    error,
+    ids,
+    claimable,
+    blocked,
+    date,
+  } = useZCodeClaimControls({ dataRoot, profiles, disabled });
+
   return (
     <section className="space-y-3" aria-label={copy("title", "Plan claims")}>
       <h4 className="text-sm font-medium">{copy("title", "Plan claims")}</h4>
@@ -187,18 +59,14 @@ export function ZCodeClaimControls({
           variant="outline"
           size="sm"
           disabled={blocked || ids.length === 0}
-          onClick={() =>
-            void perform(() => zcodeClaimApi.start(dataRoot, ids, true))
-          }
+          onClick={() => void checkSelected()}
         >
           {copy("checkSelected", "Check selected")}
         </Button>
         <Button
           size="sm"
           disabled={blocked || claimable.length === 0}
-          onClick={() =>
-            void perform(() => zcodeClaimApi.start(dataRoot, claimable, false))
-          }
+          onClick={() => void claimSelected()}
         >
           {copy("claimSelected", "Claim selected")}
         </Button>
@@ -211,7 +79,7 @@ export function ZCodeClaimControls({
               variant="outline"
               size="sm"
               disabled={pending || disabled}
-              onClick={() => void perform(() => zcodeClaimApi.cancel(dataRoot))}
+              onClick={() => void cancelClaims()}
             >
               {copy("cancel", "Cancel")}
             </Button>
@@ -231,12 +99,7 @@ export function ZCodeClaimControls({
           variant="outline"
           size="sm"
           disabled={blocked || !draftRevision || (auto && ids.length === 0)}
-          onClick={() =>
-            void perform(
-              () => zcodeClaimApi.setAuto(dataRoot, auto, ids, draftRevision),
-              true,
-            )
-          }
+          onClick={() => void applyAutomatic()}
         >
           {copy("applyAuto", "Apply automatic participation")}
         </Button>
@@ -276,14 +139,7 @@ export function ZCodeClaimControls({
                     checked={ids.includes(profile.id)}
                     disabled={blocked}
                     onCheckedChange={(checked) =>
-                      setSelected((previous) =>
-                        checked
-                          ? [
-                              ...previous.filter((id) => id !== profile.id),
-                              profile.id,
-                            ]
-                          : previous.filter((id) => id !== profile.id),
-                      )
+                      selectAccount(profile.id, checked === true)
                     }
                   />
                   <span className="break-all">
@@ -301,22 +157,14 @@ export function ZCodeClaimControls({
                     variant="outline"
                     size="sm"
                     disabled={blocked}
-                    onClick={() =>
-                      void perform(() =>
-                        zcodeClaimApi.start(dataRoot, [profile.id], true),
-                      )
-                    }
+                    onClick={() => void checkAccount(profile.id)}
                   >
                     {copy("check", "Check")}
                   </Button>
                   <Button
                     size="sm"
                     disabled={blocked || record?.canClaim !== true}
-                    onClick={() =>
-                      void perform(() =>
-                        zcodeClaimApi.start(dataRoot, [profile.id], false),
-                      )
-                    }
+                    onClick={() => void claimAccount(profile.id)}
                   >
                     {copy("claim", "Claim")}
                   </Button>

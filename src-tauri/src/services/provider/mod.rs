@@ -2726,6 +2726,40 @@ requires_openai_auth = true
 
     #[test]
     #[serial]
+    fn openclaw_provider_update_waits_for_original_app_owner() {
+        with_test_home(|state, _| {
+            let provider = openclaw_provider("synthetic-lock-test");
+            state.db.save_provider("openclaw", &provider).unwrap();
+            let owner =
+                futures::executor::block_on(state.proxy_service.lock_switch_for_app("openclaw"));
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let worker_state = state.clone();
+            let worker = std::thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                let result =
+                    ProviderService::update(&worker_state, AppType::OpenClaw, None, provider);
+                done_tx.send(result).unwrap();
+            });
+            started_rx.recv().unwrap();
+            let early = done_rx.recv_timeout(std::time::Duration::from_millis(300));
+            drop(owner);
+            if early.is_err() {
+                done_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap()
+                    .unwrap();
+            }
+            worker.join().unwrap();
+            assert!(
+                matches!(early, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+                "provider update bypassed the held application owner"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
     fn duplicate_additive_provider_avoids_live_only_ids_and_inserts_after_source() {
         with_test_home(|state, _| {
             let source = openclaw_provider("deepseek");
@@ -5417,6 +5451,25 @@ impl ProviderService {
         provider: Provider,
         add_to_live: bool,
     ) -> Result<bool, AppError> {
+        Self::add_with_maintenance(state, app_type, provider, add_to_live, false)
+    }
+
+    pub(crate) fn add_manual(
+        state: &AppState,
+        app_type: AppType,
+        provider: Provider,
+        add_to_live: bool,
+    ) -> Result<bool, AppError> {
+        Self::add_with_maintenance(state, app_type, provider, add_to_live, true)
+    }
+
+    fn add_with_maintenance(
+        state: &AppState,
+        app_type: AppType,
+        provider: Provider,
+        add_to_live: bool,
+        mark_user_edited: bool,
+    ) -> Result<bool, AppError> {
         if app_type == AppType::Mcode {
             return mcode::add(state, provider, add_to_live);
         }
@@ -5427,6 +5480,7 @@ impl ProviderService {
         let _guard = if modern
             || managed
             || app_type == AppType::CodexImage
+            || crate::vendor::provision::VENDOR_APPS.contains(&app_type)
             || managed_inference::is_managed_inference(&provider)
         {
             Some(futures::executor::block_on(
@@ -5436,7 +5490,7 @@ impl ProviderService {
             None
         };
         crate::mode::operation::admit_metadata_write(&state.proxy_service, &app_type)?;
-        Self::add_locked(state, app_type, provider, add_to_live)
+        Self::add_locked(state, app_type, provider, add_to_live, mark_user_edited)
     }
 
     /// Caller has already admitted the write and owns the applicable app lock.
@@ -5445,6 +5499,7 @@ impl ProviderService {
         app_type: AppType,
         provider: Provider,
         add_to_live: bool,
+        mark_user_edited: bool,
     ) -> Result<bool, AppError> {
         // The explicit account entry joins the existing application chain. It
         // never assigns the direct pointer, merges credential-bearing snippets,
@@ -5467,12 +5522,12 @@ impl ProviderService {
                     "managedAccount.providerAlreadyExists".into(),
                 ));
             }
-            state.db.save_provider(app_type.as_str(), &provider)?;
+            Self::save_added_provider(state, &app_type, &provider, mark_user_edited)?;
             return Ok(true);
         }
 
         if app_type == AppType::Pi {
-            return pi::add(state, provider, add_to_live);
+            return pi::add(state, provider, add_to_live, mark_user_edited);
         }
 
         let mut provider = provider;
@@ -5495,7 +5550,7 @@ impl ProviderService {
             // the same switch lock until that row is committed so a waiting switch
             // cannot observe a partially saved binding.
             if effective_current.is_some() {
-                state.db.save_provider(app_type.as_str(), &provider)?;
+                Self::save_added_provider(state, &app_type, &provider, mark_user_edited)?;
                 return Ok(true);
             }
 
@@ -5517,7 +5572,7 @@ impl ProviderService {
                     &provider,
                     preflighted_provider.as_ref(),
                 )?;
-                state.db.save_provider(app_type.as_str(), &provider)?;
+                Self::save_added_provider(state, &app_type, &provider, mark_user_edited)?;
                 provider_saved = true;
                 state
                     .db
@@ -5541,7 +5596,7 @@ impl ProviderService {
         }
 
         // Save to database
-        state.db.save_provider(app_type.as_str(), &provider)?;
+        Self::save_added_provider(state, &app_type, &provider, mark_user_edited)?;
 
         // Additive mode apps (OpenCode, OpenClaw): optionally write to live config.
         if app_type.is_additive_mode() {
@@ -5574,6 +5629,19 @@ impl ProviderService {
         Ok(true)
     }
 
+    fn save_added_provider(
+        state: &AppState,
+        app: &AppType,
+        provider: &Provider,
+        mark: bool,
+    ) -> Result<(), AppError> {
+        if mark {
+            state.db.save_manual_provider(app.as_str(), provider)
+        } else {
+            state.db.save_provider(app.as_str(), provider)
+        }
+    }
+
     /// Duplicate a provider using backend-owned identifiers, live-config checks,
     /// and sort ordering. Additive-mode copies remain database-only until the
     /// user explicitly adds them to the live config.
@@ -5583,7 +5651,9 @@ impl ProviderService {
         source_id: &str,
     ) -> Result<Provider, AppError> {
         // Independent apps retain their own owners (Pi's add acquires its lock).
-        let _guard = if app_type.supports_local_proxy() {
+        let _guard = if app_type.supports_local_proxy()
+            || crate::vendor::provision::VENDOR_APPS.contains(&app_type)
+        {
             Some(futures::executor::block_on(
                 state.proxy_service.lock_switch_for_app(app_type.as_str()),
             ))
@@ -5629,7 +5699,7 @@ impl ProviderService {
         }
 
         let add_to_live = !app_type.is_additive_mode();
-        Self::add_locked(state, app_type, duplicate.clone(), add_to_live)?;
+        Self::add_locked(state, app_type, duplicate.clone(), add_to_live, false)?;
         Ok(duplicate)
     }
 
@@ -5678,7 +5748,10 @@ impl ProviderService {
     ) -> Result<bool, AppError> {
         // Image reviewed selection and its existing edit owner share one lock.
         // Do not route Image into the native/proxy writer below.
-        let _image_guard = if app_type == AppType::CodexImage {
+        let _image_guard = if app_type == AppType::CodexImage
+            || (!app_type.supports_local_proxy()
+                && crate::vendor::provision::VENDOR_APPS.contains(&app_type))
+        {
             Some(futures::executor::block_on(
                 state.proxy_service.lock_switch_for_app(app_type.as_str()),
             ))
@@ -6351,6 +6424,16 @@ impl ProviderService {
             return pi::delete(state, id);
         }
 
+        let _nonproxy_guard = if !app_type.supports_local_proxy()
+            && crate::vendor::provision::VENDOR_APPS.contains(&app_type)
+        {
+            Some(futures::executor::block_on(
+                state.proxy_service.lock_switch_for_app(app_type.as_str()),
+            ))
+        } else {
+            None
+        };
+
         // Additive mode apps - no current provider concept
         if app_type.is_additive_mode() {
             // Single DB read shared across all additive-mode sub-paths below.
@@ -6530,6 +6613,7 @@ impl ProviderService {
         // publication under the canonical app owner; proxy/mode policy below
         // remains restricted to local-proxy applications.
         let _switch_guard = if app_type.supports_local_proxy()
+            || crate::vendor::provision::VENDOR_APPS.contains(&app_type)
             || matches!(
                 app_type,
                 AppType::OpenCode | AppType::Hermes | AppType::CodexImage

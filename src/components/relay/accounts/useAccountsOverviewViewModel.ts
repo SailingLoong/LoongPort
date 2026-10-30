@@ -8,6 +8,8 @@ import {
 } from "./automaticClaimSettings";
 import { useAccountPlatformPresence } from "./useAccountPlatformPresence";
 import { useServiceAccounts } from "./useServiceAccounts";
+import { useWorkBuddyNativeCatalog } from "./useWorkBuddyNativeCatalog";
+import { resolveWorkBuddyNativeIdentity } from "./workbuddyNativeRowIdentity";
 import {
   projectAccountOverviewRow,
   type AccountRowVM,
@@ -87,6 +89,15 @@ export function useAccountsOverviewViewModel(options: Options = {}) {
   );
   const unavailablePlatforms = new Set(presence.data?.unavailable ?? []);
   if (services.error) unavailablePlatforms.add("opencode");
+  const nativeCatalog = useWorkBuddyNativeCatalog({
+    accounts: allAccounts,
+    revision: presence.dataUpdatedAt,
+    fresh:
+      !presence.isPending &&
+      !presence.isFetching &&
+      !presence.error &&
+      !unavailablePlatforms.has("workbuddy"),
+  });
   const readPending = (id: AccountPlatform) =>
     id === "opencode" ? Boolean(services.isPending) : presence.isPending;
   const present = new Set([
@@ -124,6 +135,14 @@ export function useAccountsOverviewViewModel(options: Options = {}) {
       nowMs,
       freshness,
       automaticPolicy: automaticClaimSetting(account),
+      nativeIdentity: resolveWorkBuddyNativeIdentity(
+        account,
+        allAccounts,
+        nativeCatalog,
+      ),
+      nativeSwitchSupported:
+        nativeCatalog.state === "success" &&
+        nativeCatalog.data?.activationAvailable === true,
       automaticUnconfirmed:
         options.automaticUnconfirmed?.[automaticClaimKey(account)] ===
         automaticPolicyStamp(account),

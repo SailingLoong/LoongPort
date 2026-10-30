@@ -1149,4 +1149,28 @@ describe("ZCode official login dialog", () => {
       ).not.toBeInTheDocument();
     },
   );
+  it("headless begin refuses a device already bound to an account", async () => {
+    const { renderHook } = await import("@testing-library/react");
+    const { useZCodeOAuthAdd } =
+      await import("@/components/zcode/viewmodels/useZCodeOAuthAdd");
+    const device = "11111111-2222-4333-8444-555555555555";
+    vi.mocked(zcodeDeviceApi.state).mockResolvedValue({
+      devices: [device],
+      selectedDeviceMid: device,
+      effectiveDeviceMid: device,
+      restartRequired: false,
+      revision: 1,
+    });
+    const { result: vm } = renderHook(() =>
+      useZCodeOAuthAdd({
+        open: true,
+        onClose: vi.fn(),
+        onSaved: vi.fn(async () => {}),
+        boundDeviceMids: [device],
+      }),
+    );
+    await waitFor(() => expect(vm.current.deviceLoading).toBe(false));
+    await act(() => vm.current.begin());
+    expect(zcodeLoginApi.begin).not.toHaveBeenCalled();
+  });
 });

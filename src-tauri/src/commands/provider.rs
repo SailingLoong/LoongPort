@@ -237,16 +237,7 @@ fn add_provider_internal(
     add_to_live: bool,
 ) -> Result<bool, AppError> {
     let provider_id = provider.id.clone();
-    // `app_type` 下一步会被 move 进 impl，先扣出字符串给 set_user_edited 用。
-    let app_type_name = app_type.as_str().to_string();
     let result = add_provider_internal_impl(state, app_type.clone(), provider, add_to_live)?;
-    // 用户手工新建的 provider 归他维护 ⇒ 置「已手工维护」标记。
-    // provision 不走这条命令（直调 save_provider），所以托管档位不会被误置位。
-    if app_type_name != "mcode" {
-        state
-            .db
-            .set_user_edited(&app_type_name, &provider_id, true)?;
-    }
     if result && add_to_live && app_type.is_additive_mode() {
         crate::services::application_overview::record_successful_selection(
             &state.db,
@@ -276,7 +267,7 @@ fn add_provider_internal_impl(
     // provision 自己不走这条命令（它直调 `state.db.save_provider`），所以拦这里
     // 不影响正常的档位生成。
     crate::relay::reject_if_managed(&provider.id)?;
-    ProviderService::add(state, app_type, provider, add_to_live)
+    ProviderService::add_manual(state, app_type, provider, add_to_live)
 }
 
 #[tauri::command]
@@ -895,6 +886,69 @@ mod managed_guard_tests {
         assert!(!prepared.id.is_empty());
         assert!(uuid::Uuid::parse_str(&prepared.id).is_ok());
         assert!(prepared.created_at.is_some());
+    }
+
+    #[test]
+    fn failed_new_provider_mark_does_not_leave_a_row_for_retry() {
+        let state = empty_state();
+        let existing = Provider::with_id(
+            "existing".into(),
+            "existing".into(),
+            serde_json::json!({}),
+            None,
+        );
+        state.db.save_provider("codex", &existing).unwrap();
+        state.db.set_current_provider("codex", "existing").unwrap();
+        state.db.conn.lock().unwrap().execute_batch(
+            "CREATE TRIGGER reject_new_mark BEFORE UPDATE OF user_edited ON providers WHEN NEW.user_edited=1 BEGIN SELECT RAISE(FAIL,'synthetic mark failure'); END;"
+        ).unwrap();
+        let draft = Provider::with_id(
+            String::new(),
+            "synthetic new".into(),
+            serde_json::json!({"auth": {"OPENAI_API_KEY": "synthetic-only"}, "config": ""}),
+            None,
+        );
+        let first = prepare_provider_for_add(&state, AppType::Codex, draft.clone(), None).unwrap();
+        assert!(add_provider_internal(&state, AppType::Codex, first.clone(), false).is_err());
+        assert!(
+            state
+                .db
+                .get_provider_by_id(&first.id, "codex")
+                .unwrap()
+                .is_none(),
+            "failed add left a persisted provider"
+        );
+        state
+            .db
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_new_mark")
+            .unwrap();
+        let retry = prepare_provider_for_add(&state, AppType::Codex, draft, None).unwrap();
+        add_provider_internal(&state, AppType::Codex, retry.clone(), false).unwrap();
+        assert!(state
+            .db
+            .get_provider_by_id(&retry.id, "codex")
+            .unwrap()
+            .is_some());
+        assert!(state.db.get_user_edited("codex", &retry.id).unwrap());
+        assert!(
+            state
+                .db
+                .get_provider_by_id(&first.id, "codex")
+                .unwrap()
+                .is_none(),
+            "retry created a second provider while the failed row remains"
+        );
+        let generic = Provider::with_id(
+            "synthetic-generic".into(),
+            "generic".into(),
+            serde_json::json!({"auth": {"OPENAI_API_KEY": "synthetic-only"}, "config": ""}),
+            None,
+        );
+        ProviderService::add(&state, AppType::Codex, generic.clone(), false).unwrap();
+        assert!(!state.db.get_user_edited("codex", &generic.id).unwrap());
     }
 
     #[test]

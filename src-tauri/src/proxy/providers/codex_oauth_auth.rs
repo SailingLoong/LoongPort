@@ -1872,7 +1872,12 @@ fn classify_refresh_http_failure(status: reqwest::StatusCode, text: &str) -> Cod
     if status == reqwest::StatusCode::UNAUTHORIZED
         || matches!(
             refresh_error_code.as_deref(),
-            Some("refresh_token_expired" | "refresh_token_reused" | "refresh_token_invalidated")
+            Some(
+                "invalid_grant"
+                    | "refresh_token_expired"
+                    | "refresh_token_reused"
+                    | "refresh_token_invalidated"
+            )
         )
     {
         return CodexOAuthError::RefreshTokenInvalid;
@@ -2591,6 +2596,7 @@ mod tests {
     #[test]
     fn refresh_http_failure_preserves_explicit_invalid_codes() {
         for code in [
+            "invalid_grant",
             "refresh_token_expired",
             "refresh_token_reused",
             "refresh_token_invalidated",
@@ -2609,6 +2615,23 @@ mod tests {
                 );
             }
         }
+        // 400 invalid_grant 是标准 OAuth「refresh token 已死」信号（Codex CLI 同样
+        // 判永久）；按瞬时分类会让真过期的登录永远重试而不是提示重新登录
+        assert!(matches!(
+            classify_refresh_http_failure(
+                reqwest::StatusCode::BAD_REQUEST,
+                r#"{"error":{"code":"invalid_grant"}}"#
+            ),
+            CodexOAuthError::RefreshTokenInvalid
+        ));
+        // 400 上没有 invalid_grant 的错误码仍可重试
+        assert!(matches!(
+            classify_refresh_http_failure(
+                reqwest::StatusCode::BAD_REQUEST,
+                r#"{"error":{"code":"temporarily_unavailable"}}"#
+            ),
+            CodexOAuthError::TokenFetchFailed(_)
+        ));
     }
 
     #[test]

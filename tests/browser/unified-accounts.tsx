@@ -171,6 +171,13 @@ mockIPC(
         automaticStatusReads[provider] += 1;
         return { ...automaticSnapshots[provider] };
       }
+      case "list_workbuddy_native_captures":
+        // Read-only catalog fixture; no native capture/activation or adoption claim.
+        return {
+          accounts: [],
+          requestOutcome: "unknown",
+          activationAvailable: false,
+        };
       case "list_workbuddy_accounts":
         if (alignmentControls.failReads)
           throw new Error("Synthetic read failure");

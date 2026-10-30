@@ -228,6 +228,17 @@ pub(crate) async fn activate_workbuddy_native_account(
 }
 
 #[tauri::command]
+pub(crate) async fn activate_workbuddy_native_with_restart(
+    state: State<'_, AppState>,
+    target: crate::workbuddy::native_activation::SelectionKey,
+) -> Result<
+    crate::workbuddy::native_activation::SwitchReport,
+    crate::workbuddy::native_activation::SwitchError,
+> {
+    crate::workbuddy::native_activation::activate_with_restart(state.db.clone(), target).await
+}
+
+#[tauri::command]
 pub(crate) async fn recover_workbuddy_native_switch(
     state: State<'_, AppState>,
 ) -> Result<

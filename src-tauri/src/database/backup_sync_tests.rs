@@ -226,3 +226,75 @@ fn sync_join_rejects_unknown_schema_and_normal_import_accepts20() {
     let staged = Database::validate_sync_snapshot(&sql, &metadata, &vault).unwrap();
     assert_eq!(Database::get_user_version(&staged.connection).unwrap(), 20);
 }
+
+#[test]
+fn vendor_connection_sync_join_retains_local_unknown() {
+    use crate::database::vendor_connection_operations as ledger;
+    let home = TestHome::new().unwrap();
+    let current = VaultContext::generate()
+        .unwrap()
+        .with_password("synthetic-current-password")
+        .unwrap();
+    let next = VaultContext::generate()
+        .unwrap()
+        .with_password("synthetic-next-password")
+        .unwrap();
+    let local = database(&current, &home.path().join("current"), 20);
+    let incoming = database(&next, &home.path().join("incoming"), 20);
+    let receipt = ledger::Receipt {
+        schema_version: 1,
+        operation_id: "2d75e8d4-9140-45eb-b67d-39ed8c854030".into(),
+        storage_binding: "synthetic-local".into(),
+        account_identity: "synthetic-account-digest".into(),
+        row_id: 1,
+        vendor_id: "opencode".into(),
+        plan: "opencode".into(),
+        app: "codex".into(),
+        provider_id: "synthetic-provider".into(),
+        provider_revision: "synthetic-provider-revision".into(),
+        credential_revision: "synthetic-key-revision".into(),
+        configuration_revision: "synthetic-configuration-revision".into(),
+        completed_configuration_revision: None,
+        catalog_decision: None,
+        prepared_request: None,
+        state: "prepared".into(),
+        receipt_revision: 1,
+    };
+    {
+        let mut conn = local.conn.lock().unwrap();
+        ledger::prepare_on(&mut conn, &receipt).unwrap();
+        ledger::transition_on(
+            &mut conn,
+            &receipt.storage_binding,
+            &receipt.operation_id,
+            1,
+            "applying",
+            |_| Ok(()),
+        )
+        .unwrap();
+        ledger::transition_on(
+            &mut conn,
+            &receipt.storage_binding,
+            &receipt.operation_id,
+            2,
+            "unknown",
+            |_| Ok(()),
+        )
+        .unwrap();
+    }
+    let before = ledger::read_rows(&local.conn.lock().unwrap()).unwrap();
+    let (sql, metadata) = incoming.export_sync_snapshot().unwrap();
+    let staged = local
+        .validate_sync_snapshot_for_current(&sql, &metadata, &next)
+        .unwrap();
+    let joined =
+        Database::prepare_sync_join(staged, &local.conn.lock().unwrap(), &current, &next).unwrap();
+    assert!(ledger::read_rows(&joined).unwrap() == before);
+    assert_eq!(
+        ledger::read_on(&joined, &receipt.operation_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        "unknown"
+    );
+}

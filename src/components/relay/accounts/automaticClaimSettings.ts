@@ -1,6 +1,7 @@
-import { workbuddyApi } from "@/lib/api/workbuddy";
+import { AutomaticClaimNotDispatchedError } from "./automaticClaimDispatch";
+import { type WorkBuddyAccount, workbuddyApi } from "@/lib/api/workbuddy";
 import { minimaxCodeApi } from "@/lib/api/minimaxCode";
-import { traeAccountsApi } from "@/lib/api/traeAccounts";
+import { type TraeAccountView, traeAccountsApi } from "@/lib/api/traeAccounts";
 import { qoderDailyApi } from "@/lib/api/qoderDaily";
 import { qoderCnCampaignsApi } from "@/lib/api/qoderCnCampaigns";
 import { zcodeClaimApi } from "@/lib/api/zcodeClaim";
@@ -89,13 +90,43 @@ export function automaticClaimSetting(account: Account) {
   };
 }
 
+/** A setter receipt confirms only the requested policy on the reviewed owner. */
+export function confirmsWorkBuddyAutomaticPolicy(
+  previous: WorkBuddyAccount,
+  next: WorkBuddyAccount,
+  enabled: boolean,
+): boolean {
+  return (
+    next.id === previous.id &&
+    next.generation === previous.generation &&
+    next.autoClaimPolicyVersion === previous.autoClaimPolicyVersion &&
+    next.autoClaimRevision > previous.autoClaimRevision &&
+    next.autoClaimEnabled === enabled
+  );
+}
+
+export function confirmsTraeAutomaticPolicy(
+  previous: TraeAccountView,
+  next: TraeAccountView,
+  enabled: boolean,
+): boolean {
+  return (
+    next.id === previous.id &&
+    next.generation === previous.generation &&
+    next.autoCheckinRevision !== undefined &&
+    next.autoCheckinRevision > (previous.autoCheckinRevision ?? 0) &&
+    next.autoCheckinEnabled === enabled
+  );
+}
+
 /** Set explicit existing snapshots through their original owner, retaining its concurrency checks. */
 export async function setAutomaticClaimSetting(
   account: Account,
   enabled: boolean,
 ): Promise<Account> {
   const snapshot = account.snapshot;
-  if (!snapshot) throw new Error("Unavailable policy");
+  if (!snapshot)
+    throw new AutomaticClaimNotDispatchedError("Unavailable policy");
   if (
     snapshot.kind !== "auth" &&
     snapshot.kind !== "zcode" &&
@@ -103,17 +134,11 @@ export async function setAutomaticClaimSetting(
       ? snapshot.value.providerId
       : snapshot.value.id) !== account.id
   )
-    throw new Error("Owner changed");
+    throw new AutomaticClaimNotDispatchedError("Owner changed");
   switch (snapshot.kind) {
     case "workbuddy": {
       const next = await workbuddyApi.setAutomatic(snapshot.value, enabled);
-      if (
-        next.id !== account.id ||
-        next.generation !== snapshot.value.generation ||
-        next.autoClaimPolicyVersion !== snapshot.value.autoClaimPolicyVersion ||
-        next.autoClaimRevision <= snapshot.value.autoClaimRevision ||
-        next.autoClaimEnabled !== enabled
-      )
+      if (!confirmsWorkBuddyAutomaticPolicy(snapshot.value, next, enabled))
         throw new Error("Unconfirmed policy");
       return { ...account, snapshot: { kind: "workbuddy", value: next } };
     }
@@ -131,13 +156,7 @@ export async function setAutomaticClaimSetting(
     }
     case "trae": {
       const next = await traeAccountsApi.setAutomatic(snapshot.value, enabled);
-      if (
-        next.id !== account.id ||
-        next.generation !== snapshot.value.generation ||
-        next.autoCheckinRevision === undefined ||
-        next.autoCheckinRevision <= (snapshot.value.autoCheckinRevision ?? 0) ||
-        next.autoCheckinEnabled !== enabled
-      )
+      if (!confirmsTraeAutomaticPolicy(snapshot.value, next, enabled))
         throw new Error("Unconfirmed policy");
       return { ...account, snapshot: { kind: "trae", value: next } };
     }
@@ -161,7 +180,7 @@ export async function setAutomaticClaimSetting(
       return { ...account, snapshot: { ...snapshot, value: next } };
     }
     default:
-      throw new Error("Unavailable policy");
+      throw new AutomaticClaimNotDispatchedError("Unavailable policy");
   }
 }
 
@@ -171,9 +190,16 @@ export async function setZCodeAutomaticSelection(
   enabled: boolean,
 ): Promise<Account[]> {
   const snapshot = accounts[0]?.snapshot;
-  if (snapshot?.kind !== "zcode") throw new Error("Unavailable policy");
-  const current = await zcodeClaimApi.state(snapshot.dataRoot);
-  if (current.busy) throw new Error("Owner busy");
+  if (snapshot?.kind !== "zcode")
+    throw new AutomaticClaimNotDispatchedError("Unavailable policy");
+  const current = await zcodeClaimApi
+    .state(snapshot.dataRoot)
+    .catch((cause: unknown) => {
+      throw new AutomaticClaimNotDispatchedError("Policy read unavailable", {
+        cause,
+      });
+    });
+  if (current.busy) throw new AutomaticClaimNotDispatchedError("Owner busy");
   if (
     !snapshot.value.consentRevision ||
     accounts.some((account) => {
@@ -186,7 +212,7 @@ export async function setZCodeAutomaticSelection(
     }) ||
     current.consentRevision !== snapshot.value.consentRevision
   )
-    throw new Error("Changed policy");
+    throw new AutomaticClaimNotDispatchedError("Changed policy");
   const selected = new Set(accounts.map((account) => account.id));
   const participants = enabled
     ? [

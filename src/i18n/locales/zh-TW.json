@@ -1,5 +1,28 @@
 {
+  "claimSettings": {
+    "notDispatched": "設定未送出，請重新整理並再次確認。"
+  },
   "accountsOverview": {
+    "nativeSwitch": {
+      "title": "確認切換帳號",
+      "confirm": "將正常結束執行中的 WorkBuddy，切換至 {{name}} 的認證檔；僅在本次操作結束客戶端時嘗試重新開啟。帳號是否生效須另行驗證。",
+      "action": "確認切換",
+      "applied": "認證檔已切換。",
+      "alreadyApplied": "認證檔已是目標內容。",
+      "notNeeded": "客戶端原本未執行，未啟動。",
+      "requested": "已請求啟動；帳號是否生效尚未驗證。",
+      "failed": "啟動失敗。",
+      "unknown": "啟動結果未知。",
+      "error": {
+        "outcomeUnknown": "切換結果未知，請先核對原操作，勿重複切換。",
+        "quitRefused": "客戶端拒絕結束，未切換認證檔。",
+        "quitTimeout": "客戶端結束逾時，未切換認證檔。",
+        "writersRemaining": "仍有客戶端程序執行中，未切換認證檔。",
+        "busy": "另一項切換正在進行，本次未執行。",
+        "sourceChanged": "客戶端來源已變更，未切換認證檔。",
+        "transaction": "認證檔事務回報異常（{{reason}}），再次操作前請檢查復原狀態。"
+      }
+    },
     "switch": "切換",
     "switchUnavailable": "目前尚無可驗證的用戶端切換能力",
     "hideExhausted": "隱藏已耗盡",
@@ -3940,7 +3963,7 @@
         "cancelled": "已取消",
         "changed": "設定已變更，請檢查",
         "verificationFailed": "無法驗證，請重試讀取",
-        "unverified": "設定結果未驗證，請檢查"
+        "unverified": "套用狀態未確認，請檢查"
       },
       "reapply": "重新套用此設定",
       "continueSetup": "繼續設定",
@@ -4420,6 +4443,11 @@
       "chooseReasoning": "請明確選擇思考預設值",
       "sourceChangeEffectsUnavailable": "無法核對清理明細，請重新開啟此視窗後再繼續。",
       "sourceConfirmationRequired": "需要重新明確選擇模型和思考預設值，並確認目前來源。"
+    },
+    "vendorRecovery": {
+      "title": "複核並建立新連線",
+      "description": "無法核實先前連線操作的結果。確認後將保留原紀錄，並為 {{name}} 建立新的連線；這不代表先前操作已經成功。",
+      "confirm": "確認新連線"
     }
   },
   "secrets": {
@@ -5034,6 +5062,50 @@
     }
   },
   "workbuddy": {
+    "nativeRecovery": {
+      "title": "認證檔案復原",
+      "description": "請先結束 WorkBuddy 與相關程序。復原依目前保險庫的原始日誌執行，不會自動結束或啟動用戶端。",
+      "check": "檢查復原狀態",
+      "open": "復原認證檔案",
+      "busy": "處理中；離開畫面不會取消已送出的復原操作。",
+      "phase": {
+        "pending": "目前日誌快照有待復原項目。",
+        "clear": "目前日誌快照沒有待復原項目。",
+        "absent": "目前沒有日誌。"
+      },
+      "after": {
+        "pending": "復原後讀取的目前日誌快照：仍待復原。",
+        "clear": "復原後讀取的目前日誌快照：沒有待復原項目。",
+        "absent": "復原後讀取的目前日誌快照：不存在。"
+      },
+      "restored": "最近一次收到的復原回執：原始檔案已復原。",
+      "alreadyApplied": "最近一次收到的復原回執：已提交的目標檔案仍相符。",
+      "error": {
+        "unsupported": "目前平台不支援此操作。",
+        "checkFailed": "檢查失敗，請重新檢查。",
+        "afterCheckFailed": "已收到復原回執，但後續日誌檢查失敗。",
+        "recoveryUnknown": "復原結果尚未確認；操作可能仍在執行，不會自動重試。"
+      },
+      "unresolved": "先前復原結果仍未確認；目前快照及後續回執無法證明先前請求的結果。",
+      "unknown": "日誌快照不能證明先前未知請求的結果，也不能證明用戶端帳號已生效。",
+      "confirmTitle": "確認復原認證檔案",
+      "confirmDescription": "請先結束 WorkBuddy 與相關程序。將依目前保險庫中的原始日誌復原認證檔案；不會自動啟動用戶端，也不會重播切換。",
+      "confirm": "確認復原"
+    },
+    "nativeCapture": {
+      "open": "儲存目前原生帳號",
+      "title": "儲存目前 WorkBuddy 帳號",
+      "description": "將目前用戶端的本機認證快照儲存至 LoongPort 保險庫，僅用於本機用戶端切換；這不證明登入有效，也不提供 API 授權。",
+      "existing": "如果同一帳號已存在（包括作為 API 帳號），目前無法在此為其補存；不會刪除或覆蓋現有帳號。",
+      "conflict": "來源與現有帳號或已變更的狀態衝突；不會覆蓋或刪除現有帳號。",
+      "label": "帳號標籤（不是憑證）",
+      "confirm": "確認並儲存快照",
+      "cancel": "取消",
+      "close": "關閉",
+      "busy": "正在儲存……離開此畫面不會停止已開始的背景工作。",
+      "unknown": "結果尚未確認；查看清單不能證明本次操作失敗，也不會自動重試。",
+      "saved": "最近一次擷取已儲存；不代表登入有效或具有 API 權限。"
+    },
     "nativePreview": {
       "title": "WorkBuddy 原生用戶端觀測",
       "description": "僅在點擊後讀取已知的中國大陸版認證檔案位置。不儲存帳號，不修改檔案或設定。",
@@ -5045,7 +5117,7 @@
       "realmCodebuddy": "文件登入網域：CodeBuddy 中國大陸版（www.codebuddy.cn）",
       "markerPresent": "登出標記觀測：存在。",
       "markerAbsent": "登出標記觀測：不存在。",
-      "notActivation": "僅為已知位置觀測，未認證安裝或驗證登入有效性；登出標記不代表登入狀態。尚未啟用帳號擷取或切換。",
+      "notActivation": "僅為已知位置觀測，未認證安裝或驗證登入有效性；登出標記不代表登入狀態。",
       "error": {
         "unsafeSource": "來源不符合安全讀取條件。",
         "sourceChanged": "觀測期間檔案發生變化，請稍後重試。",

@@ -465,3 +465,19 @@ it("refreshes a rejected consent draft without retrying the grant", async () => 
   expect(screen.getByLabelText("Select Account A")).not.toBeChecked();
   expect(zcodeClaimApi.setAuto).toHaveBeenCalledTimes(1);
 });
+
+it("headless commands enforce disabled admission before dispatch", async () => {
+  const { renderHook, act } = await import("@testing-library/react");
+  const { useZCodeClaimControls } =
+    await import("@/components/zcode/viewmodels/useZCodeClaimControls");
+  const { result } = renderHook(() =>
+    useZCodeClaimControls({
+      dataRoot: "/synthetic/library",
+      profiles,
+      disabled: true,
+    }),
+  );
+  await waitFor(() => expect(result.current.loaded).toBe(true));
+  await act(() => result.current.checkAccount("a"));
+  expect(zcodeClaimApi.start).not.toHaveBeenCalled();
+});

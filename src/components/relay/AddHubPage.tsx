@@ -94,19 +94,26 @@ export function AddHubPage({
   const [account, setAccount] = useState<ConnectedService | null>(null);
   const [configuring, setConfiguring] = useState(false);
   const [manualRevision, setManualRevision] = useState(0);
-  const completeConnection = () => {
+  const completeConnection = (generation: number) => {
+    if (!active.current || generation !== saveGeneration.current) return;
     setAccount(null);
     setConfiguring(false);
     setDomain("");
     leaveHub();
   };
   const connected = (value: ConnectedService) => {
+    advanceDestination();
     setAccount(value);
     setConfiguring(true);
   };
 
   const [tab, setTab] = useState<AddHubTab>(entryRequest?.tab ?? initialTab);
   const [appliedEntryId, setAppliedEntryId] = useState(entryRequest?.id);
+  const [appliedSourceAppId, setAppliedSourceAppId] = useState(sourceAppId);
+  if (sourceAppId !== appliedSourceAppId) {
+    setAppliedSourceAppId(sourceAppId);
+    advanceDestination();
+  }
   if (entryRequest && entryRequest.id !== appliedEntryId) {
     setAppliedEntryId(entryRequest.id);
     setTab(entryRequest.tab);
@@ -114,6 +121,8 @@ export function AddHubPage({
     setSourceRevision(advanceDestination());
     setConfiguring(false);
   }
+
+  const configurationGeneration = saveGeneration.current;
 
   useEffect(() => {
     if (viewActive && !configuring && !sourceIntent)
@@ -175,8 +184,11 @@ export function AddHubPage({
             key={`${account.kind}:${account.rowId}`}
             account={account}
             sourceAppId={sourceAppId}
-            onBack={() => setConfiguring(false)}
-            onDone={completeConnection}
+            onBack={() => {
+              advanceDestination();
+              setConfiguring(false);
+            }}
+            onDone={() => completeConnection(configurationGeneration)}
           />
         </PreservedView>
       )}
@@ -226,7 +238,10 @@ export function AddHubPage({
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => setConfiguring(true)}
+                onClick={() => {
+                  advanceDestination();
+                  setConfiguring(true);
+                }}
               >
                 {t("loongport.onboarding.resume")}
               </Button>

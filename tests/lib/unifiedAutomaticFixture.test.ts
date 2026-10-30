@@ -73,3 +73,24 @@ it("provides a synthetic WorkBuddy account so its detail status can render", () 
     }),
   ]);
 });
+
+it("provides only the reviewed empty native catalog read without granting activation", () => {
+  const before = [...(window as any).unifiedLayout.rejectedCommands];
+  expect(boundary.invoke!("list_workbuddy_native_captures")).toEqual({
+    accounts: [],
+    requestOutcome: "unknown",
+    activationAvailable: false,
+  });
+  expect((window as any).unifiedLayout.rejectedCommands).toEqual(before);
+});
+it.each([
+  "capture_workbuddy_native_account",
+  "activate_workbuddy_native_account",
+  "activate_workbuddy_native_with_restart",
+  "recover_workbuddy_native_switch",
+])("continues to reject native write %s in the browser fixture", (command) => {
+  expect(() => boundary.invoke!(command)).toThrow(
+    "Unexpected synthetic fixture command",
+  );
+  expect((window as any).unifiedLayout.rejectedCommands).toContain(command);
+});

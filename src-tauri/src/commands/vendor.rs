@@ -421,22 +421,70 @@ pub async fn vendor_switch(
     plan: String,
     app: String,
     quit_chatgpt: Option<bool>,
-) -> Result<super::relay::SwitchTierCommandResult, String> {
-    let app_type = app.parse::<AppType>().map_err(|error| error.to_string())?;
+    operation_id: Option<String>,
+    expected_revision: Option<u64>,
+) -> Result<serde_json::Value, String> {
+    let operation_id =
+        operation_id.ok_or_else(|| "vendorConnection.prepareRequired".to_string())?;
+    let expected_revision =
+        expected_revision.ok_or_else(|| "vendorConnection.prepareRequired".to_string())?;
     let state = app_handle.state::<AppState>();
-    let row = with_conn(&state, |conn, _vault| {
+    let worker_handle = app_handle.clone();
+    let worker_state = state.inner().clone();
+    let worker_plan = plan.clone();
+    vendor_switch_owned(
+        &state,
+        row_id,
+        plan,
+        app,
+        quit_chatgpt,
+        |provider_id, app_type, quit| async move {
+            super::vendor_connection::apply_for(
+                &worker_handle,
+                worker_state,
+                row_id,
+                worker_plan,
+                app_type,
+                provider_id,
+                operation_id,
+                expected_revision,
+                quit,
+            )
+            .await
+            .map_err(|error| super::vendor_connection::safe_error(&error))
+        },
+    )
+    .await
+}
+
+async fn vendor_switch_owned<F, Fut>(
+    state: &AppState,
+    row_id: i64,
+    plan: String,
+    app: String,
+    quit_chatgpt: Option<bool>,
+    switch: F,
+) -> Result<serde_json::Value, String>
+where
+    F: FnOnce(String, AppType, Option<bool>) -> Fut,
+    Fut: std::future::Future<Output = Result<serde_json::Value, String>>,
+{
+    let app_type = app
+        .parse::<AppType>()
+        .map_err(|_| "vendorConnection.invalidApp".to_string())?;
+    let row = with_conn(state, |conn, _vault| {
         creds::get(conn, _vault, row_id)?
             .ok_or_else(|| AppError::Config(format!("找不到 id 为 {row_id} 的官网账号")))
     })
-    .map_err(|error| error.to_string())?;
+    .map_err(|_| "vendorConnection.accountChanged".to_string())?;
     let account_id = row
         .account_id
         .as_deref()
-        .ok_or_else(|| "这个官网账号还没有完成登录，无法切换".to_string())?;
+        .ok_or_else(|| "vendorConnection.accountChanged".to_string())?;
     let vendor = Vendor::from_id(&row.vendor_id)
-        .ok_or_else(|| format!("不认识的厂商：{}", row.vendor_id))?;
+        .ok_or_else(|| "vendorConnection.accountChanged".to_string())?;
     let plan = crate::vendor::plan_by_segment(vendor, &plan)
-        .ok_or_else(|| format!("不认识的接入变体：{plan}"))?;
+        .ok_or_else(|| "vendorConnection.invalidPlan".to_string())?;
     if plan.id_segment == "opencode-free"
         && crate::vendor::opencode::Plan::Free
             .config_for(&app_type)
@@ -448,14 +496,12 @@ pub async fn vendor_switch(
     if state
         .db
         .get_provider_by_id(&provider_id, app_type.as_str())
-        .map_err(|error| error.to_string())?
+        .map_err(|_| "vendorConnection.providerChanged".to_string())?
         .is_none()
     {
-        return Err("这个官网账号还没有当前平台的接入配置，请先刷新".to_string());
+        return Err("vendorConnection.providerChanged".to_string());
     }
-    super::relay::switch_tier_command(&app_handle, &provider_id, app_type, quit_chatgpt)
-        .await
-        .map_err(|error| error.to_string())
+    switch(provider_id, app_type, quit_chatgpt).await
 }
 
 fn vendor_can_delete(state: &AppState, row: &VendorAccountRow) -> bool {
@@ -824,7 +870,15 @@ async fn login_via_browser(
     })?;
 
     if let Some(plaintext) = harvested_key {
+        let _guards = lock_vendor_apps(&state).await;
         with_conn(&state, |conn, _vault| {
+            let current = creds::get(conn, _vault, row_id)?
+                .ok_or_else(|| AppError::Config("vendor.accountChanged".into()))?;
+            if current.vendor_id != vendor.vendor_id()
+                || current.account_id.as_deref() != Some(account.account_id.as_str())
+            {
+                return Err(AppError::Config("vendor.accountChanged".into()));
+            }
             creds::set_api_key(conn, _vault, row_id, &plaintext)
         })?;
     }
@@ -933,7 +987,15 @@ async fn provision_impl(
         };
         key_created = true;
 
+        let _guards = lock_vendor_apps(state).await;
         with_conn(state, |conn, _vault| {
+            let current = creds::get(conn, _vault, row_id)?
+                .ok_or_else(|| AppError::Config("vendor.accountChanged".into()))?;
+            if current.vendor_id != vendor.vendor_id()
+                || current.account_id.as_deref() != Some(account_id.as_str())
+            {
+                return Err(AppError::Config("vendor.accountChanged".into()));
+            }
             creds::set_api_key(conn, _vault, row_id, &plaintext)
         })
         .map_err(|e| {
@@ -985,6 +1047,17 @@ async fn provision_impl(
                 .proxy_service
                 .lock_switch_for_app(app_type.as_str())
                 .await;
+            with_conn(state, |conn, vault| {
+                let current = creds::get(conn, vault, row_id)?
+                    .ok_or_else(|| AppError::Config("vendor.accountChanged".into()))?;
+                if current.vendor_id != vendor.vendor_id()
+                    || current.account_id.as_deref() != Some(account_id.as_str())
+                    || current.api_key != api_key
+                {
+                    return Err(AppError::Config("vendor.accountChanged".into()));
+                }
+                Ok(())
+            })?;
             let existing = state
                 .db
                 .get_provider_by_id(&provider_id, app_type.as_str())
@@ -1053,7 +1126,6 @@ async fn provision_impl(
                 &mut provider,
             )
             .map_err(|e| AppError::Database(format!("保存 {} 配置失败: {e}", app_type.as_str())))?;
-            drop(settings_guard);
             // 官网直连按官方价目计费，倍率恒为 1（中转站才有站点折扣）。
             // 不落倍率会被省心模式当「未知=最贵」垫底（2026-08-17 真实 smoke 实测）。
             state
@@ -1090,6 +1162,8 @@ async fn provision_impl(
                 }
                 merged_providers.extend(merged.into_iter().map(|item| item.name));
             }
+
+            drop(settings_guard);
 
             platforms.push(app_type.as_str().to_string());
         }
@@ -1171,10 +1245,12 @@ async fn import_opencode_key_impl(
     api_key: &str,
     label: &str,
 ) -> Result<OpenCodeKeyImportResult, String> {
+    let guards = lock_vendor_apps(state).await;
     let row_id = with_conn(state, |conn, vault| {
         crate::vendor::opencode_personal::save(conn, vault, api_key, label)
     })
     .map_err(|_| "保存失败，请确认输入完整 Personal API key 且本地密钥库已解锁".to_string())?;
+    drop(guards);
     let configuration_ready = provision_impl(state, row_id).await.is_ok();
     let _ = app_handle.emit(crate::events::VENDOR_ACCOUNTS_CHANGED, ());
     Ok(OpenCodeKeyImportResult {
@@ -1498,10 +1574,15 @@ pub(crate) async fn vendor_balance_impl(
 /// 前者是清理动作出了意外，此时卡住用户没有意义；后者是已知会造成破坏，必须拦。
 #[tauri::command]
 pub async fn vendor_remove(state: State<'_, AppState>, row_id: i64) -> Result<(), String> {
-    remove_impl(state.inner(), row_id).map_err(|e| e.to_string())
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || remove_impl(&state, row_id))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
 }
 
 fn remove_impl(state: &AppState, row_id: i64) -> Result<(), AppError> {
+    let _guards = futures::executor::block_on(lock_vendor_apps(state));
     let row = with_conn(state, |conn, _vault| creds::get(conn, _vault, row_id))?
         .ok_or_else(|| AppError::Config("这个账号已经不存在了".into()))?;
 
@@ -1653,6 +1734,14 @@ fn on_vendor_error(state: &AppState, row_id: i64, e: &VendorError) {
 ///
 /// 自己写这三行而不是把 `commands::relay::with_conn` 改成 `pub`：那会让一个私有
 /// 辅助函数变成两个模块之间的接口，而它就是三行。
+async fn lock_vendor_apps(state: &AppState) -> Vec<tokio::sync::OwnedMutexGuard<()>> {
+    let mut guards = Vec::with_capacity(provision::VENDOR_APPS.len());
+    for app in provision::VENDOR_APPS {
+        guards.push(state.proxy_service.lock_switch_for_app(app.as_str()).await);
+    }
+    guards
+}
+
 fn with_conn<T>(
     state: &AppState,
     f: impl FnOnce(
@@ -1672,6 +1761,551 @@ fn with_conn<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn vendor_remove_waits_for_original_app_owner() {
+        let owner = crate::proxy::opencode_vendor_fixture::FixtureOwner::new();
+        let state = owner.state();
+        let guard = futures::executor::block_on(state.proxy_service.lock_switch_for_app("codex"));
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker_state = state.clone();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            done_tx.send(remove_impl(&worker_state, 702)).unwrap();
+        });
+        started_rx.recv().unwrap();
+        let early = done_rx.recv_timeout(std::time::Duration::from_millis(300));
+        drop(guard);
+        if early.is_err() {
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+        }
+        worker.join().unwrap();
+        assert!(
+            matches!(early, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+            "vendor removal bypassed the held application owner"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
+    async fn vendor_consumer_does_not_repeat_selection_after_lost_response() {
+        let owner = crate::proxy::opencode_vendor_fixture::FixtureOwner::new();
+        let state = owner.state();
+        let initial_state = state.clone();
+        let initial_id = owner.ids()[0].clone();
+        tokio::task::spawn_blocking(move || {
+            ProviderService::switch(&initial_state, AppType::Codex, &initial_id)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let operation = "2d75e8d4-9140-45eb-b67d-39ed8c854123".to_string();
+        let prepared = super::super::vendor_connection::prepare_owned(
+            state.clone(),
+            702,
+            "opencode".into(),
+            AppType::Codex,
+            operation.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        let revision = prepared["receiptRevision"].as_u64().unwrap();
+        let missing = super::super::vendor_connection::query_owned(
+            state,
+            AppType::Codex,
+            Some("9d75e8d4-9140-45eb-b67d-39ed8c854123".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(missing["status"], "unknown");
+        let wrong_account = super::super::vendor_connection::apply_for_owned(
+            state.clone(),
+            701,
+            "opencode".into(),
+            AppType::Codex,
+            owner.ids()[1].clone(),
+            operation.clone(),
+            revision,
+            Some(false),
+            Box::new(|_, _| panic!("wrong account must not write")),
+        )
+        .await;
+        assert!(wrong_account.is_err());
+        let first_state = state.clone();
+        let first_id = operation.clone();
+        let first = vendor_switch_owned(
+            state,
+            702,
+            "opencode".into(),
+            "codex".into(),
+            Some(false),
+            move |provider_id, app, quit| async move {
+                let value = super::super::vendor_connection::apply_for_owned(
+                    first_state,
+                    702,
+                    "opencode".into(),
+                    app,
+                    provider_id,
+                    first_id,
+                    revision,
+                    quit,
+                    Box::new(|_, _| {}),
+                )
+                .await
+                .unwrap();
+                assert_eq!(value["status"], "switched");
+                Err("synthetic lost response after writer completed".into())
+            },
+        )
+        .await;
+        assert!(first.is_err());
+        let query = super::super::vendor_connection::query_owned(
+            state,
+            AppType::Codex,
+            Some(operation.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(query["status"], "completed");
+        assert_eq!(query["rowId"], 702);
+        assert_eq!(query["plan"], "opencode");
+        assert_eq!(query["app"], "codex");
+        assert!(query["receiptRevision"].as_u64().unwrap() > revision);
+        assert_eq!(
+            query["completedConfigurationRevision"].as_str().unwrap(),
+            crate::services::provider::service_configuration_revision(state, &AppType::Codex)
+                .unwrap()
+        );
+        let replay_state = state.clone();
+        let replay_id = operation.clone();
+        let replay = vendor_switch_owned(
+            state,
+            702,
+            "opencode".into(),
+            "codex".into(),
+            Some(false),
+            move |provider_id, app, quit| async move {
+                super::super::vendor_connection::apply_for_owned(
+                    replay_state,
+                    702,
+                    "opencode".into(),
+                    app,
+                    provider_id,
+                    replay_id,
+                    revision,
+                    quit,
+                    Box::new(|_, _| panic!("duplicate published selection")),
+                )
+                .await
+                .map_err(|e| e.to_string())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(replay["status"], "completed");
+        assert_eq!(
+            state.db.get_current_provider("codex").unwrap().as_deref(),
+            Some(owner.ids()[1].as_str())
+        );
+        let stored: String = state
+            .db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT receipt_json FROM vendor_connection_operations WHERE operation_id=?1",
+                [&operation],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            !stored.contains(owner.synthetic_key(1)),
+            "receipt must not contain credentials"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
+    async fn vendor_review_rejects_changed_account_identity() {
+        let owner = crate::proxy::opencode_vendor_fixture::FixtureOwner::new();
+        let state = owner.state();
+        let operation = "3d75e8d4-9140-45eb-b67d-39ed8c854123".to_string();
+        let prepared = super::super::vendor_connection::prepare_owned(
+            state.clone(),
+            702,
+            "opencode".into(),
+            AppType::Codex,
+            operation.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        let observed =
+            crate::services::provider::service_configuration_revision(state, &AppType::Codex)
+                .unwrap();
+        state
+            .db
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE loongport_vendor SET account_id=?1 WHERE id=702",
+                ["synthetic-changed-account"],
+            )
+            .unwrap();
+        let result = super::super::vendor_connection::review_unknown_owned(
+            state.clone(),
+            AppType::Codex,
+            operation.clone(),
+            prepared["receiptRevision"].as_u64().unwrap(),
+            observed,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "changed account cannot authorize review of the old operation"
+        );
+        let preview = super::super::vendor_connection::replacement_intent_owned(
+            state.clone(),
+            AppType::Codex,
+            operation.clone(),
+            701,
+            "opencode".into(),
+            None,
+        )
+        .await
+        .unwrap();
+        let token = preview["reviewToken"].as_str().unwrap().to_string();
+        let denied = super::super::vendor_connection::replacement_intent_owned(
+            state.clone(),
+            AppType::Codex,
+            operation.clone(),
+            702,
+            "opencode".into(),
+            Some(token.clone()),
+        )
+        .await;
+        assert!(
+            denied.is_err(),
+            "a different target cannot reuse the reviewed token"
+        );
+        let mut changed = state
+            .db
+            .get_provider_by_id(&owner.ids()[0], "codex")
+            .unwrap()
+            .unwrap();
+        changed.name = "synthetic target changed after review".into();
+        state.db.save_provider("codex", &changed).unwrap();
+        let stale = super::super::vendor_connection::replacement_intent_owned(
+            state.clone(),
+            AppType::Codex,
+            operation.clone(),
+            701,
+            "opencode".into(),
+            Some(token),
+        )
+        .await;
+        assert!(
+            stale.is_err(),
+            "changed target cannot reuse the reviewed token"
+        );
+        let refreshed = super::super::vendor_connection::replacement_intent_owned(
+            state.clone(),
+            AppType::Codex,
+            operation.clone(),
+            701,
+            "opencode".into(),
+            None,
+        )
+        .await
+        .unwrap();
+        let token = refreshed["reviewToken"].as_str().unwrap().to_string();
+        state.db.secrets.invalidate_database_leases();
+        let stale_epoch = super::super::vendor_connection::replacement_intent_owned(
+            state.clone(),
+            AppType::Codex,
+            operation.clone(),
+            701,
+            "opencode".into(),
+            Some(token),
+        )
+        .await;
+        assert!(
+            stale_epoch.is_err(),
+            "a changed storage lifecycle invalidates review"
+        );
+        let refreshed = super::super::vendor_connection::replacement_intent_owned(
+            state.clone(),
+            AppType::Codex,
+            operation.clone(),
+            701,
+            "opencode".into(),
+            None,
+        )
+        .await
+        .unwrap();
+        let token = refreshed["reviewToken"].as_str().unwrap().to_string();
+        let result = super::super::vendor_connection::replacement_intent_owned(
+            state.clone(),
+            AppType::Codex,
+            operation,
+            701,
+            "opencode".into(),
+            Some(token),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["status"], "newIntentPermitted");
+        let next = super::super::vendor_connection::prepare_owned(
+            state.clone(),
+            701,
+            "opencode".into(),
+            AppType::Codex,
+            "3d75e8d4-9140-45eb-b67d-39ed8c854124".into(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(next["status"], "prepared");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
+    async fn queued_vendor_worker_rechecks_account_after_app_owner_wait() {
+        let owner = crate::proxy::opencode_vendor_fixture::FixtureOwner::new();
+        let state = owner.state();
+        let operation = "7d75e8d4-9140-45eb-b67d-000000000001".to_string();
+        let prepared = super::super::vendor_connection::prepare_owned(
+            state.clone(),
+            702,
+            "opencode".into(),
+            AppType::Codex,
+            operation.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        let app_guard = state.proxy_service.lock_switch_for_app("codex").await;
+        let worker_state = state.clone();
+        let provider_id = owner.ids()[1].clone();
+        let task = tokio::spawn(super::super::vendor_connection::apply_for_owned(
+            worker_state,
+            702,
+            "opencode".into(),
+            AppType::Codex,
+            provider_id,
+            operation,
+            prepared["receiptRevision"].as_u64().unwrap(),
+            Some(false),
+            Box::new(|_, _| panic!("changed account cannot publish")),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if crate::services::sync_protocol::sync_mutex()
+                    .try_lock()
+                    .is_err()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("worker did not acquire original lifecycle owner");
+        state
+            .db
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE loongport_vendor SET account_id=?1 WHERE id=702",
+                ["synthetic-replaced-while-queued"],
+            )
+            .unwrap();
+        drop(app_guard);
+        assert!(task.await.unwrap().is_err());
+        assert_ne!(
+            state.db.get_current_provider("codex").unwrap().as_deref(),
+            Some(owner.ids()[1].as_str())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
+    async fn vendor_receipt_uses_original_nonproxy_writers() {
+        let owner = crate::proxy::opencode_vendor_fixture::FixtureOwner::new();
+        let state = owner.state();
+        let account = with_conn(state, |conn, vault| {
+            Ok(creds::get(conn, vault, 702)?.unwrap().account_id.unwrap())
+        })
+        .unwrap();
+        let bundle =
+            crate::vendor::provision::plan_rows_for(Vendor::OpenCode, &account, "synthetic-only")
+                .into_iter()
+                .find(|row| row.plan.id_segment == "opencode")
+                .unwrap();
+        for (index, app) in [
+            AppType::ClaudeDesktop,
+            AppType::Hermes,
+            AppType::OpenClaw,
+            AppType::OpenCode,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let settings = bundle
+                .rows
+                .iter()
+                .find(|(candidate, _)| *candidate == app)
+                .unwrap()
+                .1
+                .clone();
+            let provider = Provider::with_id(
+                bundle.provider_id.clone(),
+                "synthetic".into(),
+                settings,
+                None,
+            );
+            state.db.save_provider(app.as_str(), &provider).unwrap();
+            let operation = format!("4d75e8d4-9140-45eb-b67d-{index:012}");
+            let prepared = super::super::vendor_connection::prepare_owned(
+                state.clone(),
+                702,
+                "opencode".into(),
+                app.clone(),
+                operation.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+            let result = super::super::vendor_connection::apply_for_owned(
+                state.clone(),
+                702,
+                "opencode".into(),
+                app.clone(),
+                bundle.provider_id.clone(),
+                operation.clone(),
+                prepared["receiptRevision"].as_u64().unwrap(),
+                Some(false),
+                Box::new(|_, _| {}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result["status"], "switched", "{}", app.as_str());
+            let receipt =
+                super::super::vendor_connection::query_owned(state, app.clone(), Some(operation))
+                    .await
+                    .unwrap();
+            assert_eq!(receipt["status"], "completed", "{}", app.as_str());
+            if app.is_additive_mode() {
+                assert!(crate::services::provider::provider_exists_in_live_config(
+                    &app,
+                    &bundle.provider_id
+                )
+                .unwrap());
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
+    async fn vendor_receipt_uses_original_claude_routing() {
+        let owner = crate::proxy::opencode_vendor_fixture::FixtureOwner::new();
+        let state = owner.state();
+        let operation = "5d75e8d4-9140-45eb-b67d-000000000001".to_string();
+        let prepared = super::super::vendor_connection::prepare_owned(
+            state.clone(),
+            702,
+            "opencode".into(),
+            AppType::Claude,
+            operation.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        let result = super::super::vendor_connection::apply_for_owned(
+            state.clone(),
+            702,
+            "opencode".into(),
+            AppType::Claude,
+            owner.ids()[1].clone(),
+            operation.clone(),
+            prepared["receiptRevision"].as_u64().unwrap(),
+            Some(false),
+            Box::new(|_, _| {}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["status"], "switched");
+        let receipt =
+            super::super::vendor_connection::query_owned(state, AppType::Claude, Some(operation))
+                .await
+                .unwrap();
+        assert_eq!(receipt["status"], "completed");
+        assert_eq!(
+            state.db.get_current_provider("claude").unwrap().as_deref(),
+            Some(owner.ids()[1].as_str())
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn vendor_prepare_and_query_are_reachable_through_tauri_ipc() {
+        let owner = crate::proxy::opencode_vendor_fixture::FixtureOwner::new();
+        let app = tauri::test::mock_builder()
+            .manage(owner.state().clone())
+            .invoke_handler(|invoke| {
+                if !crate::zcode_accounts::claim::allowed_command(
+                    invoke.message.webview().label(),
+                    invoke.message.command(),
+                ) {
+                    invoke.resolver.reject("blocked");
+                    return true;
+                }
+                let handler: fn(tauri::ipc::Invoke<tauri::test::MockRuntime>) -> bool = tauri::generate_handler![
+                    super::super::vendor_connection::vendor_prepare_connection,
+                    super::super::vendor_connection::vendor_query_connection
+                ];
+                handler(invoke)
+            })
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+        let invoke = |command: &str, body: serde_json::Value| {
+            tauri::test::get_ipc_response(
+                &window,
+                tauri::webview::InvokeRequest {
+                    cmd: command.into(),
+                    callback: tauri::ipc::CallbackFn(0),
+                    error: tauri::ipc::CallbackFn(1),
+                    url: crate::integration_test_support::tauri_test_origin(),
+                    body: tauri::ipc::InvokeBody::Json(body),
+                    headers: Default::default(),
+                    invoke_key: tauri::test::INVOKE_KEY.into(),
+                },
+            )
+            .map(|reply| reply.deserialize::<serde_json::Value>().unwrap())
+        };
+        let operation = "6d75e8d4-9140-45eb-b67d-000000000001";
+        let prepared = invoke("vendor_prepare_connection", serde_json::json!({"rowId":702,"plan":"opencode","app":"codex","operationId":operation,"catalogDecision":null})).unwrap();
+        assert_eq!(prepared["status"], "prepared");
+        let query = invoke(
+            "vendor_query_connection",
+            serde_json::json!({"app":"codex","operationId":operation}),
+        )
+        .unwrap();
+        assert_eq!(query["status"], "unknown");
+        assert_eq!(query["operationId"], operation);
+        assert_eq!(query["receiptRevision"], prepared["receiptRevision"]);
+    }
 
     /// `VendorAccountStatus` 的线上名由 `VendorRow.tsx` 的 `VendorStatus` switch 直接
     /// 消费（裸字符串比较，无编译器把守）。这里把每个变体的 serde 输出钉死 ——

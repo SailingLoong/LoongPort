@@ -1,4 +1,5 @@
 import type { TFunction } from "i18next";
+import type { WorkBuddyNativeRowIdentity } from "./workbuddyNativeRowIdentity";
 import type { PlatformAccountSummary } from "./useAccountPlatformPresence";
 import type { AccountPlatform } from "./accountPlatforms";
 import type { AccountOverviewSort } from "./accountOverviewPreferences";
@@ -9,10 +10,13 @@ export interface AccountOverviewProjectionContext {
   t: TFunction;
   freshness: "fresh" | "stale" | "unknown";
   automaticUnconfirmed?: boolean;
+  nativeIdentity?: WorkBuddyNativeRowIdentity;
+  nativeSwitchSupported?: boolean;
   automaticPolicy?: { enabled: boolean | undefined; reason: string | null };
 }
 export interface AccountRowVM {
   rowKey: string;
+  nativeIdentity: WorkBuddyNativeRowIdentity;
   groupId: AccountPlatform;
   accountId: string;
   name: string;
@@ -25,7 +29,7 @@ export interface AccountRowVM {
   availability: "available" | "exhausted" | "unknown";
   claimIssue: string | null;
   detailTarget: { platform: AccountPlatform; id: string };
-  switchAction: { enabled: false; label: string; reason: string };
+  switchAction: { enabled: boolean; label: string; reason: string };
 }
 const number = (value: unknown): number | null =>
   typeof value === "number" && Number.isFinite(value) && value >= 0
@@ -309,6 +313,10 @@ export function projectAccountOverviewRow(
         : null;
   return {
     rowKey: JSON.stringify([account.source, account.app ?? null, account.id]),
+    nativeIdentity: context.nativeIdentity ?? {
+      status: "unsupported",
+      selection: null,
+    },
     groupId: account.platform,
     accountId: account.id,
     name: account.label,
@@ -330,7 +338,12 @@ export function projectAccountOverviewRow(
       id: account.app ? `${account.app}:${account.id}` : account.id,
     },
     switchAction: {
-      enabled: false,
+      enabled:
+        account.source === "workbuddy" &&
+        account.platform === "workbuddy" &&
+        context.freshness === "fresh" &&
+        context.nativeSwitchSupported === true &&
+        context.nativeIdentity?.status === "ready",
       label: t("accountsOverview.switch", { defaultValue: "切换" }),
       reason: t("accountsOverview.switchUnavailable", {
         defaultValue: "当前尚无可验证的客户端切换能力",

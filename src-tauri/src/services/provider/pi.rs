@@ -33,6 +33,7 @@ pub(super) fn add(
     state: &AppState,
     mut provider: Provider,
     add_to_live: bool,
+    mark_user_edited: bool,
 ) -> Result<bool, AppError> {
     let app_type = AppType::Pi;
     let _guard =
@@ -66,7 +67,9 @@ pub(super) fn add(
         false
     };
 
-    if let Err(error) = state.db.save_provider(app_type.as_str(), &provider) {
+    if let Err(error) =
+        ProviderService::save_added_provider(state, &app_type, &provider, mark_user_edited)
+    {
         if native_inserted {
             if let Err(rollback) = crate::pi_config::remove_pi_provider_if_matches(
                 &provider.id,

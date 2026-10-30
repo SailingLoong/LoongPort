@@ -29,6 +29,13 @@ const source = vi.hoisted(() => ({
 vi.mock("../useAccountPlatformPresence", () => ({
   useAccountPlatformPresence: () => source.presence,
 }));
+vi.mock("../useWorkBuddyNativeCatalog", () => ({
+  useWorkBuddyNativeCatalog: () => ({
+    state: "disabled",
+    data: undefined,
+    isFetching: false,
+  }),
+}));
 vi.mock("../useServiceAccounts", () => ({
   useServiceAccounts: () => source.service,
 }));
@@ -611,4 +618,50 @@ it("cancels the old expiry clock when the original query account changes", () =>
   );
   expect(source.presence.refetch).not.toHaveBeenCalled();
   unmount();
+});
+
+it("retains refreshed WorkBuddy generation in the owner snapshot without treating a display row as a native SelectionKey", () => {
+  const snapshot = (
+    generation: number,
+    label: string,
+  ): PlatformAccountSummary => {
+    const original = account("same-native-id", 20);
+    if (original.snapshot?.kind !== "workbuddy")
+      throw new Error("missing WorkBuddy fixture");
+    return {
+      ...original,
+      label,
+      snapshot: {
+        kind: "workbuddy",
+        value: { ...original.snapshot.value, generation },
+      },
+    };
+  };
+  source.presence.data = {
+    ...source.presence.data!,
+    accounts: [snapshot(3, "Synthetic old label")],
+    platforms: ["workbuddy"],
+  };
+  const { repo } = repository();
+  const { result, rerender } = renderHook(() =>
+    useAccountsOverviewViewModel({ preferencesRepository: repo }),
+  );
+  const original = result.current.orderedGroups[0].rows[0];
+  source.presence.data = {
+    ...source.presence.data,
+    accounts: [snapshot(4, "Synthetic refreshed label")],
+  };
+  rerender();
+  const refreshed = result.current.orderedGroups[0].rows[0];
+  const owner = result.current.scopeAccounts[0].snapshot;
+  expect(owner?.kind).toBe("workbuddy");
+  if (owner?.kind !== "workbuddy")
+    throw new Error("missing original WorkBuddy owner snapshot");
+  expect(owner.value.generation).toBe(4);
+  // React display identity stays stable across refresh, so it cannot serve as native CAS identity.
+  expect(refreshed.rowKey).toBe(original.rowKey);
+  expect(refreshed.name).toBe("Synthetic refreshed label");
+  expect(refreshed.switchAction.enabled).toBe(false);
+  expect(refreshed).not.toHaveProperty("selection");
+  expect(source.invoke).not.toHaveBeenCalled();
 });

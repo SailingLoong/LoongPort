@@ -301,6 +301,9 @@ it("does not replace the clicked ZCode consent revision during the page refresh"
   const user = setup();
   const region = screen.getByRole("region", { name: "自动领取管理" });
   await user.click(within(region).getByRole("button", { name: "全部开启" }));
-  await within(region).findByText(/Synthetic ZCode.*设置结果未确认/);
+  await within(region).findByText(
+    /Synthetic ZCode.*设置未提交，请刷新并重新确认/,
+  );
+  expect(within(region).queryByText(/设置结果未确认/)).not.toBeInTheDocument();
   expect(mocks.zcodeSet).not.toHaveBeenCalled();
 });

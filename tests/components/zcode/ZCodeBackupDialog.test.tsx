@@ -435,4 +435,37 @@ describe("ZCode encrypted backup dialog", () => {
       );
     },
   );
+  it("headless close clears secrets and retires a pending destination chooser", async () => {
+    const { renderHook } = await import("@testing-library/react");
+    const { useZCodeBackupDialog } =
+      await import("@/components/zcode/viewmodels/useZCodeBackupDialog");
+    const chooser = deferred<string | null>();
+    vi.mocked(save).mockReturnValue(chooser.promise);
+    const { result: vm } = renderHook(() =>
+      useZCodeBackupDialog({
+        profiles,
+        catalogRevision: "catalog-one",
+        libraryDataRoot: "/synthetic/library",
+        onClose: vi.fn(),
+      }),
+    );
+    act(() => {
+      vm.current.selectProfile("one", true);
+      vm.current.changePassword("synthetic secret");
+      vm.current.changeConfirmation("synthetic secret");
+    });
+    expect(vm.current.canSubmit).toBe(true);
+    let pending!: Promise<void>;
+    act(() => {
+      pending = vm.current.submit();
+    });
+    act(() => vm.current.close());
+    await act(async () => {
+      chooser.resolve("/synthetic/late.zsb");
+      await pending;
+    });
+    expect(vm.current.password).toBe("");
+    expect(vm.current.confirmation).toBe("");
+    expect(zcodeBackupApi.exportBundle).not.toHaveBeenCalled();
+  });
 });

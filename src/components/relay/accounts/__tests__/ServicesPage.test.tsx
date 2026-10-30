@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   detail: vi.fn(),
   balance: vi.fn(),
   sources: vi.fn(),
+  cost: vi.fn(),
   navigationProbe: false,
 }));
 vi.mock("@/lib/api/relay", () => ({ relayApi: { listRelays: mocks.relays } }));
@@ -27,6 +28,9 @@ vi.mock("@/lib/api/serviceSources", () => ({
   serviceSourcesApi: { list: mocks.sources },
 }));
 vi.mock("@/lib/api/vendor", () => ({ vendorApi: { list: mocks.vendors } }));
+vi.mock("@/lib/api/usage", () => ({
+  usageApi: { providersWindowCost: mocks.cost },
+}));
 vi.mock("@/hooks/useTauriEvent", () => ({ useTauriEvent: vi.fn() }));
 vi.mock("../../RelaySection", () => ({
   RelaySection: (props: any) => {
@@ -97,6 +101,7 @@ beforeEach(() => {
   mocks.navigationProbe = false;
   localStorage.clear();
   mocks.sources.mockResolvedValue([]);
+  mocks.cost.mockResolvedValue([]);
   mocks.relays.mockResolvedValue([relay]);
   mocks.vendors.mockImplementation(async (app: AppId) => ({
     supported: app === "codex",
@@ -422,4 +427,64 @@ it("does not forward a React click event through the legacy no-argument account 
     .setup()
     .click(screen.getByRole("button", { name: "到应用中查看与配置" }));
   expect(onOpenApp).toHaveBeenCalledExactlyOnceWith();
+});
+
+it("renders original account usage and reset facts through the real detail View and delegates the exact snapshot", async () => {
+  const windows = [
+    { kind: "daily", limitUsd: 10, usedUsd: 2, resetAt: null },
+    { kind: "daily", limitUsd: 20, usedUsd: null, resetAt: null },
+  ];
+  const detailed = {
+    ...relay,
+    tiers: [
+      {
+        providerId: "p-small",
+        displayName: "Small tier",
+        subscriptionWindows: windows,
+      },
+      {
+        providerId: "p-large",
+        displayName: "Large tier",
+        subscriptionWindows: [windows[0]],
+      },
+    ],
+  } as unknown as RelayRow;
+  mocks.relays.mockImplementation(async (app: AppId) =>
+    app === "codex" ? [detailed] : [],
+  );
+  mocks.cost.mockResolvedValue([
+    { providerId: "p-small", stats: { costUsd7d: 1, costUsd30d: 2 } },
+    { providerId: "p-large", stats: { costUsd7d: 3, costUsd30d: 8 } },
+  ]);
+  const { user } = await setup();
+  await screen.findByText("Example Relay");
+  await user.click(
+    screen.getAllByRole("button", { name: "loongport.accounts.detail" })[0],
+  );
+  await screen.findByText("Large tier");
+  const usage = screen
+    .getByText("loongport.accounts.usageTitle")
+    .closest("section")!;
+  expect(
+    within(usage)
+      .getAllByRole("listitem")
+      .map((row) => row.textContent),
+  ).toEqual(["Large tier$8.00", "Small tier$2.00"]);
+  expect(
+    within(usage)
+      .getAllByRole("listitem")[1]
+      .querySelector('[aria-hidden="true"]'),
+  ).toHaveStyle({ width: "25%" });
+  const table = screen.getByRole("table");
+  expect(within(table).getAllByRole("row")).toHaveLength(3);
+  expect(within(table).getByText("2.00 / 10.00")).toBeInTheDocument();
+  expect(within(table).getByText("— / 20.00")).toBeInTheDocument();
+  expect(mocks.detail).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      appId: "codex",
+      accountFilter: { kind: "relay", id: 1 },
+      accountSnapshot: { kind: "relay", row: detailed, appId: "codex" },
+    }),
+  );
+  expect(mocks.cost).toHaveBeenCalledExactlyOnceWith(["p-small", "p-large"]);
 });

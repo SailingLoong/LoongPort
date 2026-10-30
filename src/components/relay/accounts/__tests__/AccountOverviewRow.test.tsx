@@ -469,6 +469,7 @@ it("keeps row details independent from the disabled switch and non-interactive r
   const onOpenDetails = vi.fn();
   const row = {
     rowKey: "exact-row",
+    nativeIdentity: { status: "unsupported", selection: null },
     groupId: "workbuddy",
     accountId: "id",
     name: "Exact row",

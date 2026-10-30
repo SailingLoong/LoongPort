@@ -773,3 +773,116 @@ describe("ZCode bundle import", () => {
     expect(zcodeAccountsApi.checkBundle).not.toHaveBeenCalled();
   });
 });
+
+it("headless recovery acknowledges only an authoritative original result and never replays import", async () => {
+  const { renderHook } = await import("@testing-library/react");
+  const { useZCodeBundleImport } =
+    await import("@/components/zcode/viewmodels/useZCodeBundleImport");
+  vi.mocked(zcodeAccountsApi.pendingBundleImport).mockReturnValue(
+    "older-request",
+  );
+  const { result: vm } = renderHook(() =>
+    useZCodeBundleImport({
+      libraryDataRoot: root,
+      catalogRevision: "catalog",
+      onClose: vi.fn(),
+      onImported: vi.fn(async () => {}),
+    }),
+  );
+  await act(() => vm.current.queryOriginal());
+  expect(vm.current.recoveryUnknown).toBe(true);
+  expect(vm.current.originalRequest).toBe("older-request");
+  expect(zcodeAccountsApi.acknowledgeBundleImport).not.toHaveBeenCalled();
+  vi.mocked(zcodeAccountsApi.bundleImportResult).mockResolvedValue({
+    requestId: "older-request",
+    status: "notRecorded",
+    rows: [],
+  });
+  await act(() => vm.current.queryOriginal());
+  expect(vm.current.notRecorded).toBe(true);
+  expect(vm.current.originalRequest).toBeNull();
+  expect(zcodeAccountsApi.acknowledgeBundleImport).toHaveBeenCalledWith(
+    root,
+    "older-request",
+  );
+  expect(zcodeAccountsApi.importBundle).not.toHaveBeenCalled();
+});
+
+it("headless bundle projects authoritative receipt counts without treating unknown recovery as completion", async () => {
+  const { renderHook } = await import("@testing-library/react");
+  const { useZCodeBundleImport } =
+    await import("@/components/zcode/viewmodels/useZCodeBundleImport");
+  vi.mocked(zcodeAccountsApi.pendingBundleImport).mockReturnValue("original");
+  const { result } = renderHook(() =>
+    useZCodeBundleImport({
+      libraryDataRoot: root,
+      catalogRevision: "catalog",
+      onClose: vi.fn(),
+      onImported: vi.fn(async () => {}),
+    }),
+  );
+  expect(result.current.resultSummary).toBeNull();
+  await act(() => result.current.queryOriginal());
+  expect(result.current.resultSummary).toBeNull();
+  expect(result.current.originalRequest).toBe("original");
+  vi.mocked(zcodeAccountsApi.bundleImportResult).mockResolvedValue({
+    requestId: "original",
+    status: "completed",
+    rows: [
+      { index: 0, id: "a".repeat(64), family: "zai", outcome: "saved" },
+      {
+        index: 1,
+        id: "b".repeat(64),
+        family: "bigmodel",
+        outcome: "refreshed",
+      },
+      { index: 2, id: "c".repeat(64), family: "zai", outcome: "kept" },
+    ],
+  });
+  await act(() => result.current.queryOriginal());
+  expect(result.current.resultSummary).toEqual({
+    saved: 1,
+    updated: 1,
+    kept: 1,
+  });
+  expect(zcodeAccountsApi.importBundle).not.toHaveBeenCalled();
+});
+
+it("headless bundle binds row evidence and eligibility and suppresses a lost-save completion summary", async () => {
+  const { renderHook } = await import("@testing-library/react");
+  const { useZCodeBundleImport } =
+    await import("@/components/zcode/viewmodels/useZCodeBundleImport");
+  const { result } = renderHook(() =>
+    useZCodeBundleImport({
+      libraryDataRoot: root,
+      catalogRevision: "catalog",
+      onClose: vi.fn(),
+      onImported: vi.fn(async () => {}),
+    }),
+  );
+  act(() => {
+    result.current.chooseBundle(new File(["encrypted"], "synthetic.zsb"));
+    result.current.setPassword("synthetic-password");
+  });
+  await act(() => result.current.preview());
+  expect(result.current.reviewRows[0]).toMatchObject({
+    row: previewResult.rows[0],
+    selected: true,
+    updateDuplicate: false,
+    selectionDisabled: false,
+    updateDisabled: false,
+  });
+  act(() => result.current.setConsent(true));
+  await act(() => result.current.check());
+  expect(result.current.reviewRows[0].checked).toEqual(progress().rows[0]);
+  vi.mocked(zcodeAccountsApi.importBundle).mockRejectedValue(
+    new Error("lost reply"),
+  );
+  await act(() => result.current.commit());
+  expect(result.current.resultRows[0].outcome).toBe("unknown");
+  expect(result.current.resultSummary).toBeNull();
+  expect(result.current.reviewRows[0].selectionDisabled).toBe(true);
+  expect(result.current.originalRequest).toBe("lease");
+  expect(zcodeAccountsApi.acknowledgeBundleImport).not.toHaveBeenCalled();
+  expect(zcodeAccountsApi.importBundle).toHaveBeenCalledTimes(1);
+});

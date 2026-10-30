@@ -475,6 +475,23 @@ impl Database {
         )
     }
 
+    /// The manual add and its maintenance mark belong to one provider transaction.
+    pub(crate) fn save_manual_provider(
+        &self,
+        app_type: &str,
+        provider: &Provider,
+    ) -> Result<(), AppError> {
+        let vault = self.secrets.read()?;
+        self.save_provider_with_vault(
+            app_type,
+            provider,
+            None,
+            true,
+            self.secrets.as_ref(),
+            &vault,
+        )
+    }
+
     /// Insert a selected configuration through the original vault-aware writer.
     /// Existing rows are never rewritten, including when another writer inserted
     /// after discovery. No current selection or routing-chain membership changes.

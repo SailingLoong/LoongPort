@@ -77,20 +77,24 @@ vi.mock("@/components/providers/AuthSettingsPanel", () => ({
     target ? <div data-testid="auth-settings-panel">{target}</div> : null,
 }));
 
+let mockDuplicateUniversalSave = false;
 vi.mock("@/components/universal/UniversalProviderFormModal", () => ({
-  UniversalProviderFormModal: ({ onSave, isOpen, onClose }: any) => (
-    <>
-      {isOpen && <input aria-label="New universal draft" />}
-      <button
-        onClick={() => {
-          onSave({ id: "synthetic-universal" });
-          onClose();
-        }}
-      >
-        Save universal test
-      </button>
-    </>
-  ),
+  UniversalProviderFormModal: ({ onSave, isOpen, onClose }: any) =>
+    isOpen ? (
+      <>
+        <input aria-label="New universal draft" />
+        <button
+          onClick={() => {
+            onSave({ id: "synthetic-universal" });
+            if (mockDuplicateUniversalSave)
+              onSave({ id: "synthetic-universal" });
+            onClose();
+          }}
+        >
+          Save universal test
+        </button>
+      </>
+    ) : null,
 }));
 
 describe("AddProviderForm", () => {
@@ -376,6 +380,13 @@ it("announces universal save start before API work, including its independent sa
       onDone={done}
     />,
   );
+  fireEvent.mouseDown(
+    screen.getByRole("tab", { name: "provider.tabUniversal" }),
+    { button: 0, ctrlKey: false },
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "universalProvider.add" }),
+  );
   fireEvent.click(screen.getByText("Save universal test"));
   await waitFor(() => expect(done).toHaveBeenCalledWith("saved", 1));
   expect(order).toEqual(["start", "upsert"]);
@@ -383,7 +394,7 @@ it("announces universal save start before API work, including its independent sa
   sync.mockRestore();
 });
 
-it("retains each universal save's own navigation epoch across overlapping requests", async () => {
+it("admits a single universal save and preserves its navigation epoch", async () => {
   const resolves: Array<() => void> = [];
   const upsert = vi
     .spyOn(universalProvidersApi, "upsert")
@@ -404,12 +415,20 @@ it("retains each universal save's own navigation epoch across overlapping reques
       onDone={done}
     />,
   );
+  fireEvent.mouseDown(
+    screen.getByRole("tab", { name: "provider.tabUniversal" }),
+    { button: 0, ctrlKey: false },
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "universalProvider.add" }),
+  );
+  mockDuplicateUniversalSave = true;
   fireEvent.click(screen.getByText("Save universal test"));
-  fireEvent.click(screen.getByText("Save universal test"));
+  mockDuplicateUniversalSave = false;
   await act(async () => resolves[0]());
   expect(done).toHaveBeenLastCalledWith("saved", 10);
-  await act(async () => resolves[1]());
-  expect(done).toHaveBeenLastCalledWith("saved", 11);
+  expect(upsert).toHaveBeenCalledTimes(1);
+  expect(done).toHaveBeenCalledTimes(1);
   upsert.mockRestore();
   sync.mockRestore();
 });
@@ -466,6 +485,9 @@ it("ignores an old universal save after switching to the app-specific draft", as
   fireEvent.mouseDown(
     screen.getByRole("tab", { name: "provider.tabUniversal" }),
     { button: 0, ctrlKey: false },
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "universalProvider.add" }),
   );
   fireEvent.click(screen.getAllByText("Save universal test").at(-1)!);
   fireEvent.mouseDown(screen.getByRole("tab", { name: /apps.codex/ }), {

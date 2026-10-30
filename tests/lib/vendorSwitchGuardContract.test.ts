@@ -35,13 +35,20 @@ describe("vendor 切换入口", () => {
     return src.slice(start, end);
   })();
 
-  it("只把行 id、plan 与用户选择交给 vendorApi.switch", () => {
-    // 命令契约是 (rowId, planId, app, quitChatgpt) —— planId 是稳定段标识
-    // （`providerId` 只允许出现在 busy key 里，那是本地转圈判别，不是命令入参）。
-    // 正则容忍 prettier 折行。
+  it("uses the prepared vendor operation and keeps row, plan, app and original operation identity", () => {
+    // Managed vendor IDs must never use generic apply/switch. Prepare and
+    // dispatch the same native operation instead, with its receipt revision.
+    expect(vendorUseBody).toContain("vendorApi.prepareConnection");
+    expect(vendorUseBody).toContain("vendorApi.switchPreparedConnection");
+    expect(vendorUseBody).toContain("vendorApi.queryConnection");
     expect(vendorUseBody).toMatch(
-      /vendorApi\.switch\(\s*rowId,\s*plan\.planId/,
+      /rowId,\s*plan: plan\.planId,\s*app,\s*operationId/,
     );
+    expect(vendorUseBody).toContain(
+      "expectedRevision: prepared.receiptRevision",
+    );
+    expect(vendorUseBody).not.toContain("vendorApi.switch(");
+    expect(vendorUseBody).not.toContain("applicationRoutingApi.apply");
     expect(vendorUseBody).not.toContain("relayApi.switchTier");
   });
 

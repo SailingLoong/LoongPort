@@ -3916,3 +3916,64 @@ it.each(["success", "error"] as const)(
     expect(zcodeAccountsApi.switch).toHaveBeenCalledTimes(1);
   },
 );
+
+it("headless panel uses the existing Query client for passive reads without native writes", async () => {
+  const { renderHook } = await import("@testing-library/react");
+  const { useZCodeAccountPanel } =
+    await import("@/components/zcode/viewmodels/useZCodeAccountPanel");
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const wrapper = ({ children }: { children: React.ReactNode }) => (
+    <QueryClientProvider client={client}>{children}</QueryClientProvider>
+  );
+  const { result: vm } = renderHook(
+    () => useZCodeAccountPanel({ unified: true }),
+    { wrapper },
+  );
+  await waitFor(() => expect(vm.current.libraryReady).toBe(true));
+  expect(
+    client
+      .getQueryCache()
+      .getAll()
+      .some((query) => query.state.data === vm.current.library.data),
+  ).toBe(true);
+  expect(zcodeAccountsApi.inspect).not.toHaveBeenCalled();
+  expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+  expect(zcodeAccountsApi.commitCapture).not.toHaveBeenCalled();
+  act(() => vm.current.selectSource(source));
+  expect(vm.current.context).toBeNull();
+  expect(vm.current.source).toEqual(source);
+});
+
+it("headless panel owns family grouping, empty groups and device bindings from the displayed catalog", async () => {
+  const { renderHook } = await import("@testing-library/react");
+  const { useZCodeAccountPanel } =
+    await import("@/components/zcode/viewmodels/useZCodeAccountPanel");
+  const profiles = [{ ...catalog.profiles[0], deviceMid: "synthetic-device" }];
+  vi.mocked(zcodeAccountsApi.library).mockResolvedValue({
+    ...catalog,
+    profiles,
+  });
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const wrapper = ({ children }: { children: React.ReactNode }) => (
+    <QueryClientProvider client={client}>{children}</QueryClientProvider>
+  );
+  const { result, rerender } = renderHook(
+    ({ unified }) => useZCodeAccountPanel({ unified }),
+    { initialProps: { unified: false }, wrapper },
+  );
+  await waitFor(() => expect(result.current.libraryReady).toBe(true));
+  expect(result.current.accountGroups).toEqual([
+    { family: "zai", profiles, empty: false },
+    { family: "bigmodel", profiles: [], empty: true },
+  ]);
+  expect(result.current.boundDeviceMids).toEqual(["synthetic-device"]);
+  rerender({ unified: true });
+  expect(result.current.accountGroups).toEqual([
+    { family: null, profiles, empty: false },
+  ]);
+  expect(zcodeAccountsApi.switch).not.toHaveBeenCalled();
+});

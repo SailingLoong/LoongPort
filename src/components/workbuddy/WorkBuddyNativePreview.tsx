@@ -1,87 +1,45 @@
-import { useEffect, useRef, useState } from "react";
+import { useId, useMemo, useRef, useState } from "react";
+import { usePreservedViewActive } from "@/components/ui/PreservedView";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
-import { workbuddyApi } from "@/lib/api/workbuddy";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  useWorkBuddyNativePreviewViewModel,
+  useWorkBuddyNativeCaptureViewModel,
+} from "./useWorkBuddyNativePreviewViewModel";
 
-// This is an observation, never a native snapshot or an activation grant.
-type Observation = {
-  sourceVerification: "knownLocationOnly";
-  activationAvailable: false;
-  logoutMarkerPresent: boolean;
-} & (
-  | { authFile: "missing"; realm: null }
-  | {
-      authFile: "recognizedPersonalFormat";
-      realm: "www.workbuddy.cn" | "www.codebuddy.cn";
-    }
-);
-function observation(value: unknown): Observation | null {
-  if (!value || typeof value !== "object") return null;
-  const v = value as Record<string, unknown>;
-  if (
-    v.sourceVerification !== "knownLocationOnly" ||
-    v.activationAvailable !== false ||
-    typeof v.logoutMarkerPresent !== "boolean"
-  )
-    return null;
-  if (!(
-    (v.authFile === "missing" && v.realm === null) ||
-    (v.authFile === "recognizedPersonalFormat" &&
-      (v.realm === "www.workbuddy.cn" || v.realm === "www.codebuddy.cn"))
-  ))
-    return null;
-  // Copy only the reviewed fields; do not retain unexpected backend material.
-  return {
-    sourceVerification: "knownLocationOnly",
-    activationAvailable: false,
-    logoutMarkerPresent: v.logoutMarkerPresent,
-    authFile: v.authFile,
-    realm: v.realm,
-  } as Observation;
-}
-const errors = [
-  "unsafeSource",
-  "sourceChanged",
-  "unreadableSource",
-  "invalidDocument",
-  "unsupportedContext",
-  "unsupportedPlatform",
-] as const;
-type Failure = (typeof errors)[number] | "unknown";
-function failure(value: unknown): Failure {
-  return errors.find((error) => error === value) ?? "unknown";
-}
-export function WorkBuddyNativePreview() {
+export function WorkBuddyNativePreview({
+  onCaptured,
+}: { onCaptured?: () => void } = {}) {
   const { t } = useTranslation();
-  const [result, setResult] = useState<Observation | null>(null);
-  const [error, setError] = useState<Failure | null>(null);
-  const [busy, setBusy] = useState(false);
-  const active = useRef(false);
-  const generation = useRef(0);
-  useEffect(
-    () => () => {
-      generation.current += 1;
-    },
-    [],
-  );
-  const inspect = async () => {
-    if (active.current) return;
-    active.current = true;
-    const expected = generation.current;
-    setBusy(true);
-    setResult(null);
-    setError(null);
-    try {
-      const value = observation(await workbuddyApi.previewNative());
-      if (generation.current !== expected) return;
-      if (value) setResult(value);
-      else setError("unknown");
-    } catch (cause) {
-      if (generation.current === expected) setError(failure(cause));
-    } finally {
-      active.current = false;
-      if (generation.current === expected) setBusy(false);
-    }
+  const { result, error, busy, inspect } = useWorkBuddyNativePreviewViewModel();
+  const [captureOpen, setCaptureOpen] = useState(false);
+  const captureOpenRef = useRef(false);
+  const captureSession = useRef(0);
+  const session = captureSession.current;
+  const visible = usePreservedViewActive();
+  const owner = useMemo(() => Symbol("native-capture-dialog-owner"), [visible]);
+  const currentOwner = useRef(owner);
+  currentOwner.current = owner;
+  const openCapture = () => {
+    if (!visible || currentOwner.current !== owner || captureOpenRef.current)
+      return;
+    captureOpenRef.current = true;
+    ++captureSession.current;
+    setCaptureOpen(true);
+  };
+  const closeCapture = () => {
+    if (
+      !visible ||
+      currentOwner.current !== owner ||
+      captureSession.current !== session
+    )
+      return false;
+    captureOpenRef.current = false;
+    ++captureSession.current;
+    setCaptureOpen(false);
+    return true;
   };
   return (
     <section
@@ -139,6 +97,119 @@ export function WorkBuddyNativePreview() {
       <p className="text-muted-foreground">
         {t("workbuddy.nativePreview.notActivation")}
       </p>
+      {!captureOpen && (
+        <Button size="sm" variant="outline" onClick={openCapture}>
+          {t("workbuddy.nativeCapture.open", {
+            defaultValue: "Save current client account",
+          })}
+        </Button>
+      )}
+      {captureOpen && (
+        <NativeCaptureConfirmation
+          onClose={closeCapture}
+          onCaptured={onCaptured}
+        />
+      )}
     </section>
+  );
+}
+
+function NativeCaptureConfirmation({
+  onClose,
+  onCaptured,
+}: {
+  onClose: () => boolean;
+  onCaptured?: () => void;
+}) {
+  const { t } = useTranslation();
+  const vm = useWorkBuddyNativeCaptureViewModel(onCaptured);
+  const labelId = useId();
+  return (
+    <div
+      role="group"
+      aria-label={t("workbuddy.nativeCapture.title", {
+        defaultValue: "Save current client account",
+      })}
+      className="space-y-2 rounded-lg border p-3"
+    >
+      <p>
+        {t("workbuddy.nativeCapture.description", {
+          defaultValue:
+            "Confirm saving the current client's local authentication snapshot to the LoongPort vault. This does not verify login or grant API access.",
+        })}
+      </p>
+      <p>
+        {t("workbuddy.nativeCapture.existing", {
+          defaultValue:
+            "If this account already exists, this action cannot add a native snapshot to it. Existing accounts are not replaced or deleted.",
+        })}
+      </p>
+      <Label htmlFor={labelId}>
+        {t("workbuddy.nativeCapture.label", {
+          defaultValue: "Account label (no credentials)",
+        })}
+      </Label>
+      <Input
+        id={labelId}
+        value={vm.label}
+        onChange={(event) => vm.setLabel(event.target.value)}
+        maxLength={120}
+        disabled={vm.locked}
+      />
+      <div className="flex gap-2">
+        <Button
+          size="sm"
+          disabled={vm.locked || !vm.label.trim()}
+          onClick={vm.confirm}
+        >
+          {t("workbuddy.nativeCapture.confirm", {
+            defaultValue: "Confirm and save",
+          })}
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => {
+            if (onClose()) vm.retire();
+          }}
+        >
+          {vm.locked
+            ? t("workbuddy.nativeCapture.close", { defaultValue: "Close" })
+            : t("workbuddy.nativeCapture.cancel", { defaultValue: "Cancel" })}
+        </Button>
+      </div>
+      {vm.status === "pending" && (
+        <p role="status">
+          {t("workbuddy.nativeCapture.busy", {
+            defaultValue:
+              "Saving; the operation may continue if you leave this view.",
+          })}
+        </p>
+      )}
+      {vm.conflict && (
+        <p>
+          {t("workbuddy.nativeCapture.conflict", {
+            defaultValue:
+              "The source conflicts with an existing account or changed state. Existing accounts are not replaced or deleted.",
+          })}
+        </p>
+      )}
+      {vm.status === "error" && (
+        <p role="alert">
+          {t("workbuddy.nativeCapture.unknown", {
+            defaultValue:
+              "The result is unconfirmed. Check the account list; a list alone cannot prove this request failed. Do not repeat it automatically.",
+          })}
+        </p>
+      )}
+      {vm.status === "success" && (
+        <p role="status">
+          {t("workbuddy.nativeCapture.saved", {
+            defaultValue:
+              "The most recent local snapshot was saved; login and API access are not verified.",
+          })}
+        </p>
+      )}
+    </div>
   );
 }

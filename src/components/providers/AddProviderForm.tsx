@@ -1,30 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Loader2, Plus } from "lucide-react";
-import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import type { Provider, CustomEndpoint, UniversalProvider } from "@/types";
+import type { Provider } from "@/types";
 import type { AppId } from "@/lib/api";
-import { universalProvidersApi } from "@/lib/api";
-import {
-  ProviderForm,
-  type ProviderFormValues,
-} from "@/components/providers/forms/ProviderForm";
+import { ProviderForm } from "@/components/providers/forms/ProviderForm";
 import { PreservedView } from "@/components/ui/PreservedView";
 import { AuthSettingsPanel } from "@/components/providers/AuthSettingsPanel";
 import { UniversalProviderFormModal } from "@/components/universal/UniversalProviderFormModal";
 import { UniversalProviderPanel } from "@/components/universal";
-import { providerPresets } from "@/config/claudeProviderPresets";
-import { codexProviderPresets } from "@/config/codexProviderPresets";
-import { geminiProviderPresets } from "@/config/geminiProviderPresets";
-import { claudeDesktopProviderPresets } from "@/config/claudeDesktopProviderPresets";
-import { extractCodexBaseUrl } from "@/utils/providerConfigUtils";
-import { extractGrokBuildBaseUrl } from "@/utils/grokBuildConfig";
-import { GROKBUILD_OFFICIAL_PROVIDER_ID } from "@/utils/providerCapabilities";
 import type { OpenClawSuggestedDefaults } from "@/config/openclawProviderPresets";
-import type { UniversalProviderPreset } from "@/config/universalProviderPresets";
-import type { ManagedAuthProvider } from "@/lib/api";
+import { useAddProviderFormViewModel } from "./useAddProviderFormViewModel";
 
 /**
  * 手动添加供应商的表单体（无外壳）：App 专属/统一供应商两个 tab + 表单 + 动作条。
@@ -58,319 +44,39 @@ export function AddProviderForm({
   onDone,
 }: AddProviderFormProps) {
   const { t } = useTranslation();
-  // OpenCode and OpenClaw don't support universal providers
-  const showUniversalTab =
-    appId !== "opencode" &&
-    appId !== "openclaw" &&
-    appId !== "hermes" &&
-    appId !== "pi" &&
-    appId !== "mcode" &&
-    appId !== "grokbuild" &&
-    appId !== "claude-desktop";
-  const [activeTab, setActiveTab] = useState<"app-specific" | "universal">(
-    "app-specific",
-  );
-  const [universalFormOpen, setUniversalFormOpen] = useState(false);
-  const draftGeneration = useRef(0);
-  const [selectedUniversalPreset, setSelectedUniversalPreset] =
-    useState<UniversalProviderPreset | null>(null);
-  const [isFormSubmitting, setIsFormSubmitting] = useState(false);
-  // 托管 OAuth 账号的面板目标（上游 #3879 移植）：聚合页没有弹窗 open 翻转，
-  // 只在切换 app 标签时收起；页面卸载自然重置。
-  const [authSettingsTarget, setAuthSettingsTarget] =
-    useState<ManagedAuthProvider | null>(null);
-  useEffect(() => {
-    setAuthSettingsTarget(null);
-  }, [appId]);
-  // 表单随聚合页标签的挂/卸载自然重置，没有弹窗 open 翻转那回事 —— token 只跟 appId。
-  const formReadyToken = useMemo(() => Symbol("provider-form-ready"), [appId]);
-  const currentFormReadyToken = useRef(formReadyToken);
-  currentFormReadyToken.current = formReadyToken;
-  const [formReadyState, setFormReadyState] = useState({
-    token: formReadyToken,
-    ready: appId !== "pi",
-  });
-  const isFormReady =
-    formReadyState.token === formReadyToken
-      ? formReadyState.ready
-      : appId !== "pi";
-  const handleSubmitReadyChange = useCallback(
-    (ready: boolean) => {
-      if (currentFormReadyToken.current === formReadyToken) {
-        setFormReadyState({ token: formReadyToken, ready });
-      }
-    },
-    [formReadyToken],
-  );
-
-  const handleUniversalProviderSave = useCallback(
-    async (provider: UniversalProvider) => {
-      const saveEpoch = onSaveStart?.();
-      const savedDraftGeneration = draftGeneration.current;
-      try {
-        await universalProvidersApi.upsert(provider);
-      } catch (error) {
-        console.error(
-          "[AddProviderForm] Failed to save universal provider",
-          error,
-        );
-        toast.error(
-          t("universalProvider.addFailed", {
-            defaultValue: "统一供应商添加失败",
-          }),
-        );
-        return;
-      }
-
-      try {
-        await universalProvidersApi.sync(provider.id);
-        toast.success(
-          t("universalProvider.addedAndSynced", {
-            defaultValue: "统一供应商已添加并同步",
-          }),
-        );
-      } catch (error) {
-        console.error(
-          "[AddProviderForm] Provider saved but sync failed",
-          error,
-        );
-        toast.warning(
-          t("universalProvider.addedButSyncFailed", {
-            defaultValue: "统一供应商已添加，但同步失败",
-          }),
-        );
-      }
-
-      // The modal closes synchronously on submit. A late save must not
-      // close a subsequently opened draft or navigate away from it.
-      if (savedDraftGeneration === draftGeneration.current) {
-        onDone("saved", saveEpoch);
-      }
-    },
-    [t, onDone, onSaveStart],
-  );
-
-  const handleUniversalFormClose = useCallback(() => {
-    setUniversalFormOpen(false);
-    setSelectedUniversalPreset(null);
-  }, []);
-
-  const handleSubmit = useCallback(
-    async (values: ProviderFormValues) => {
-      const parsedConfig = JSON.parse(values.settingsConfig) as Record<
-        string,
-        unknown
-      >;
-
-      // 构造基础提交数据
-      const providerData: Omit<Provider, "id"> & {
-        providerKey?: string;
-        suggestedDefaults?: OpenClawSuggestedDefaults;
-        ensureClaudeDesktopOfficialSeed?: boolean;
-        ensureGrokBuildOfficialSeed?: boolean;
-      } = {
-        name: values.name.trim(),
-        notes: values.notes?.trim() || undefined,
-        websiteUrl: values.websiteUrl?.trim() || undefined,
-        settingsConfig: parsedConfig,
-        icon: values.icon?.trim() || undefined,
-        iconColor: values.iconColor?.trim() || undefined,
-        ...(values.presetCategory ? { category: values.presetCategory } : {}),
-        ...(values.meta ? { meta: values.meta } : {}),
-      };
-      if (appId === "claude-desktop" && values.presetId) {
-        const presetIndex = parseInt(
-          values.presetId.replace("claude-desktop-", ""),
-        );
-        const preset = claudeDesktopProviderPresets[presetIndex];
-        providerData.ensureClaudeDesktopOfficialSeed =
-          values.presetCategory === "official" &&
-          preset?.category === "official";
-      }
-
-      if (appId === "grokbuild" && values.presetId) {
-        providerData.ensureGrokBuildOfficialSeed =
-          values.presetCategory === "official" &&
-          values.presetId === GROKBUILD_OFFICIAL_PROVIDER_ID;
-      }
-
-      // Apps whose native catalog has a stable provider key use it as the
-      // managed provider identity.
-      if (
-        (appId === "opencode" ||
-          appId === "openclaw" ||
-          appId === "hermes" ||
-          appId === "pi" ||
-          appId === "mcode") &&
-        values.providerKey
-      ) {
-        providerData.providerKey = values.providerKey;
-      }
-      const hasCustomEndpoints =
-        providerData.meta?.custom_endpoints &&
-        Object.keys(providerData.meta.custom_endpoints).length > 0;
-
-      if (!hasCustomEndpoints && values.presetCategory !== "omo") {
-        const urlSet = new Set<string>();
-
-        const addUrl = (rawUrl?: string) => {
-          const url = (rawUrl || "").trim().replace(/\/+$/, "");
-          if (url && url.startsWith("http")) {
-            urlSet.add(url);
-          }
-        };
-
-        if (values.presetId) {
-          if (appId === "claude") {
-            const presets = providerPresets;
-            const presetIndex = parseInt(
-              values.presetId.replace("claude-", ""),
-            );
-            if (
-              !isNaN(presetIndex) &&
-              presetIndex >= 0 &&
-              presetIndex < presets.length
-            ) {
-              const preset = presets[presetIndex];
-              if (preset?.endpointCandidates) {
-                preset.endpointCandidates.forEach(addUrl);
-              }
-            }
-          } else if (appId === "codex") {
-            const presets = codexProviderPresets;
-            const presetIndex = parseInt(values.presetId.replace("codex-", ""));
-            if (
-              !isNaN(presetIndex) &&
-              presetIndex >= 0 &&
-              presetIndex < presets.length
-            ) {
-              const preset = presets[presetIndex];
-              if (Array.isArray(preset.endpointCandidates)) {
-                preset.endpointCandidates.forEach(addUrl);
-              }
-            }
-          } else if (appId === "gemini") {
-            const presets = geminiProviderPresets;
-            const presetIndex = parseInt(
-              values.presetId.replace("gemini-", ""),
-            );
-            if (
-              !isNaN(presetIndex) &&
-              presetIndex >= 0 &&
-              presetIndex < presets.length
-            ) {
-              const preset = presets[presetIndex];
-              if (Array.isArray(preset.endpointCandidates)) {
-                preset.endpointCandidates.forEach(addUrl);
-              }
-            }
-          } else if (appId === "claude-desktop") {
-            const presets = claudeDesktopProviderPresets;
-            const presetIndex = parseInt(
-              values.presetId.replace("claude-desktop-", ""),
-            );
-            if (
-              !isNaN(presetIndex) &&
-              presetIndex >= 0 &&
-              presetIndex < presets.length
-            ) {
-              const preset = presets[presetIndex];
-              if (Array.isArray(preset.endpointCandidates)) {
-                preset.endpointCandidates.forEach(addUrl);
-              }
-              addUrl(preset.baseUrl);
-            }
-          }
-        }
-
-        if (appId === "claude") {
-          const env = parsedConfig.env as Record<string, any> | undefined;
-          if (env?.ANTHROPIC_BASE_URL) {
-            addUrl(env.ANTHROPIC_BASE_URL);
-          }
-        } else if (appId === "claude-desktop") {
-          const env = parsedConfig.env as Record<string, any> | undefined;
-          if (env?.ANTHROPIC_BASE_URL) {
-            addUrl(env.ANTHROPIC_BASE_URL);
-          }
-        } else if (appId === "codex") {
-          const config = parsedConfig.config as string | undefined;
-          if (config) {
-            const extractedBaseUrl = extractCodexBaseUrl(config);
-            if (extractedBaseUrl) {
-              addUrl(extractedBaseUrl);
-            }
-          }
-        } else if (appId === "gemini") {
-          const env = parsedConfig.env as Record<string, any> | undefined;
-          if (env?.GOOGLE_GEMINI_BASE_URL) {
-            addUrl(env.GOOGLE_GEMINI_BASE_URL);
-          }
-        } else if (appId === "grokbuild") {
-          const config = parsedConfig.config as string | undefined;
-          if (config) {
-            addUrl(extractGrokBuildBaseUrl(config));
-          }
-        } else if (appId === "opencode") {
-          const options = parsedConfig.options as
-            Record<string, any> | undefined;
-          if (options?.baseURL) {
-            addUrl(options.baseURL);
-          }
-        } else if (appId === "openclaw") {
-          // OpenClaw uses baseUrl directly
-          if (parsedConfig.baseUrl) {
-            addUrl(parsedConfig.baseUrl as string);
-          }
-        } else if (appId === "hermes") {
-          if (parsedConfig.base_url) {
-            addUrl(parsedConfig.base_url as string);
-          }
-        }
-
-        const urls = Array.from(urlSet);
-        if (urls.length > 0) {
-          const now = Date.now();
-          const customEndpoints: Record<string, CustomEndpoint> = {};
-          urls.forEach((url) => {
-            customEndpoints[url] = {
-              url,
-              addedAt: now,
-              lastUsed: undefined,
-            };
-          });
-
-          providerData.meta = {
-            ...(providerData.meta ?? {}),
-            custom_endpoints: customEndpoints,
-          };
-        }
-      }
-
-      // OpenClaw: pass suggestedDefaults for model registration
-      if (appId === "openclaw" && values.suggestedDefaults) {
-        providerData.suggestedDefaults = values.suggestedDefaults;
-      }
-
-      const saveEpoch = onSaveStart?.();
-      const savedDraftGeneration = draftGeneration.current;
-      await onSubmit(providerData);
-      if (savedDraftGeneration === draftGeneration.current) {
-        onDone("saved", saveEpoch);
-      }
-    },
-    [appId, onSubmit, onDone, onSaveStart],
-  );
+  const {
+    showUniversalTab,
+    activeTab,
+    universalFormOpen,
+    appSaveCompleted,
+    selectedUniversalPreset,
+    isFormSubmitting,
+    setIsFormSubmitting,
+    authSettingsTarget,
+    setAuthSettingsTarget,
+    isFormReady,
+    handleSubmitReadyChange,
+    handleUniversalProviderSave,
+    handleUniversalFormClose,
+    handleSubmit,
+    cancel,
+    openUniversalForm,
+    changeTab,
+  } = useAddProviderFormViewModel({ appId, onSubmit, onDone, onSaveStart });
 
   const footer =
     !showUniversalTab || activeTab === "app-specific" ? (
       <>
         <span className="mr-auto min-w-0 text-xs text-muted-foreground truncate">
-          {t("provider.addFooterHint")}
+          {appSaveCompleted
+            ? t("provider.addSavedInBackground", {
+                defaultValue: "已保存。请重新打开表单以添加新供应商。",
+              })
+            : t("provider.addFooterHint")}
         </span>
         <Button
           variant="outline"
-          onClick={() => onDone("cancel")}
+          onClick={cancel}
           className="border-border/20 hover:bg-accent hover:text-accent-foreground"
         >
           {t("common.cancel")}
@@ -378,7 +84,7 @@ export function AddProviderForm({
         <Button
           type="submit"
           form="provider-form"
-          disabled={isFormSubmitting || !isFormReady}
+          disabled={isFormSubmitting || appSaveCompleted || !isFormReady}
           className="bg-primary text-primary-foreground hover:bg-primary/90"
         >
           {isFormSubmitting ? (
@@ -393,16 +99,13 @@ export function AddProviderForm({
       <>
         <Button
           variant="outline"
-          onClick={() => onDone("cancel")}
+          onClick={cancel}
           className="border-border/20 hover:bg-accent hover:text-accent-foreground"
         >
           {t("common.cancel")}
         </Button>
         <Button
-          onClick={() => {
-            ++draftGeneration.current;
-            setUniversalFormOpen(true);
-          }}
+          onClick={openUniversalForm}
           className="bg-primary text-primary-foreground hover:bg-primary/90"
         >
           <Plus className="h-4 w-4 mr-2" />
@@ -419,10 +122,7 @@ export function AddProviderForm({
         {showUniversalTab ? (
           <Tabs
             value={activeTab}
-            onValueChange={(v) => {
-              ++draftGeneration.current;
-              setActiveTab(v as "app-specific" | "universal");
-            }}
+            onValueChange={(v) => changeTab(v as "app-specific" | "universal")}
           >
             <TabsList className="grid w-full grid-cols-2 mb-6">
               <TabsTrigger value="app-specific">
@@ -444,7 +144,7 @@ export function AddProviderForm({
                   appId={appId}
                   submitLabel={t("common.add")}
                   onSubmit={handleSubmit}
-                  onCancel={() => onDone("cancel")}
+                  onCancel={cancel}
                   onManageAuthAccounts={setAuthSettingsTarget}
                   onSubmittingChange={setIsFormSubmitting}
                   onSubmitReadyChange={handleSubmitReadyChange}
@@ -470,7 +170,7 @@ export function AddProviderForm({
             appId={appId}
             submitLabel={t("common.add")}
             onSubmit={handleSubmit}
-            onCancel={() => onDone("cancel")}
+            onCancel={cancel}
             onManageAuthAccounts={setAuthSettingsTarget}
             onSubmittingChange={setIsFormSubmitting}
             onSubmitReadyChange={handleSubmitReadyChange}

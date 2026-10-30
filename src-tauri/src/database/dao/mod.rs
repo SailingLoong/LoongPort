@@ -26,3 +26,4 @@ pub(crate) mod qoder_campaign_operations;
 pub(crate) mod qoder_http_auth;
 
 pub(crate) mod relay_setup_operations;
+pub(crate) mod vendor_connection_operations;

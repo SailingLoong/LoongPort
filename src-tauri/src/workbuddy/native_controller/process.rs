@@ -92,7 +92,7 @@ impl Scope {
         scope.verify()?;
         Ok(scope)
     }
-    fn verify(&self) -> Result<(), Failure> {
+    pub(super) fn verify(&self) -> Result<(), Failure> {
         physical_directory(&self.bundle)?;
         physical_directory(self.executable.parent().ok_or(Failure::UnsafePath)?)?;
         let current = File::open(&self.bundle).map_err(|_| Failure::SourceChanged)?;
@@ -106,7 +106,7 @@ impl Scope {
         }
         Ok(())
     }
-    fn running(&self, path: &Path) -> Result<bool, Failure> {
+    pub(super) fn running(&self, path: &Path) -> Result<bool, Failure> {
         if !absolute(path) {
             return Err(Failure::SourceChanged);
         }

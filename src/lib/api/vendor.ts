@@ -1,11 +1,383 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type { AppId } from "./types";
+import type { CatalogPreview, ProviderCatalogDecision } from "./providers";
 import type {
   RefreshResult,
   RowBalanceResult,
   SwitchTierCommandResult,
 } from "./relay";
+
+/** Native command input for an explicit connection operation. */
+export interface VendorPrepareConnectionInput {
+  rowId: number;
+  plan: string;
+  app: AppId;
+  operationId: string;
+  catalogDecision: ProviderCatalogDecision | null;
+}
+
+/** Only these receipt states have a defined meaning at this boundary. */
+type VendorReceiptFields = {
+  operationId: string;
+  rowId: number;
+  plan: string;
+  app: AppId;
+  providerId: string;
+  receiptRevision: number;
+  completedConfigurationRevision: string | null;
+};
+export type VendorConnectionUnknown = {
+  status: "unknown";
+  operationId?: string;
+  app?: AppId;
+  receiptRevision?: number;
+};
+export type VendorPreparedReceipt = VendorReceiptFields & {
+  status: "prepared";
+  operationState: "prepared";
+};
+export type VendorCompletedReceipt = VendorReceiptFields & {
+  status: "completed";
+  operationState: "completed";
+};
+type VendorUnconfirmedReceipt = VendorReceiptFields & {
+  status: "unknown";
+  operationState:
+    "prepared" | "applying" | "unknown" | "failedBeforeWrite" | "reviewed";
+};
+export type VendorQueryConnectionResult =
+  | VendorConnectionUnknown
+  | VendorUnconfirmedReceipt
+  | VendorCompletedReceipt
+  | { status: "none" };
+export type VendorPrepareConnectionResult =
+  | VendorPreparedReceipt
+  | VendorCompletedReceipt
+  | VendorUnconfirmedReceipt
+  | VendorConnectionUnknown;
+
+/** A switched response is feedback, not a persistent receipt or proof of client adoption. */
+export type VendorSwitchPreparedConnectionResult =
+  SwitchTierCommandResult | VendorCompletedReceipt | VendorConnectionUnknown;
+
+export interface VendorSwitchPreparedConnectionInput {
+  rowId: number;
+  plan: string;
+  app: AppId;
+  quitChatgpt: boolean | null;
+  operationId: string;
+  expectedRevision: number;
+}
+
+const isNonemptyString = (value: unknown): value is string =>
+  typeof value === "string" && value.length > 0;
+const isRevision = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+
+// Preserve the original text: the native database uses it as the journal key.
+const isSupportedUuid = (value: unknown): value is string => {
+  if (typeof value !== "string") return false;
+  const hex = "[0-9a-fA-F]";
+  const hyphenated = `${hex}{8}-${hex}{4}-${hex}{4}-${hex}{4}-${hex}{12}`;
+  return new RegExp(
+    `^(?:${hex}{32}|${hyphenated}|\\{${hyphenated}\\}|urn:uuid:${hyphenated})$`,
+  ).test(value);
+};
+
+type VendorReceiptIntent = {
+  app: AppId;
+  operationId: string | null;
+  rowId?: number;
+  plan?: string;
+};
+function decodeVendorConnection(
+  value: unknown,
+  intent: VendorReceiptIntent,
+  kind: "prepare",
+): VendorPrepareConnectionResult;
+function decodeVendorConnection(
+  value: unknown,
+  intent: VendorReceiptIntent,
+  kind: "query",
+): VendorQueryConnectionResult;
+function decodeVendorConnection(
+  value: unknown,
+  intent: VendorReceiptIntent,
+  kind: "prepare" | "query",
+): VendorPrepareConnectionResult | VendorQueryConnectionResult {
+  const unknown: VendorConnectionUnknown = { status: "unknown" };
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return unknown;
+  const v = value as Record<string, unknown>;
+  if (v.status === "none")
+    return kind === "query" &&
+      intent.operationId === null &&
+      Object.keys(v).length === 1
+      ? { status: "none" }
+      : unknown;
+  if (
+    v.operationId !== undefined &&
+    (!isSupportedUuid(v.operationId) ||
+      (intent.operationId !== null && v.operationId !== intent.operationId))
+  )
+    return unknown;
+  if (v.app !== undefined && v.app !== intent.app) return unknown;
+
+  // Do not drop an unknown field that could carry a confirmation or review gate.
+  const receiptKeys = [
+    "operationId",
+    "rowId",
+    "plan",
+    "app",
+    "providerId",
+    "receiptRevision",
+    "status",
+    "operationState",
+    "completedConfigurationRevision",
+  ];
+  const full =
+    Object.keys(v).every((key) => receiptKeys.includes(key)) &&
+    isSupportedUuid(v.operationId) &&
+    typeof v.rowId === "number" &&
+    Number.isSafeInteger(v.rowId) &&
+    v.rowId >= 0 &&
+    isNonemptyString(v.plan) &&
+    v.app === intent.app &&
+    isNonemptyString(v.providerId) &&
+    isRevision(v.receiptRevision) &&
+    (v.completedConfigurationRevision === null ||
+      isNonemptyString(v.completedConfigurationRevision));
+  if (
+    full &&
+    (intent.rowId === undefined || v.rowId === intent.rowId) &&
+    (intent.plan === undefined || v.plan === intent.plan)
+  ) {
+    const fields: VendorReceiptFields = {
+      operationId: v.operationId as string,
+      rowId: v.rowId as number,
+      plan: v.plan as string,
+      app: intent.app,
+      providerId: v.providerId as string,
+      receiptRevision: v.receiptRevision as number,
+      completedConfigurationRevision: v.completedConfigurationRevision as
+        string | null,
+    };
+    if (
+      kind === "prepare" &&
+      v.status === "prepared" &&
+      v.operationState === "prepared"
+    ) {
+      return { ...fields, status: "prepared", operationState: "prepared" };
+    }
+    if (v.status === "completed" && v.operationState === "completed") {
+      return { ...fields, status: "completed", operationState: "completed" };
+    }
+    const pendingState =
+      v.operationState === "prepared" ||
+      v.operationState === "applying" ||
+      v.operationState === "unknown";
+    const otherKnownState =
+      v.operationState === "failedBeforeWrite" ||
+      v.operationState === "reviewed";
+    if (
+      (pendingState &&
+        (kind === "query"
+          ? v.status === "unknown"
+          : v.status === v.operationState)) ||
+      (otherKnownState && v.status === v.operationState)
+    ) {
+      return {
+        ...fields,
+        status: "unknown",
+        operationState:
+          v.operationState as VendorUnconfirmedReceipt["operationState"],
+      };
+    }
+    return unknown;
+  }
+  // Only the documented redacted unknown shape may retain any identity fields.
+  if (
+    kind === "query" &&
+    v.status === "unknown" &&
+    Object.keys(v).every((key) =>
+      ["status", "operationId", "app", "receiptRevision"].includes(key),
+    ) &&
+    (v.receiptRevision === undefined || isRevision(v.receiptRevision))
+  ) {
+    return {
+      status: "unknown",
+      ...(v.operationId !== undefined
+        ? { operationId: v.operationId as string }
+        : {}),
+      ...(v.app !== undefined ? { app: intent.app } : {}),
+      ...(v.receiptRevision !== undefined
+        ? { receiptRevision: v.receiptRevision as number }
+        : {}),
+    };
+  }
+  return unknown;
+}
+
+function decodeCatalogPreview(value: unknown): CatalogPreview | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return null;
+  const v = value as Record<string, unknown>;
+  const keys = [
+    "ownership",
+    "choice",
+    "canManage",
+    "canRestore",
+    "revision",
+    "beforePointer",
+    "afterPointer",
+  ];
+  if (
+    !Object.keys(v).every((key) => keys.includes(key)) ||
+    !["unclaimedExternal", "configuredExternal", "managed", "none"].includes(
+      v.ownership as string,
+    ) ||
+    !(v.choice === "keep" || v.choice === "manage") ||
+    typeof v.canManage !== "boolean" ||
+    !(v.canRestore === undefined || typeof v.canRestore === "boolean") ||
+    typeof v.revision !== "string" ||
+    !(v.beforePointer === null || typeof v.beforePointer === "string") ||
+    !(v.afterPointer === null || typeof v.afterPointer === "string")
+  )
+    return null;
+  return {
+    ownership: v.ownership as CatalogPreview["ownership"],
+    choice: v.choice,
+    canManage: v.canManage,
+    ...(v.canRestore !== undefined
+      ? { canRestore: v.canRestore as boolean }
+      : {}),
+    revision: v.revision,
+    beforePointer: v.beforePointer,
+    afterPointer: v.afterPointer,
+  };
+}
+
+function decodeVendorSwitch(
+  value: unknown,
+  intent: VendorSwitchPreparedConnectionInput,
+): VendorSwitchPreparedConnectionResult {
+  const unknown: VendorConnectionUnknown = { status: "unknown" };
+  if (
+    !isSupportedUuid(intent.operationId) ||
+    !isRevision(intent.expectedRevision) ||
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value)
+  )
+    return unknown;
+  const v = value as Record<string, unknown>;
+  if (v.status === "completed") {
+    const result = decodeVendorConnection(value, intent, "prepare");
+    return result.status === "completed" ? result : unknown;
+  }
+  if (
+    v.status === "unknown" &&
+    Object.keys(v).every((key) => ["status", "operationId"].includes(key)) &&
+    v.operationId === intent.operationId
+  ) {
+    return { status: "unknown", operationId: intent.operationId };
+  }
+  if (
+    v.status === "switched" &&
+    Object.keys(v).every((key) =>
+      [
+        "status",
+        "providerName",
+        "chatgptWasRunning",
+        "chatgptRelaunched",
+        "warnings",
+      ].includes(key),
+    ) &&
+    typeof v.providerName === "string" &&
+    typeof v.chatgptWasRunning === "boolean" &&
+    typeof v.chatgptRelaunched === "boolean" &&
+    Array.isArray(v.warnings) &&
+    v.warnings.every((warning) => typeof warning === "string")
+  ) {
+    return {
+      status: "switched",
+      providerName: v.providerName,
+      chatgptWasRunning: v.chatgptWasRunning,
+      chatgptRelaunched: v.chatgptRelaunched,
+      warnings: v.warnings,
+    };
+  }
+  if (
+    v.status === "confirmationRequired" &&
+    Object.keys(v).every((key) =>
+      ["status", "targetName", "quitRequired", "catalog"].includes(key),
+    ) &&
+    typeof v.targetName === "string" &&
+    typeof v.quitRequired === "boolean"
+  ) {
+    if (v.catalog === undefined)
+      return {
+        status: "confirmationRequired",
+        targetName: v.targetName,
+        quitRequired: v.quitRequired,
+      };
+    const catalog = decodeCatalogPreview(v.catalog);
+    if (catalog)
+      return {
+        status: "confirmationRequired",
+        targetName: v.targetName,
+        quitRequired: v.quitRequired,
+        catalog,
+      };
+  }
+  // Includes requestResolved: callers query the original operation instead of guessing.
+  return unknown;
+}
+
+export interface VendorOperationIdentity {
+  app: AppId;
+  operationId: string;
+}
+export type VendorConnectionReview = VendorOperationIdentity & {
+  status: "reviewRequired";
+  receiptRevision: number;
+  observedRevision: string;
+};
+export type VendorReviewedReceipt = VendorReceiptFields & {
+  status: "reviewed" | "failedBeforeWrite";
+  operationState: "reviewed" | "failedBeforeWrite";
+};
+export interface VendorNewConnectionIntentInput extends VendorOperationIdentity {
+  targetRowId: number;
+  targetPlan: string;
+}
+export type VendorNewConnectionIntentReview = VendorNewConnectionIntentInput & {
+  status: "newIntentReviewRequired";
+  receiptRevision: number;
+  originalRowId: number;
+  originalPlan: string;
+  targetProviderId: string;
+  reviewToken: string;
+};
+export type VendorConnectionCatalogResult =
+  | Extract<SwitchTierCommandResult, { status: "confirmationRequired" }>
+  | VendorConnectionUnknown;
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+const onlyKeys = (value: Record<string, unknown>, keys: string[]) =>
+  Object.keys(value).every((key) => keys.includes(key));
+const matchesOperation = (
+  value: Record<string, unknown>,
+  input: VendorOperationIdentity,
+) =>
+  isSupportedUuid(input.operationId) &&
+  value.operationId === input.operationId &&
+  value.app === input.app;
+const isRowId = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+const isDigest = (value: unknown): value is string =>
+  typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 
 /**
  * 一个已添加的官网直连账号（`loongport_vendor` 的一行）。
@@ -211,6 +583,207 @@ export const vendorApi = {
 
   refresh: (rowId: number, app: AppId): Promise<RefreshResult> =>
     invoke("vendor_refresh", { rowId, app }),
+
+  /** Preview does not mutate the operation or authorize a later write by itself. */
+  previewConnectionCatalog: async (
+    input: VendorOperationIdentity & {
+      catalogDecision: ProviderCatalogDecision;
+      quitChatgpt: boolean | null;
+    },
+  ): Promise<VendorConnectionCatalogResult> => {
+    const { app, operationId, catalogDecision, quitChatgpt } = input;
+    if (app !== "codex" || !isSupportedUuid(operationId))
+      return { status: "unknown" };
+    const value: unknown = await invoke("vendor_preview_connection_catalog", {
+      app,
+      operationId,
+      catalogDecision,
+      quitChatgpt,
+    });
+    const result = decodeVendorSwitch(value, {
+      app,
+      operationId,
+      rowId: 0,
+      plan: "preview",
+      expectedRevision: 1,
+      quitChatgpt,
+    });
+    return result.status === "confirmationRequired"
+      ? result
+      : { status: "unknown" };
+  },
+  previewConnectionReview: async (
+    input: VendorOperationIdentity,
+  ): Promise<VendorConnectionReview | VendorConnectionUnknown> => {
+    const { app, operationId } = input;
+    const value: unknown = await invoke("vendor_preview_connection_review", {
+      app,
+      operationId,
+    });
+    if (
+      !isRecord(value) ||
+      !matchesOperation(value, input) ||
+      value.status !== "reviewRequired" ||
+      !onlyKeys(value, [
+        "status",
+        "operationId",
+        "app",
+        "receiptRevision",
+        "observedRevision",
+      ]) ||
+      !isRevision(value.receiptRevision) ||
+      !isNonemptyString(value.observedRevision)
+    )
+      return { status: "unknown" };
+    return {
+      status: "reviewRequired",
+      app,
+      operationId,
+      receiptRevision: value.receiptRevision,
+      observedRevision: value.observedRevision,
+    };
+  },
+  reviewConnection: async (
+    input: VendorOperationIdentity & {
+      expectedRevision: number;
+      observedRevision: string;
+    },
+  ): Promise<VendorReviewedReceipt | VendorConnectionUnknown> => {
+    const { app, operationId, expectedRevision, observedRevision } = input;
+    const value: unknown = await invoke("vendor_review_connection", {
+      app,
+      operationId,
+      expectedRevision,
+      observedRevision,
+    });
+    const result = decodeVendorConnection(value, input, "query");
+    if (
+      result.status === "unknown" &&
+      "operationState" in result &&
+      (result.operationState === "reviewed" ||
+        result.operationState === "failedBeforeWrite") &&
+      result.receiptRevision > expectedRevision
+    ) {
+      return {
+        ...result,
+        status: result.operationState,
+        operationState: result.operationState,
+      };
+    }
+    return { status: "unknown" };
+  },
+  previewNewConnectionIntent: async (
+    input: VendorNewConnectionIntentInput,
+  ): Promise<VendorNewConnectionIntentReview | VendorConnectionUnknown> => {
+    const { app, operationId, targetRowId, targetPlan } = input;
+    const value: unknown = await invoke(
+      "vendor_preview_new_connection_intent",
+      { app, operationId, targetRowId, targetPlan },
+    );
+    if (
+      !isRecord(value) ||
+      !matchesOperation(value, input) ||
+      value.status !== "newIntentReviewRequired" ||
+      !onlyKeys(value, [
+        "status",
+        "operationId",
+        "app",
+        "receiptRevision",
+        "originalRowId",
+        "originalPlan",
+        "targetRowId",
+        "targetPlan",
+        "targetProviderId",
+        "reviewToken",
+      ]) ||
+      !isRevision(value.receiptRevision) ||
+      !isRowId(value.originalRowId) ||
+      !isNonemptyString(value.originalPlan) ||
+      !isRowId(targetRowId) ||
+      value.targetRowId !== targetRowId ||
+      !isNonemptyString(targetPlan) ||
+      value.targetPlan !== targetPlan ||
+      !isNonemptyString(value.targetProviderId) ||
+      !isDigest(value.reviewToken)
+    )
+      return { status: "unknown" };
+    return {
+      status: "newIntentReviewRequired",
+      app,
+      operationId,
+      receiptRevision: value.receiptRevision,
+      originalRowId: value.originalRowId,
+      originalPlan: value.originalPlan,
+      targetRowId,
+      targetPlan,
+      targetProviderId: value.targetProviderId,
+      reviewToken: value.reviewToken,
+    };
+  },
+  /** Retires a reviewed old intent only. A new UUID must still be explicitly prepared. */
+  confirmNewConnectionIntent: async (
+    input: VendorNewConnectionIntentInput & { reviewToken: string },
+  ): Promise<
+    { status: "newIntentPermitted"; app: AppId } | VendorConnectionUnknown
+  > => {
+    const { app, operationId, targetRowId, targetPlan, reviewToken } = input;
+    const value: unknown = await invoke(
+      "vendor_confirm_new_connection_intent",
+      { app, operationId, targetRowId, targetPlan, reviewToken },
+    );
+    return isSupportedUuid(operationId) &&
+      isDigest(reviewToken) &&
+      isRecord(value) &&
+      value.status === "newIntentPermitted" &&
+      value.app === app &&
+      onlyKeys(value, ["status", "app"])
+      ? { status: "newIntentPermitted", app }
+      : { status: "unknown" };
+  },
+
+  /** Prepare one explicit operation; undecodable replies remain uncertain. */
+  prepareConnection: async (
+    input: VendorPrepareConnectionInput,
+  ): Promise<VendorPrepareConnectionResult> => {
+    const { rowId, plan, app, operationId, catalogDecision } = input;
+    const result: unknown = await invoke("vendor_prepare_connection", {
+      rowId,
+      plan,
+      app,
+      operationId,
+      catalogDecision,
+    });
+    return decodeVendorConnection(result, input, "prepare");
+  },
+
+  /** Read an original operation, or the native app-scoped result for null. */
+  queryConnection: async (
+    app: AppId,
+    operationId: string | null,
+  ): Promise<VendorQueryConnectionResult> => {
+    const result: unknown = await invoke("vendor_query_connection", {
+      app,
+      operationId,
+    });
+    return decodeVendorConnection(result, { app, operationId }, "query");
+  },
+
+  /** Unrecognized response is uncertain: callers must query the same operation. */
+  switchPreparedConnection: async (
+    input: VendorSwitchPreparedConnectionInput,
+  ): Promise<VendorSwitchPreparedConnectionResult> => {
+    const { rowId, plan, app, quitChatgpt, operationId, expectedRevision } =
+      input;
+    const result: unknown = await invoke("vendor_switch", {
+      rowId,
+      plan,
+      app,
+      quitChatgpt,
+      operationId,
+      expectedRevision,
+    });
+    return decodeVendorSwitch(result, input);
+  },
 
   switch: (
     rowId: number,

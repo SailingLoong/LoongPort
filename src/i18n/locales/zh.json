@@ -1,5 +1,25 @@
 {
   "accountsOverview": {
+    "nativeSwitch": {
+      "title": "确认切换账号",
+      "confirm": "将正常退出正在运行的 WorkBuddy，切换到 {{name}} 的认证文件；仅当本次操作退出了客户端时尝试重开。账号是否生效需另行验证。",
+      "action": "确认切换",
+      "applied": "认证文件已切换。",
+      "alreadyApplied": "认证文件已是目标内容。",
+      "notNeeded": "客户端原本未运行，未启动。",
+      "requested": "已请求启动；账号是否生效待验证。",
+      "failed": "启动失败。",
+      "unknown": "启动结果未知。",
+      "error": {
+        "outcomeUnknown": "切换结果未知，请先核对原操作，不要重复切换。",
+        "quitRefused": "客户端拒绝退出，未切换认证文件。",
+        "quitTimeout": "客户端退出超时，未切换认证文件。",
+        "writersRemaining": "仍有客户端进程运行，未切换认证文件。",
+        "busy": "另一个切换正在进行，未执行本次切换。",
+        "sourceChanged": "客户端来源已变化，未切换认证文件。",
+        "transaction": "认证文件事务报告异常（{{reason}}），再次操作前请检查恢复状态。"
+      }
+    },
     "switch": "切换",
     "switchUnavailable": "当前尚无可验证的客户端切换能力",
     "hideExhausted": "隐藏已耗尽",
@@ -61,6 +81,7 @@
     "saving": "正在保存自动领取设置…",
     "saved": "已确认 {{count}} 个账号的设置",
     "uncertain": "设置结果未确认，请刷新后查看",
+    "notDispatched": "设置未提交，请刷新并重新确认",
     "readFailed": "账号状态读取失败，请刷新",
     "reason": {
       "actionRequired": "领取需要处理，请打开账号查看",
@@ -3971,7 +3992,7 @@
         "cancelled": "已取消",
         "changed": "配置已更改，请检查",
         "verificationFailed": "无法验证，请重试读取",
-        "unverified": "配置结果未验证，请检查"
+        "unverified": "应用状态未核实，请检查"
       },
       "reapply": "重新应用此配置",
       "continueSetup": "继续配置",
@@ -4453,6 +4474,11 @@
       "chooseReasoning": "请明确选择思考默认值",
       "sourceChangeEffectsUnavailable": "无法核对清理明细，请重新打开此窗口后再继续。",
       "sourceConfirmationRequired": "需要重新明确选择模型和思考默认值，并确认当前来源。"
+    },
+    "vendorRecovery": {
+      "title": "复核并发起新连接",
+      "description": "旧连接操作的结果无法核实。确认后将保留旧记录，并为 {{name}} 发起新的连接；这不代表旧操作已经成功。",
+      "confirm": "确认新连接"
     }
   },
   "secrets": {
@@ -5093,6 +5119,50 @@
     }
   },
   "workbuddy": {
+    "nativeRecovery": {
+      "title": "认证文件恢复",
+      "description": "先退出 WorkBuddy 和相关进程。恢复按当前保险库的原日志执行，不会自动退出或启动客户端。",
+      "check": "检查恢复状态",
+      "open": "恢复认证文件",
+      "busy": "正在处理；离开页面不会取消已经提交的恢复操作。",
+      "phase": {
+        "pending": "日志当前待恢复。",
+        "clear": "日志当前无待恢复项。",
+        "absent": "当前没有日志。"
+      },
+      "after": {
+        "pending": "恢复后读取的当前日志快照：仍待恢复。",
+        "clear": "恢复后读取的当前日志快照：无待恢复项。",
+        "absent": "恢复后读取的当前日志快照：不存在。"
+      },
+      "restored": "最近一次收到的恢复回执：原文件已恢复。",
+      "alreadyApplied": "最近一次收到的恢复回执：已提交的目标文件仍匹配。",
+      "error": {
+        "unsupported": "当前平台不支持此操作。",
+        "checkFailed": "检查失败，请重新检查。",
+        "afterCheckFailed": "已收到恢复回执，但后续日志检查失败。",
+        "recoveryUnknown": "恢复结果未确认；操作可能仍在执行，不能自动重试。"
+      },
+      "unresolved": "此前恢复结果仍未确认；当前快照及后续回执不能证明此前请求的结果。",
+      "unknown": "日志快照不证明此前未知请求的结果，也不证明客户端账号已生效。",
+      "confirmTitle": "确认恢复认证文件",
+      "confirmDescription": "请先退出 WorkBuddy 和相关进程。将依据当前保险库中的原日志恢复认证文件；不会自动启动客户端，也不会重放切换。",
+      "confirm": "确认恢复"
+    },
+    "nativeCapture": {
+      "open": "保存当前原生账号",
+      "title": "保存当前 WorkBuddy 账号",
+      "description": "将当前客户端的本机认证快照保存到 LoongPort 保险库，仅用于本机客户端切换；这不证明登录有效，也不提供 API 授权。",
+      "existing": "如果同一账号已存在（包括作为 API 账号），目前无法在此为其补存；不会删除或覆盖已有账号。",
+      "conflict": "来源与已有账号或已变化的状态冲突；不会覆盖或删除已有账号。",
+      "label": "账号标签（不是凭据）",
+      "confirm": "确认并保存快照",
+      "cancel": "取消",
+      "close": "关闭",
+      "busy": "正在保存……离开此界面不会停止已开始的后台任务。",
+      "unknown": "结果尚未确认；查看列表不能证明本次操作失败，也不会自动重试。",
+      "saved": "最近一次采集已保存；不代表登录有效或具有 API 权限。"
+    },
     "nativePreview": {
       "title": "WorkBuddy 原生客户端观测",
       "description": "仅在点击后读取已知的国内版认证文件位置。不保存账号，不修改文件或设置。",
@@ -5104,7 +5174,7 @@
       "realmCodebuddy": "文档登录域：CodeBuddy 国内版（www.codebuddy.cn）",
       "markerPresent": "退出标记观测：存在。",
       "markerAbsent": "退出标记观测：不存在。",
-      "notActivation": "仅为已知位置观测，未认证安装或验证登录有效性；退出标记不代表登录状态。尚未启用账号采集或切换。",
+      "notActivation": "仅为已知位置观测，未认证安装或验证登录有效性；退出标记不代表登录状态。",
       "error": {
         "unsafeSource": "来源不满足安全读取条件。",
         "sourceChanged": "观测期间文件发生变化，请稍后重试。",

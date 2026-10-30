@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useDarkMode } from "@/hooks/useDarkMode";
 import { useTranslation } from "react-i18next";
 import { Eye, EyeOff, RefreshCw } from "lucide-react";
@@ -62,8 +62,24 @@ export function UniversalProviderFormModal({
   const [pendingProvider, setPendingProvider] =
     useState<UniversalProvider | null>(null);
 
+  // Activity can suspend and restore effects without closing this draft.
+  const initialized = useRef<{
+    editingProvider: typeof editingProvider;
+    initialPreset: typeof initialPreset;
+  } | null>(null);
   // 初始化表单
   useEffect(() => {
+    if (!isOpen) {
+      initialized.current = null;
+    } else {
+      if (
+        initialized.current &&
+        initialized.current.editingProvider === editingProvider &&
+        initialized.current.initialPreset === initialPreset
+      )
+        return;
+      initialized.current = { editingProvider, initialPreset };
+    }
     if (editingProvider) {
       // 编辑模式：加载现有数据
       setName(editingProvider.name);

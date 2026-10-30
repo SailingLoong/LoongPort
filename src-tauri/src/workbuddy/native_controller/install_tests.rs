@@ -136,6 +136,59 @@ impl Processes for Quiet {
 }
 
 #[tokio::test]
+async fn stopped_witness_refuses_install_or_auth_root_replacement_before_transaction() {
+    use crate::workbuddy::native_switch_lifecycle::{
+        self as lifecycle, Driver, Error, Restart, Stop,
+    };
+    struct Stopped;
+    impl Driver for Stopped {
+        fn stop_and_recheck(&mut self) -> Result<Stop, Error> {
+            Ok(Stop::StoppedByUs)
+        }
+        fn restart(&mut self) -> Restart {
+            panic!("replaced source must not be restarted")
+        }
+    }
+    for kind in ["installation", "auth-root"] {
+        let mut f = InstalledFixture::new().await;
+        let origin = f.origin().unwrap();
+        f.bind_target(&origin).await;
+        let binding = f.f.binding();
+        let controller = f.f.controller(&binding);
+        let mut source = f.controlled(origin);
+        let before = std::fs::read(f.f.auth()).unwrap();
+        let marker = f.f.client.join("workbuddy-desktop.info.logged-out");
+        let marker_bytes = std::fs::read(&marker).unwrap();
+        let witness = crate::workbuddy::native_source::read_pair(&f.f.auth()).unwrap();
+        let mut driver = Stopped;
+        let gate = tokio::sync::Mutex::new(());
+        let result = lifecycle::run_with_gate(&gate, &mut driver, || async {
+            if kind == "installation" {
+                std::fs::rename(&f.bundle, f.bundle.with_extension("previous")).unwrap();
+                std::fs::create_dir(&f.bundle).unwrap();
+            } else {
+                std::fs::rename(&f.f.client, f.f.client.with_extension("previous")).unwrap();
+                std::fs::create_dir(&f.f.client).unwrap();
+                std::fs::write(f.f.auth(), &before).unwrap();
+                std::fs::write(&marker, &marker_bytes).unwrap();
+            }
+            controller
+                .activate_guarded(&f.f.key(), &mut source, &mut Files, &witness)
+                .await
+        })
+        .await;
+        assert!(result.is_err(), "accepted replaced {kind}");
+        assert_eq!(std::fs::read(f.f.auth()).unwrap(), before);
+        assert!(!f
+            .f
+            .session
+            .root()
+            .join(crate::secrets::owned_file::WORKBUDDY_NATIVE_JOURNAL_FILE)
+            .exists());
+    }
+}
+
+#[tokio::test]
 async fn discovery_pins_without_reading_build_until_operation_admission() {
     use super::super::install::take_content_reads;
     let f = InstalledFixture::new().await;

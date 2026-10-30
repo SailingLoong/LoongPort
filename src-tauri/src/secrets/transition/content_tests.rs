@@ -193,6 +193,77 @@ fn remote_content_into_text_keeps_current_user_key() {
     fixture.restore(SOURCE_TEXT).unwrap();
     fixture.assert_installed();
 }
+
+#[cfg(feature = "gui")]
+#[test]
+#[serial_test::serial]
+fn foreign_restore_preserves_vendor_receipt_as_unknown_without_rebinding() {
+    let fixture = Fixture::new(plain());
+    let db = fixture.db.clone();
+    let account = "synthetic-restore-vendor-account";
+    {
+        let vault = db.secrets.read().unwrap();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO loongport_vendor(id,vendor_id,account_id) VALUES(702,'opencode',?1)",
+            [account],
+        )
+        .unwrap();
+        crate::vendor::creds::set_api_key(&conn, &vault, 702, "synthetic-only-key").unwrap();
+    }
+    let bundle = crate::vendor::provision::plan_rows_for(
+        crate::vendor::Vendor::OpenCode,
+        account,
+        "synthetic-only-key",
+    )
+    .into_iter()
+    .find(|row| row.plan.id_segment == "opencode")
+    .unwrap();
+    let settings = bundle
+        .rows
+        .iter()
+        .find(|(app, _)| *app == crate::app_config::AppType::Codex)
+        .unwrap()
+        .1
+        .clone();
+    let provider =
+        crate::provider::Provider::with_id(bundle.provider_id, "synthetic".into(), settings, None);
+    db.save_provider("codex", &provider).unwrap();
+    let state = crate::store::AppState::new(db.clone()).unwrap();
+    let app = tauri::test::mock_builder()
+        .manage(state)
+        .invoke_handler(tauri::generate_handler![
+            crate::commands::vendor_prepare_connection,
+            crate::commands::vendor_query_connection
+        ])
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+        .build()
+        .unwrap();
+    let operation = "8d75e8d4-9140-45eb-b67d-000000000001";
+    let prepare = invoke(&window, "vendor_prepare_connection", serde_json::json!({
+        "rowId":702,"plan":"opencode","app":"codex","operationId":operation,"catalogDecision":null
+    })).unwrap();
+    assert_eq!(prepare["status"], "prepared");
+    let binding = db.secrets.read().unwrap().identity().store_id().to_owned();
+    fixture.restore(SOURCE_TEXT).unwrap();
+    assert_eq!(db.secrets.read().unwrap().identity().store_id(), binding);
+    let query = invoke(
+        &window,
+        "vendor_query_connection",
+        serde_json::json!({"app":"codex","operationId":operation}),
+    )
+    .unwrap();
+    assert_eq!(query["status"], "unknown");
+    assert_eq!(query["operationId"], operation);
+    let conn = db.conn.lock().unwrap();
+    let retained = crate::database::vendor_connection_operations::read_on(&conn, operation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.storage_binding, binding);
+    assert_eq!(retained.state, "prepared");
+}
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]
 fn wrong_source_text_never_changes_receiver_or_skills() {

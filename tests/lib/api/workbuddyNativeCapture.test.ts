@@ -9,6 +9,84 @@ const selection = {
 };
 const account = { selection, label: "Synthetic", realm: "www.workbuddy.cn" };
 const saved = { state: "saved", account, activationAvailable: false };
+
+it.each(["notNeeded", "requested", "failed", "unknown"] as const)(
+  "keeps the file transaction separate from restart %s",
+  async (restart) => {
+    vi.mocked(invoke).mockResolvedValue({ transaction: "applied", restart });
+    expect(await workbuddyApi.activateNativeWithRestart(selection)).toEqual({
+      transaction: "applied",
+      restart,
+    });
+    expect(invoke).toHaveBeenCalledExactlyOnceWith(
+      "activate_workbuddy_native_with_restart",
+      { target: selection },
+    );
+  },
+);
+
+it.each([
+  {},
+  { transaction: "restored", restart: "requested" },
+  { transaction: "applied", restart: "adopted" },
+  { transaction: "applied", restart: "requested", token: "secret" },
+])("rejects an invalid switch receipt %#", async (receipt) => {
+  vi.mocked(invoke).mockResolvedValue(receipt);
+  await expect(
+    workbuddyApi.activateNativeWithRestart(selection),
+  ).rejects.toMatchObject({
+    stage: "outcomeUnknown",
+  });
+  expect(invoke).toHaveBeenCalledTimes(1);
+});
+
+it("preserves a structured transaction failure without leaking a payload", async () => {
+  vi.mocked(invoke).mockRejectedValue({
+    stage: "transaction",
+    reason: "sourceChanged",
+    token: "secret",
+  });
+  const error = await workbuddyApi
+    .activateNativeWithRestart(selection)
+    .catch((value) => value);
+  expect(error).toMatchObject({
+    stage: "transaction",
+    reason: "sourceChanged",
+  });
+  expect(JSON.stringify(error)).not.toContain("secret");
+  expect(invoke).toHaveBeenCalledTimes(1);
+});
+
+it("accepts the backend's file-switch capability without claiming current account or request outcome", async () => {
+  vi.mocked(invoke).mockResolvedValue({
+    accounts: [account],
+    requestOutcome: "unknown",
+    activationAvailable: true,
+  });
+  expect(await workbuddyApi.listNativeCaptures()).toEqual({
+    accounts: [account],
+    requestOutcome: "unknown",
+    activationAvailable: true,
+  });
+});
+
+it("does not dispatch a pre-cancelled switch and treats detached submitted work as unknown", async () => {
+  const pre = new AbortController();
+  pre.abort();
+  await expect(
+    workbuddyApi.activateNativeWithRestart(selection, pre.signal),
+  ).rejects.toMatchObject({ stage: "cancelled" });
+  expect(invoke).not.toHaveBeenCalled();
+  const during = new AbortController();
+  vi.mocked(invoke).mockReturnValue(new Promise(() => {}));
+  const pending = workbuddyApi.activateNativeWithRestart(
+    selection,
+    during.signal,
+  );
+  during.abort();
+  await expect(pending).rejects.toMatchObject({ stage: "outcomeUnknown" });
+  expect(invoke).toHaveBeenCalledTimes(1);
+});
 beforeEach(() => {
   vi.mocked(invoke).mockReset();
 });
@@ -126,7 +204,7 @@ it("lists a snapshot without claiming a lost capture request completed", async (
 it.each([
   { accounts: [], requestOutcome: "saved", activationAvailable: false },
   { accounts: [{}], requestOutcome: "unknown", activationAvailable: false },
-  { accounts: [], requestOutcome: "unknown", activationAvailable: true },
+  { accounts: [], requestOutcome: "unknown", activationAvailable: "true" },
 ])("rejects invalid list DTO %#", async (value) => {
   vi.mocked(invoke).mockResolvedValue(value);
   await expect(workbuddyApi.listNativeCaptures()).rejects.toMatchObject({

@@ -1,54 +1,14 @@
-import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { vendorApi } from "@/lib/api/vendor";
-
+import { useOpenCodePersonalKeyViewModel } from "./useOpenCodePersonalKeyViewModel";
 /** Fixed official account source, not the custom-API setup screen. */
 export function OpenCodePersonalKeyForm({
   onSaved,
 }: {
   onSaved: (rowId: number) => void;
 }) {
-  const [key, setKey] = useState("");
-  const [label, setLabel] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState("");
-  const active = useRef(true);
-  const pending = useRef(false);
-  useEffect(() => {
-    active.current = true;
-    return () => {
-      active.current = false;
-    };
-  }, []);
-  const save = async () => {
-    if (pending.current || !key.trim()) return;
-    pending.current = true;
-    setBusy(true);
-    setMessage("");
-    try {
-      const result = await vendorApi.importOpenCodeKey(
-        key.trim(),
-        label.trim(),
-      );
-      if (!active.current) return;
-      setKey("");
-      setMessage(
-        result.configurationReady === false
-          ? "凭据已保存，应用配置未完成。请在账号行刷新重试；再次导入也不会新建重复账号。尚未验证真实调用。"
-          : "已保存接入配置，尚未验证真实调用。请按已有权益选择 Console 或 Go。",
-      );
-      onSaved(result.rowId);
-    } catch {
-      if (active.current)
-        setMessage(
-          "添加未完成，请检查完整密钥与本地密钥库后重试；不会自动创建密钥。",
-        );
-    } finally {
-      pending.current = false;
-      if (active.current) setBusy(false);
-    }
-  };
+  const { key, setKey, label, setLabel, busy, message, save } =
+    useOpenCodePersonalKeyViewModel(onSaved);
   return (
     <section
       className="space-y-3 rounded-lg border border-border-default p-4"

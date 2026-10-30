@@ -1,3 +1,4 @@
+import { useQoderAccountPanel } from "./useQoderAccountPanel";
 import { useContext } from "react";
 import {
   AccountWorkspace,
@@ -5,48 +6,26 @@ import {
   AccountApplicationNavigation,
 } from "./AccountWorkspace";
 import { QoderApplicationEntry } from "./QoderApplicationEntry";
-import { usePreservedViewActive } from "@/components/ui/PreservedView";
-import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
-import { providersApi } from "@/lib/api/providers";
 import { QoderInferenceIdentity } from "@/components/providers/qoder/QoderInferenceIdentity";
 import { QoderCnDeviceLogin } from "@/components/providers/qoder/QoderCnDeviceLogin";
 import { QoderDailyClaim } from "@/components/providers/qoder/QoderDailyClaim";
 import { QoderCnCampaigns } from "@/components/providers/qoder/QoderCnCampaigns";
-import type { Provider } from "@/types";
 import type { AppId } from "@/lib/api/types";
-
-function sourceGeneration(provider: Provider): string | undefined {
-  const state = (provider.meta as { qoderCampaignState?: unknown } | undefined)
-    ?.qoderCampaignState;
-  if (!state || typeof state !== "object" || !("generation" in state))
-    return undefined;
-  return typeof state.generation === "string" ? state.generation : undefined;
-}
 
 /** Present original Provider records, never create a second account or credential owner. */
 export function QoderAccountPanel({ defaultApp }: { defaultApp?: AppId }) {
-  const active = usePreservedViewActive();
+  const { active, accounts, details, pending, error, refreshing, refresh } =
+    useQoderAccountPanel();
   const openApplication = useContext(AccountApplicationNavigation);
-  const query = useQuery({
-    queryKey: ["providers", "codex"],
-    enabled: active,
-    queryFn: async () => ({ providers: await providersApi.getAll("codex") }),
-  });
-  const accounts = Object.values(query.data?.providers ?? {}).filter(
-    (provider) =>
-      ["qoder_sdk", "qoder_cn", "qoder_cn_device"].includes(
-        provider.meta?.providerType ?? "",
-      ),
-  );
   return (
     <section className="space-y-4" aria-label="Qoder 账号管理">
       <div className="flex items-center justify-between gap-3">
         <h2 className="font-semibold">Qoder 账号（国际版 / CN）</h2>
         <Button
           variant="outline"
-          disabled={!active || query.isFetching}
-          onClick={() => void query.refetch()}
+          disabled={!active || refreshing}
+          onClick={() => void refresh()}
         >
           刷新账号
         </Button>
@@ -61,12 +40,12 @@ export function QoderAccountPanel({ defaultApp }: { defaultApp?: AppId }) {
         推理需先主动建立账号身份，再通过真实请求验证权益；积分领取独立验证国际版
         PAT、活动资格及设备组件，不代表已接通积分消费。
       </p>
-      {query.isPending ? (
+      {pending ? (
         <p role="status">正在读取账号…</p>
-      ) : query.error ? (
+      ) : error ? (
         <div role="alert">
           <p>Qoder 账号读取失败，请重试。</p>
-          <Button variant="outline" onClick={() => void query.refetch()}>
+          <Button variant="outline" onClick={() => void refresh()}>
             重试
           </Button>
         </div>
@@ -82,22 +61,18 @@ export function QoderAccountPanel({ defaultApp }: { defaultApp?: AppId }) {
           label={(provider) => provider.name}
           identityDetails={(provider) => (
             <p className="mt-1 text-xs text-muted-foreground">
-              {provider.meta?.providerType === "qoder_cn_device"
-                ? "Qoder CN · 本应用独立授权"
-                : provider.meta?.providerType === "qoder_cn"
-                  ? "Qoder CN · 独立 PAT"
-                  : "Qoder 国际版"}
+              {details(provider).identityLabel}
             </p>
           )}
         >
           {(provider) => {
-            const generation = sourceGeneration(provider);
+            const { generation, usesDeviceLogin, isInternational } =
+              details(provider);
             return (
               <>
                 <AccountDetailSections
-                  key={`${provider.id}:${generation ?? ""}`}
                   authorization={
-                    provider.meta?.providerType === "qoder_cn_device" ? (
+                    usesDeviceLogin ? (
                       <QoderCnDeviceLogin
                         providerId={provider.id}
                         sourceGeneration={generation}
@@ -111,17 +86,18 @@ export function QoderAccountPanel({ defaultApp }: { defaultApp?: AppId }) {
                     )
                   }
                   entitlements={
-                    provider.meta?.providerType === "qoder_sdk" ? (
+                    isInternational ? (
                       <QoderDailyClaim
                         providerId={provider.id}
-                        disabled={!active || query.isFetching}
+                        sourceGeneration={generation}
+                        disabled={!active || refreshing}
                       />
                     ) : (
                       <>
                         <QoderCnCampaigns
                           providerId={provider.id}
                           sourceGeneration={generation}
-                          disabled={!active || query.isFetching}
+                          disabled={!active || refreshing}
                         />
                         <p className="text-sm text-muted-foreground">
                           免费福利可在“CN
@@ -134,7 +110,7 @@ export function QoderAccountPanel({ defaultApp }: { defaultApp?: AppId }) {
                     <QoderInferenceIdentity
                       providerId={provider.id}
                       sourceGeneration={generation}
-                      disabled={!active || query.isFetching}
+                      disabled={!active || refreshing}
                     />
                   }
                 />

@@ -26,13 +26,26 @@ pub(crate) struct CurrentCaptures {
     activation_available: bool,
 }
 impl CurrentCaptures {
-    #[cfg(any(all(test, unix), all(target_os = "macos", target_arch = "aarch64")))]
-    pub(super) fn unknown(accounts: Vec<CapturedAccount>) -> Self {
+    #[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+    fn with_capability(accounts: Vec<CapturedAccount>, supported: bool) -> Self {
         Self {
             accounts,
             request_outcome: "unknown",
-            activation_available: false,
+            activation_available: supported,
         }
+    }
+    #[cfg(any(all(test, unix), all(target_os = "macos", target_arch = "aarch64")))]
+    pub(super) fn unknown(accounts: Vec<CapturedAccount>) -> Self {
+        // Compile-time command availability only. The switch owner performs
+        // install, source, process and transaction admission at invocation.
+        Self::with_capability(
+            accounts,
+            cfg!(all(
+                feature = "gui",
+                target_os = "macos",
+                target_arch = "aarch64"
+            )),
+        )
     }
 }
 
@@ -150,5 +163,20 @@ pub(crate) async fn list(
     {
         let _ = session;
         Err(Failure::UnsafePath)
+    }
+}
+
+#[cfg(test)]
+mod switch_capability_tests {
+    use super::CurrentCaptures;
+
+    #[test]
+    fn file_switch_capability_is_independent_of_unknown_request_outcome() {
+        for supported in [false, true] {
+            let result = CurrentCaptures::with_capability(Vec::new(), supported);
+            let value = serde_json::to_value(result).unwrap();
+            assert_eq!(value["activationAvailable"], supported);
+            assert_eq!(value["requestOutcome"], "unknown");
+        }
     }
 }

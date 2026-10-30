@@ -26,6 +26,12 @@ const native = vi.hoisted(() =>
   vi.fn(async (command: string): Promise<unknown> => {
     if (command === "get_service_sources") return [];
     if (command === "list_workbuddy_inference_accounts") return [];
+    if (command === "list_workbuddy_native_captures")
+      return {
+        accounts: [],
+        requestOutcome: "unknown",
+        activationAvailable: false,
+      };
     if (command === "list_workbuddy_accounts")
       return [{ id: "wb", label: "Saved account" }];
     if (command === "auth_get_status") return { accounts: [] };
@@ -760,6 +766,7 @@ it("renders the serialized WorkBuddy producer facts through IPC, inventory, quer
       native.mock.calls.every(([command]) =>
         [
           "list_workbuddy_accounts",
+          "list_workbuddy_native_captures",
           "list_workbuddy_inference_accounts",
           "list_trae_accounts",
           "list_minimax_code_accounts",

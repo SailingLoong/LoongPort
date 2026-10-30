@@ -348,7 +348,14 @@ async fn cancelled_waiter_query_reports_unknown_before_detached_capture_commits(
     ))
     .unwrap();
     assert_eq!(wire["requestOutcome"], "unknown");
-    assert_eq!(wire["activationAvailable"], false);
+    assert_eq!(
+        wire["activationAvailable"],
+        cfg!(all(
+            feature = "gui",
+            target_os = "macos",
+            target_arch = "aarch64"
+        ))
+    );
     assert!(wire["accounts"].as_array().unwrap().is_empty());
     release.send(()).unwrap();
     assert!(wait_finished.await.unwrap());

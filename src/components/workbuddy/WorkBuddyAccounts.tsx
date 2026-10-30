@@ -1,11 +1,11 @@
 import { WorkBuddyNativePreview } from "./WorkBuddyNativePreview";
+import { WorkBuddyNativeRecovery } from "./WorkBuddyNativeRecovery";
 import { AutomaticClaimStatus } from "@/components/relay/accounts/AutomaticClaimStatus";
-import { useAutomaticClaimStatus } from "@/hooks/useAutomaticClaimStatus";
 import {
   AccountWorkspace,
   AccountDetailSections,
 } from "@/components/relay/accounts/AccountWorkspace";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useWorkBuddyAccountsViewModel } from "./useWorkBuddyAccountsViewModel";
 import { useTranslation } from "react-i18next";
 import { ChevronDown, Loader2, Plus, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -14,529 +14,67 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import {
-  workbuddyApi,
-  type WorkBuddyAccount,
-  type WorkBuddyClaimResult,
-  type WorkBuddyLogin,
-  type WorkBuddyInferenceLogin,
-  type WorkBuddyInferenceAccount,
-  type WorkBuddyInferenceModel,
-} from "@/lib/api/workbuddy";
-import { settingsApi } from "@/lib/api/settings";
 const amount = (value: number | null) =>
   value == null
     ? "—"
     : value.toLocaleString(undefined, { maximumFractionDigits: 2 });
 const date = (value: number | null) =>
   value == null ? "—" : new Date(value).toLocaleString();
-// Order backend snapshots only. An older list/refresh cannot undo a confirmed
-// policy mutation; identity generations always take precedence over revisions.
-function latestAccount(
-  previous: WorkBuddyAccount | undefined,
-  incoming: WorkBuddyAccount,
-) {
-  if (
-    previous &&
-    (previous.generation > incoming.generation ||
-      (previous.generation === incoming.generation &&
-        previous.autoClaimRevision > incoming.autoClaimRevision))
-  )
-    return previous;
-  return incoming;
-}
-function mergeAccounts(
-  previous: WorkBuddyAccount[],
-  incoming: WorkBuddyAccount[],
-) {
-  return incoming.map((row) =>
-    latestAccount(
-      previous.find((old) => old.id === row.id),
-      row,
-    ),
-  );
-}
 export function WorkBuddyAccounts({
   unified = false,
 }: { unified?: boolean } = {}) {
   const { t } = useTranslation();
-  const [accounts, setAccounts] = useState<WorkBuddyAccount[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [failed, setFailed] = useState(false);
-  const [busy, setBusy] = useState<string | null>(null);
-  const active = useRef(false);
-  const alive = useRef(true);
-  const listGeneration = useRef(0);
-  const policyLifecycle = useRef(0);
-  const automaticActive = useRef(false);
-  const [automaticBusy, setAutomaticBusy] = useState(false);
-  const [automaticFailed, setAutomaticFailed] = useState(false);
-  const [automaticUncertain, setAutomaticUncertain] = useState<
-    Record<string, { generation: number; revision: number } | undefined>
-  >({});
-  const reconcileAutomatic = useCallback((rows: WorkBuddyAccount[]) => {
-    setAutomaticUncertain((old) => {
-      const next = { ...old };
-      for (const row of rows) {
-        const expected = next[row.id];
-        if (
-          expected &&
-          (row.generation > expected.generation ||
-            (row.generation === expected.generation &&
-              row.autoClaimRevision > expected.revision))
-        )
-          delete next[row.id];
-      }
-      return next;
-    });
-  }, []);
-  const setAutomatic = async (account: WorkBuddyAccount) => {
-    if (
-      automaticActive.current ||
-      automaticUncertain[account.id] ||
-      busy !== null ||
-      account.generation === undefined ||
-      account.autoClaimRevision === undefined ||
-      account.autoClaimPolicyVersion === undefined ||
-      (!account.canSetAutomatic && !account.autoClaimEnabled)
-    )
-      return;
-    automaticActive.current = true;
-    setAutomaticBusy(true);
-    setAutomaticFailed(false);
-    const lifecycle = policyLifecycle.current;
-    const current = () =>
-      alive.current && lifecycle === policyLifecycle.current;
-    try {
-      const updated = await workbuddyApi.setAutomatic(
-        account,
-        !account.autoClaimEnabled,
-      );
-      if (!current()) return;
-      if (
-        updated.id !== account.id ||
-        updated.generation !== account.generation ||
-        updated.autoClaimRevision <= account.autoClaimRevision
-      )
-        throw new Error("Unconfirmed policy response");
-      setAccounts((rows) =>
-        rows.map((row) =>
-          row.id === updated.id ? latestAccount(row, updated) : row,
-        ),
-      );
-    } catch {
-      if (!current()) return;
-      // IPC failure is not proof the setter failed. Never display the old off/on
-      // value as authoritative until a later backend revision resolves it.
-      setAutomaticFailed(true);
-      setAutomaticUncertain((old) => ({
-        ...old,
-        [account.id]: {
-          generation: account.generation,
-          revision: account.autoClaimRevision,
-        },
-      }));
-      try {
-        const rows = await workbuddyApi.list();
-        if (!current()) return;
-        const confirmed = rows.find((row) => row.id === account.id);
-        setAccounts((old) => mergeAccounts(old, rows));
-        if (
-          confirmed &&
-          (confirmed.generation > account.generation ||
-            (confirmed.generation === account.generation &&
-              confirmed.autoClaimRevision > account.autoClaimRevision))
-        ) {
-          reconcileAutomatic(rows);
-          setAutomaticFailed(false);
-        }
-      } catch {
-        // Uncertain remains visible and disabled, not a false "off" confirmation.
-      }
-    } finally {
-      automaticActive.current = false;
-      if (current()) setAutomaticBusy(false);
-    }
-  };
-  const [login, setLogin] = useState<WorkBuddyLogin | null>(null);
-  const [waiting, setWaiting] = useState(false);
-  const loginGeneration = useRef(0);
-  const loginFlow = useRef<WorkBuddyLogin | null>(null);
-  const loginOperation = useRef<string | null>(null);
-  const closeLogin = () => {
-    const generation = ++loginGeneration.current;
-    const flow = loginFlow.current;
-    loginFlow.current = null;
-    const hadLoginOperation = loginOperation.current !== null;
-    loginOperation.current = null;
-    setLogin(null);
-    setWaiting(false);
-    if (hadLoginOperation) setBusy(null);
-    if (flow)
-      void workbuddyApi.cancelLogin(flow.flowId).catch(() => {
-        if (alive.current && generation === loginGeneration.current)
-          setFailed(true);
-      });
-  };
-  const [inferenceAccounts, setInferenceAccounts] = useState<
-    WorkBuddyInferenceAccount[]
-  >([]);
-  const [inferenceLogin, setInferenceLogin] =
-    useState<WorkBuddyInferenceLogin | null>(null);
-  const [inferenceTarget, setInferenceTarget] = useState<string | null>(null);
-  const [inferenceBusy, setInferenceBusy] = useState<string | null>(null);
-  const [inferenceWaiting, setInferenceWaiting] = useState(false);
-  const [inferenceFailed, setInferenceFailed] = useState(false);
-  const [models, setModels] = useState<
-    Record<string, WorkBuddyInferenceModel[]>
-  >({});
-  const inferenceGeneration = useRef(0);
-  const inferenceFlow = useRef<WorkBuddyInferenceLogin | null>(null);
-  const inferenceOperation = useRef<string | null>(null);
-  const inferenceStatusGeneration = useRef(0);
-  const loadInferenceAccounts = useCallback(async () => {
-    const generation = ++inferenceStatusGeneration.current;
-    const operationGeneration = inferenceGeneration.current;
-    try {
-      const rows = await workbuddyApi.listInferenceAccounts();
-      if (alive.current && generation === inferenceStatusGeneration.current) {
-        setInferenceAccounts(rows);
-      }
-    } catch {
-      if (alive.current && generation === inferenceStatusGeneration.current) {
-        setInferenceAccounts([]);
-        if (operationGeneration === inferenceGeneration.current)
-          setInferenceFailed(true);
-      }
-    }
-  }, []);
-  const closeInference = () => {
-    const generation = ++inferenceGeneration.current;
-    const flow = inferenceFlow.current;
-    inferenceFlow.current = null;
-    inferenceOperation.current = null;
-    setInferenceLogin(null);
-    setInferenceTarget(null);
-    setInferenceBusy(null);
-    setInferenceWaiting(false);
-    if (flow)
-      void workbuddyApi.cancelInferenceLogin(flow.flowId).catch(() => {
-        if (alive.current && generation === inferenceGeneration.current)
-          setInferenceFailed(true);
-      });
-  };
-  const beginInference = async (accountId: string) => {
-    if (inferenceOperation.current === `begin:${accountId}`) return;
-    const generation = ++inferenceGeneration.current;
-    const current = () =>
-      alive.current && generation === inferenceGeneration.current;
-    const previous = inferenceFlow.current;
-    inferenceFlow.current = null;
-    inferenceOperation.current = `begin:${accountId}`;
-    setInferenceLogin(null);
-    setInferenceTarget(accountId);
-    setInferenceBusy("begin");
-    setInferenceWaiting(false);
-    setInferenceFailed(false);
-    setModels((old) => {
-      const next = { ...old };
-      delete next[accountId];
-      return next;
-    });
-    try {
-      if (previous) await workbuddyApi.cancelInferenceLogin(previous.flowId);
-      if (!current()) return;
-      const reused = await workbuddyApi.setInferenceConsent(accountId, true);
-      if (!current()) return;
-      if (reused) {
-        setInferenceTarget(null);
-        await loadAccounts();
-        await loadInferenceAccounts();
-        return;
-      }
-      // Only legacy/incomplete or expired credentials require a browser step.
-      const flow = await workbuddyApi.beginInferenceLogin(accountId);
-      if (!current() || flow.accountId !== accountId) {
-        await workbuddyApi.cancelInferenceLogin(flow.flowId);
-        if (current()) setInferenceFailed(true);
-        return;
-      }
-      inferenceFlow.current = flow;
-      setInferenceLogin(flow);
-    } catch {
-      if (current()) setInferenceFailed(true);
-    } finally {
-      if (current()) {
-        inferenceOperation.current = null;
-        setInferenceBusy(null);
-      }
-    }
-  };
-  const disableInference = async (accountId: string) => {
-    if (inferenceOperation.current) return;
-    closeInference();
-    const generation = inferenceGeneration.current;
-    inferenceOperation.current = `disable:${accountId}`;
-    setInferenceBusy("begin");
-    try {
-      await workbuddyApi.setInferenceConsent(accountId, false);
-      if (alive.current && generation === inferenceGeneration.current)
-        await loadInferenceAccounts();
-    } catch {
-      if (alive.current && generation === inferenceGeneration.current)
-        setInferenceFailed(true);
-    } finally {
-      if (alive.current && generation === inferenceGeneration.current) {
-        inferenceOperation.current = null;
-        setInferenceBusy(null);
-      }
-    }
-  };
-  const pollInference = async () => {
-    const flow = inferenceFlow.current;
-    if (!flow || inferenceOperation.current) return;
-    const generation = inferenceGeneration.current;
-    const current = () =>
-      alive.current && generation === inferenceGeneration.current;
-    inferenceOperation.current = "poll";
-    setInferenceBusy("poll");
-    setInferenceFailed(false);
-    try {
-      const result = await workbuddyApi.pollInferenceLogin(flow.flowId);
-      if (!current()) return;
-      if (result.state === "saved") {
-        inferenceFlow.current = null;
-        setInferenceLogin(null);
-        setInferenceTarget(null);
-        setInferenceWaiting(false);
-        await loadInferenceAccounts();
-      } else setInferenceWaiting(true);
-    } catch {
-      if (current()) {
-        inferenceFlow.current = null;
-        setInferenceLogin(null);
-        setInferenceFailed(true);
-        // Also releases a backend flow when the command failed before polling.
-        void workbuddyApi.cancelInferenceLogin(flow.flowId).catch(() => {});
-      }
-    } finally {
-      if (current()) {
-        inferenceOperation.current = null;
-        setInferenceBusy(null);
-      }
-    }
-  };
-  const discoverModels = async (accountId: string) => {
-    if (inferenceOperation.current || inferenceFlow.current) return;
-    const generation = ++inferenceGeneration.current;
-    const current = () =>
-      alive.current && generation === inferenceGeneration.current;
-    inferenceOperation.current = "models";
-    setInferenceTarget(accountId);
-    setInferenceBusy("models");
-    setInferenceFailed(false);
-    setModels((old) => {
-      const next = { ...old };
-      delete next[accountId];
-      return next;
-    });
-    try {
-      const discovered = await workbuddyApi.discoverModels(accountId);
-      if (current()) setModels((old) => ({ ...old, [accountId]: discovered }));
-    } catch {
-      if (current()) setInferenceFailed(true);
-    } finally {
-      if (current()) {
-        inferenceOperation.current = null;
-        setInferenceBusy(null);
-      }
-    }
-  };
-
-  const [claimResults, setClaimResults] = useState<
-    { id: string; error: WorkBuddyClaimResult["error"] }[] | null
-  >(null);
-  const loadAccounts = useCallback(
-    async (passive = false) => {
-      const generation = ++listGeneration.current;
-      const isCurrent = () =>
-        alive.current && generation === listGeneration.current;
-      setFailed(false);
-      try {
-        const rows = await workbuddyApi.list();
-        if (isCurrent()) {
-          setAccounts((old) => mergeAccounts(old, rows));
-          reconcileAutomatic(rows);
-          if (!passive) setClaimResults(null);
-        }
-      } catch {
-        if (isCurrent()) setFailed(true);
-      } finally {
-        if (isCurrent()) setLoading(false);
-      }
-    },
-    [reconcileAutomatic],
-  );
-  const automaticStatus = useAutomaticClaimStatus("workbuddy", () =>
-    loadAccounts(true),
-  );
-  useEffect(() => {
-    alive.current = true;
-    void loadAccounts();
-    void loadInferenceAccounts();
-    return () => {
-      alive.current = false;
-      loginGeneration.current += 1;
-      const pendingLogin = loginFlow.current;
-      loginFlow.current = null;
-      loginOperation.current = null;
-      if (pendingLogin)
-        void workbuddyApi.cancelLogin(pendingLogin.flowId).catch(() => {});
-      policyLifecycle.current += 1;
-      listGeneration.current += 1;
-      inferenceGeneration.current += 1;
-      inferenceStatusGeneration.current += 1;
-      const flow = inferenceFlow.current;
-      inferenceFlow.current = null;
-      if (flow)
-        void workbuddyApi.cancelInferenceLogin(flow.flowId).catch(() => {});
-    };
-  }, [loadAccounts, loadInferenceAccounts]);
-  const run = async (key: string, operation: () => Promise<void>) => {
-    if (active.current || loginOperation.current) return;
-    active.current = true;
-    setBusy(key);
-    setFailed(false);
-    try {
-      await operation();
-    } catch {
-      if (alive.current) setFailed(true);
-    } finally {
-      active.current = false;
-      if (alive.current) setBusy(null);
-    }
-  };
-  const beginLogin = async () => {
-    if (active.current || loginOperation.current) return;
-    const generation = ++loginGeneration.current;
-    const current = () =>
-      alive.current && generation === loginGeneration.current;
-    const previous = loginFlow.current;
-    loginFlow.current = null;
-    loginOperation.current = "begin";
-    setLogin(null);
-    setWaiting(false);
-    setBusy("login");
-    setFailed(false);
-    try {
-      if (previous) await workbuddyApi.cancelLogin(previous.flowId);
-      if (!current()) return;
-      const flow = await workbuddyApi.beginLogin();
-      if (!current()) {
-        await workbuddyApi.cancelLogin(flow.flowId);
-        return;
-      }
-      loginFlow.current = flow;
-      setLogin(flow);
-    } catch {
-      if (current()) setFailed(true);
-    } finally {
-      if (current()) {
-        loginOperation.current = null;
-        setBusy(null);
-      }
-    }
-  };
-  const finishLogin = async () => {
-    const flow = loginFlow.current;
-    if (!flow || active.current || loginOperation.current) return;
-    const generation = loginGeneration.current;
-    const current = () =>
-      alive.current && generation === loginGeneration.current;
-    loginOperation.current = "finish";
-    setBusy("finish");
-    setFailed(false);
-    try {
-      const result = await workbuddyApi.finishLogin(flow.flowId);
-      if (!current()) return;
-      if (result.state === "saved") {
-        loginFlow.current = null;
-        setLogin(null);
-        setWaiting(false);
-        policyLifecycle.current += 1;
-        setAutomaticBusy(false);
-        setAutomaticFailed(false);
-        setAutomaticUncertain({});
-        // A legacy login may replace the row and clear its inference grant.
-        closeInference();
-        inferenceStatusGeneration.current += 1;
-        setInferenceAccounts([]);
-        setInferenceFailed(false);
-        setModels({});
-        await loadAccounts();
-        if (current()) await loadInferenceAccounts();
-      } else setWaiting(true);
-    } catch {
-      if (current()) setFailed(true);
-    } finally {
-      if (current()) {
-        loginOperation.current = null;
-        setBusy(null);
-      }
-    }
-  };
-  const update = (row: WorkBuddyAccount) => {
-    if (!alive.current) return;
-    // A pre-completion local read cannot replace this newer command receipt.
-    listGeneration.current += 1;
-    reconcileAutomatic([row]);
-    setAccounts((rows) =>
-      rows.some((old) => old.id === row.id)
-        ? rows.map((old) => (old.id === row.id ? latestAccount(old, row) : old))
-        : [...rows, row],
-    );
-    setClaimResults(
-      (results) =>
-        results?.map((result) =>
-          result.id === row.id ? { ...result, error: null } : result,
-        ) ?? null,
-    );
-  };
+  const {
+    accounts,
+    loading,
+    failed,
+    busy,
+    automaticFailed,
+    automaticUncertain,
+    login,
+    waiting,
+    inferenceLogin,
+    inferenceTarget,
+    inferenceBusy,
+    inferenceWaiting,
+    inferenceFailed,
+    models,
+    claimResults,
+    automaticStatus,
+    loadAccounts,
+    beginLogin,
+    finishLogin,
+    closeLogin,
+    beginInference,
+    closeInference,
+    disableInference,
+    pollInference,
+    discoverModels,
+    setAutomatic,
+    claimAll,
+    canClaimAll,
+    refreshAll,
+    refreshAccount,
+    claimAccount,
+    openLogin,
+    openInference,
+    automaticDisabled,
+    inferenceState,
+    canDisableInference,
+    canDiscoverModels,
+  } = useWorkBuddyAccountsViewModel();
   return (
     <section aria-label={t("workbuddy.title")} className="space-y-3">
-      <WorkBuddyNativePreview />
+      <WorkBuddyNativePreview onCaptured={() => void loadAccounts(true)} />
+      <WorkBuddyNativeRecovery />
       <header className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-sm font-medium">{t("workbuddy.title")}</h2>
         <div className="flex gap-2">
           <Button
             size="sm"
             variant="outline"
-            disabled={
-              busy !== null || loading || !accounts.some((row) => row.canClaim)
-            }
-            onClick={() =>
-              void run("claimAll", async () => {
-                setClaimResults(null);
-                const results = await workbuddyApi.claimAll();
-                if (!alive.current) return;
-                listGeneration.current += 1;
-                setAccounts((rows) => {
-                  const updated = new Map(rows.map((row) => [row.id, row]));
-                  for (const { account } of results)
-                    updated.set(
-                      account.id,
-                      latestAccount(updated.get(account.id), account),
-                    );
-                  return [...updated.values()];
-                });
-                setClaimResults(
-                  results.map(({ account, error }) => ({
-                    id: account.id,
-                    error,
-                  })),
-                );
-              })
-            }
+            disabled={busy !== null || !canClaimAll}
+            onClick={() => void claimAll()}
           >
             {busy === "claimAll" && (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -551,17 +89,7 @@ export function WorkBuddyAccounts({
             size="sm"
             variant="outline"
             disabled={busy !== null || loading || accounts.length === 0}
-            onClick={() =>
-              void run("all", async () => {
-                const rows = await workbuddyApi.refreshAll();
-                if (alive.current) {
-                  listGeneration.current += 1;
-                  setAccounts((old) => mergeAccounts(old, rows));
-                  reconcileAutomatic(rows);
-                  setClaimResults(null);
-                }
-              })
-            }
+            onClick={() => void refreshAll()}
           >
             <RefreshCw className="h-3.5 w-3.5" />
             {t("workbuddy.refreshAll")}
@@ -625,18 +153,7 @@ export function WorkBuddyAccounts({
                 className="text-primary underline"
                 onClick={(event) => {
                   event.preventDefault();
-                  const generation = inferenceGeneration.current;
-                  const flowId = inferenceLogin.flowId;
-                  void settingsApi
-                    .openExternal(inferenceLogin.verificationUri)
-                    .catch(() => {
-                      if (
-                        alive.current &&
-                        generation === inferenceGeneration.current &&
-                        inferenceFlow.current?.flowId === flowId
-                      )
-                        setInferenceFailed(true);
-                    });
+                  void openInference();
                 }}
               >
                 {t("workbuddy.inference.open", {
@@ -677,11 +194,7 @@ export function WorkBuddyAccounts({
             href={login.verificationUri}
             onClick={(event) => {
               event.preventDefault();
-              const generation = loginGeneration.current;
-              void settingsApi.openExternal(login.verificationUri).catch(() => {
-                if (alive.current && generation === loginGeneration.current)
-                  setFailed(true);
-              });
+              void openLogin();
             }}
           >
             {t("workbuddy.authorize")}
@@ -774,15 +287,7 @@ export function WorkBuddyAccounts({
                       }
                       size="sm"
                       variant="outline"
-                      disabled={
-                        automaticBusy ||
-                        Boolean(automaticUncertain[account.id]) ||
-                        busy !== null ||
-                        account.generation === undefined ||
-                        account.autoClaimRevision === undefined ||
-                        account.autoClaimPolicyVersion === undefined ||
-                        (!account.canSetAutomatic && !account.autoClaimEnabled)
-                      }
+                      disabled={automaticDisabled(account)}
                       onClick={() => void setAutomatic(account)}
                     >
                       {t(
@@ -805,11 +310,7 @@ export function WorkBuddyAccounts({
                       size="sm"
                       variant="outline"
                       disabled={busy !== null || !account.canRefresh}
-                      onClick={() =>
-                        void run(account.id, async () =>
-                          update(await workbuddyApi.refresh(account.id)),
-                        )
-                      }
+                      onClick={() => void refreshAccount(account)}
                     >
                       {t("common.refresh")}
                     </Button>
@@ -817,25 +318,19 @@ export function WorkBuddyAccounts({
                       size="sm"
                       variant="outline"
                       disabled={busy !== null || !account.canClaim}
-                      onClick={() =>
-                        void run(account.id, async () =>
-                          update(await workbuddyApi.claim(account.id)),
-                        )
-                      }
+                      onClick={() => void claimAccount(account)}
                     >
                       {t("workbuddy.claim")}
                     </Button>
                   </div>
                 </div>
               );
-              const inferencePaused = inferenceAccounts.some(
-                (row) => row.id === account.id && row.state === "paused",
-              );
+              const inferencePaused = inferenceState(account.id) === "paused";
               const authorization = (
                 <>
                   <p role="status">
                     {t(
-                      `workbuddy.inference.state.${inferenceAccounts.find((row) => row.id === account.id)?.state ?? "needsAuthorization"}`,
+                      `workbuddy.inference.state.${inferenceState(account.id)}`,
                       {
                         defaultValue: (
                           {
@@ -848,10 +343,7 @@ export function WorkBuddyAccounts({
                             paused:
                               "WorkBuddy model requests are paused; account management and domestic check-in remain available",
                           } as const
-                        )[
-                          inferenceAccounts.find((row) => row.id === account.id)
-                            ?.state ?? "needsAuthorization"
-                        ],
+                        )[inferenceState(account.id)],
                       },
                     )}
                   </p>
@@ -871,11 +363,7 @@ export function WorkBuddyAccounts({
                       })}
                     </Button>
                   )}
-                  {inferenceAccounts.some(
-                    (row) =>
-                      row.id === account.id &&
-                      ["ready", "refreshRequired"].includes(row.state),
-                  ) && (
+                  {canDisableInference(account.id) && (
                     <Button
                       size="sm"
                       variant="outline"
@@ -894,17 +382,7 @@ export function WorkBuddyAccounts({
                   <Button
                     size="sm"
                     variant="outline"
-                    disabled={
-                      busy !== null ||
-                      inferenceBusy !== null ||
-                      inferenceLogin !== null ||
-                      !inferenceAccounts.some(
-                        (row) =>
-                          row.id === account.id &&
-                          (row.state === "ready" ||
-                            row.state === "refreshRequired"),
-                      )
-                    }
+                    disabled={!canDiscoverModels(account.id)}
                     onClick={() => void discoverModels(account.id)}
                   >
                     {t("workbuddy.inference.models", {

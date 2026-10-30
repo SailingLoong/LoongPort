@@ -98,7 +98,18 @@ it("rehydrates a saved receipt through query only, without preparing or switchin
   await waitFor(() =>
     expect(result.current.receipt?.operationId).toBe(wire.receipt.operationId),
   );
-  expect(api.getSetupOperation).toHaveBeenCalledTimes(1);
+  // Recovery must inspect both the account-wide journal and the stored UUID.
+  // Either lookup alone can miss an unresolved operation belonging to the other.
+  expect(api.getSetupOperation).toHaveBeenCalledTimes(2);
+  expect(api.getSetupOperation).toHaveBeenCalledWith(7);
+  expect(api.getSetupOperation).toHaveBeenCalledWith(
+    7,
+    wire.receipt.operationId,
+  );
+  // The shared fixture is running, so rehydration must retain the safety gate.
+  expect(result.current.needsReconciliation).toBe(true);
+  act(() => result.current.newDraft());
+  expect(result.current.phase).toBe("result");
   expect(api.prepareTiers).not.toHaveBeenCalled();
   expect(api.switchTier).not.toHaveBeenCalled();
 });

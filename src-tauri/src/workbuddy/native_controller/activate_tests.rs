@@ -1,6 +1,484 @@
 //! Synthetic real files and original controller, owner and journal.
 use super::*;
 
+#[tokio::test]
+async fn lifecycle_source_realm_comes_from_selected_account_and_rejects_unknown() {
+    let f = Fixture::new().await;
+    let binding = f.binding();
+    let controller = f.controller(&binding);
+    let mut selected = controller.select(&f.key()).await.unwrap();
+    assert_eq!(
+        selected_realm(&selected),
+        Ok(crate::workbuddy::model::Domain::WorkBuddy)
+    );
+    selected.receipt.realm = "www.codebuddy.cn".into();
+    assert_eq!(
+        selected_realm(&selected),
+        Ok(crate::workbuddy::model::Domain::CodeBuddy)
+    );
+    selected.receipt.realm = "unknown.invalid".into();
+    assert_eq!(selected_realm(&selected), Err(Failure::RequestConflict));
+}
+
+#[tokio::test]
+async fn lifecycle_witness_rejects_auth_or_marker_change_after_quit_before_transaction() {
+    use crate::workbuddy::native_switch_lifecycle as lifecycle;
+    for kind in ["auth", "marker"] {
+        let f = Fixture::new().await;
+        let binding = f.binding();
+        let controller = f.controller(&binding);
+        let mut source = f.port();
+        let witness = crate::workbuddy::native_source::read_pair(&f.auth()).unwrap();
+        let mut driver = simulated_lifecycle(&f, &source, "running");
+        let gate = tokio::sync::Mutex::new(());
+        let before = std::fs::read(f.auth()).unwrap();
+        let marker = f.client.join("workbuddy-desktop.info.logged-out");
+        let result = lifecycle::run_with_gate(&gate, &mut driver, || async {
+            if kind == "auth" {
+                std::fs::write(f.auth(), image("external-write")).unwrap();
+            } else {
+                std::fs::write(&marker, b"external-marker").unwrap();
+            }
+            controller
+                .activate_guarded(&f.key(), &mut source, &mut Files, &witness)
+                .await
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(f.auth()).unwrap(),
+            if kind == "auth" {
+                image("external-write")
+            } else {
+                before
+            }
+        );
+        if kind == "marker" {
+            assert_eq!(std::fs::read(&marker).unwrap(), b"external-marker");
+        }
+        assert_eq!(driver.restarts, 0);
+        assert!(!f
+            .session
+            .root()
+            .join(crate::secrets::owned_file::WORKBUDDY_NATIVE_JOURNAL_FILE)
+            .exists());
+    }
+}
+
+#[tokio::test]
+async fn lifecycle_worker_blocks_duplicate_quit_and_cancelled_wait_does_not_replay() {
+    use crate::workbuddy::native_switch_lifecycle::{
+        self as lifecycle, Driver, Error, Restart, Stop,
+    };
+    struct Paused {
+        stopped: Rc<Cell<bool>>,
+        started: Option<tokio::sync::oneshot::Sender<()>>,
+        resume: std::sync::mpsc::Receiver<()>,
+    }
+    impl Driver for Paused {
+        fn stop_and_recheck(&mut self) -> Result<Stop, Error> {
+            let _ = self.started.take().unwrap().send(());
+            self.resume.recv().map_err(|_| Error::QuitRefused)?;
+            self.stopped.set(true);
+            Ok(Stop::StoppedByUs)
+        }
+        fn restart(&mut self) -> Restart {
+            Restart::Requested
+        }
+    }
+    let f = Fixture::new().await;
+    let session = f.session.clone();
+    let worker_session = session.clone();
+    let selection = f.selection.clone();
+    let client = f.client.clone();
+    let context = f.context.clone();
+    let key = f.key();
+    let (release, resume) = std::sync::mpsc::channel();
+    let (started, wait_started) = tokio::sync::oneshot::channel();
+    let (finished, wait_finished) = tokio::sync::oneshot::channel();
+    let runtime = tokio::runtime::Handle::current();
+    let worker = crate::workbuddy::native_capture::schedule_capture(
+        &session,
+        || Ok(selection),
+        move |identity, epoch, selection| {
+            let result = runtime.block_on(async {
+                let controller = Controller {
+                    catalog: Catalog {
+                        session: &worker_session,
+                        identity: &identity,
+                        epoch,
+                        selection: &selection,
+                    },
+                };
+                let mut source = FixtureSource {
+                    root_pin: std::fs::File::open(&client).unwrap(),
+                    root: client,
+                    context: context.clone(),
+                    expected: context,
+                    stopped: Rc::new(Cell::new(false)),
+                    verified: true,
+                };
+                let witness = crate::workbuddy::native_source::read_pair(
+                    &source.root.join("workbuddy-desktop.info"),
+                )
+                .unwrap();
+                let mut driver = Paused {
+                    stopped: source.stopped.clone(),
+                    started: Some(started),
+                    resume,
+                };
+                lifecycle::run(&mut driver, || async {
+                    controller
+                        .activate_guarded(&key, &mut source, &mut Files, &witness)
+                        .await
+                })
+                .await
+            });
+            let _ = finished.send(result);
+        },
+    )
+    .unwrap();
+    wait_started.await.unwrap();
+    let binding = f.binding();
+    let controller = f.controller(&binding);
+    let mut other_source = f.port();
+    let mut other_driver = simulated_lifecycle(&f, &other_source, "running");
+    assert_eq!(
+        lifecycle::run(&mut other_driver, || async {
+            controller
+                .activate(&f.key(), &mut other_source, &mut Files)
+                .await
+        })
+        .await,
+        Err(Error::Busy)
+    );
+    assert_eq!(other_driver.restarts, 0);
+    drop(worker);
+    let inspection = crate::workbuddy::native_activation::state(&controller.catalog)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(inspection).unwrap()["requestOutcome"],
+        "unknown"
+    );
+    release.send(()).unwrap();
+    let result = wait_finished.await.unwrap().unwrap();
+    assert_eq!(result.transaction, Outcome::Applied);
+    assert_eq!(result.restart, Restart::Requested);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(f.auth()).unwrap()).unwrap()["account"]
+            ["uid"],
+        "B"
+    );
+}
+
+struct SimulatedLifecycle {
+    stopped: Rc<Cell<bool>>,
+    auth: PathBuf,
+    mode: &'static str,
+    restarts: usize,
+    restart: crate::workbuddy::native_switch_lifecycle::Restart,
+}
+impl crate::workbuddy::native_switch_lifecycle::Driver for SimulatedLifecycle {
+    fn stop_and_recheck(
+        &mut self,
+    ) -> Result<
+        crate::workbuddy::native_switch_lifecycle::Stop,
+        crate::workbuddy::native_switch_lifecycle::Error,
+    > {
+        use crate::workbuddy::native_switch_lifecycle::{Error, Stop};
+        use std::os::unix::fs::MetadataExt;
+        let before = std::fs::read(&self.auth).unwrap();
+        let root = self.auth.parent().unwrap();
+        let original_root = std::fs::metadata(root).unwrap();
+        match self.mode {
+            "refused" => return Err(Error::QuitRefused),
+            "timeout" => return Err(Error::QuitTimeout),
+            "helper" => return Err(Error::WritersRemaining),
+            "source" => {
+                std::fs::rename(root, root.with_extension("previous")).unwrap();
+                std::fs::create_dir(root).unwrap();
+                std::fs::write(&self.auth, &before).unwrap();
+            }
+            "writeback" => std::fs::write(&self.auth, image("external-write")).unwrap(),
+            _ => {}
+        }
+        let current_root = std::fs::metadata(root).unwrap();
+        if (original_root.dev(), original_root.ino()) != (current_root.dev(), current_root.ino())
+            || std::fs::read(&self.auth).unwrap() != before
+        {
+            return Err(Error::SourceChanged);
+        }
+        self.stopped.set(true);
+        Ok(if self.mode == "already-stopped" {
+            Stop::AlreadyStopped
+        } else {
+            Stop::StoppedByUs
+        })
+    }
+    fn restart(&mut self) -> crate::workbuddy::native_switch_lifecycle::Restart {
+        self.restarts += 1;
+        self.restart
+    }
+}
+fn simulated_lifecycle(
+    f: &Fixture,
+    source: &FixtureSource,
+    mode: &'static str,
+) -> SimulatedLifecycle {
+    SimulatedLifecycle {
+        stopped: source.stopped.clone(),
+        auth: f.auth(),
+        mode,
+        restarts: 0,
+        restart: crate::workbuddy::native_switch_lifecycle::Restart::Requested,
+    }
+}
+
+#[tokio::test]
+async fn lifecycle_stops_then_runs_original_controller_and_restarts() {
+    use crate::workbuddy::native_switch_lifecycle::{self as lifecycle, Driver, Restart, Stop};
+    struct Fake {
+        stopped: Rc<Cell<bool>>,
+        restarted: usize,
+    }
+    impl Driver for Fake {
+        fn stop_and_recheck(&mut self) -> Result<Stop, lifecycle::Error> {
+            self.stopped.set(true);
+            Ok(Stop::StoppedByUs)
+        }
+        fn restart(&mut self) -> Restart {
+            self.restarted += 1;
+            Restart::Requested
+        }
+    }
+    let f = Fixture::new().await;
+    let binding = f.binding();
+    let controller = f.controller(&binding);
+    let mut source = f.port();
+    source.stopped.set(false);
+    let mut driver = Fake {
+        stopped: source.stopped.clone(),
+        restarted: 0,
+    };
+    let gate = tokio::sync::Mutex::new(());
+    let result = lifecycle::run_with_gate(&gate, &mut driver, || async {
+        controller.activate(&f.key(), &mut source, &mut Files).await
+    })
+    .await;
+    assert_eq!(
+        result,
+        Ok(lifecycle::Report {
+            transaction: Outcome::Applied,
+            restart: Restart::Requested
+        })
+    );
+    assert_eq!(driver.restarted, 1);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(f.auth()).unwrap()).unwrap()["account"]
+            ["uid"],
+        "B"
+    );
+}
+
+#[tokio::test]
+async fn lifecycle_refused_or_changed_source_never_enters_original_transaction() {
+    use crate::workbuddy::native_switch_lifecycle as lifecycle;
+    for mode in ["refused", "timeout", "helper", "source", "writeback"] {
+        let f = Fixture::new().await;
+        let binding = f.binding();
+        let controller = f.controller(&binding);
+        let mut source = f.port();
+        source.stopped.set(false);
+        let mut driver = simulated_lifecycle(&f, &source, mode);
+        let before = std::fs::read(f.auth()).unwrap();
+        let gate = tokio::sync::Mutex::new(());
+        let result = lifecycle::run_with_gate(&gate, &mut driver, || async {
+            controller.activate(&f.key(), &mut source, &mut Files).await
+        })
+        .await;
+        let expected = match mode {
+            "refused" => lifecycle::Error::QuitRefused,
+            "timeout" => lifecycle::Error::QuitTimeout,
+            "helper" => lifecycle::Error::WritersRemaining,
+            _ => lifecycle::Error::SourceChanged,
+        };
+        assert_eq!(result, Err(expected), "wrong result for {mode}");
+        assert_eq!(driver.restarts, 0);
+        assert_eq!(
+            std::fs::read(f.auth()).unwrap(),
+            if mode == "writeback" {
+                image("external-write")
+            } else {
+                before
+            }
+        );
+        assert!(!f
+            .session
+            .root()
+            .join(crate::secrets::owned_file::WORKBUDDY_NATIVE_JOURNAL_FILE)
+            .exists());
+    }
+}
+
+#[tokio::test]
+async fn lifecycle_already_stopped_never_launches_and_failed_restart_never_rolls_back() {
+    use crate::workbuddy::native_switch_lifecycle::{self as lifecycle, Restart};
+    for (mode, restart) in [
+        ("already-stopped", Restart::Requested),
+        ("running", Restart::Failed),
+        ("running", Restart::Unknown),
+    ] {
+        let f = Fixture::new().await;
+        let binding = f.binding();
+        let controller = f.controller(&binding);
+        let mut source = f.port();
+        let mut driver = simulated_lifecycle(&f, &source, mode);
+        driver.restart = restart;
+        let gate = tokio::sync::Mutex::new(());
+        let result = lifecycle::run_with_gate(&gate, &mut driver, || async {
+            controller.activate(&f.key(), &mut source, &mut Files).await
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.transaction, Outcome::Applied);
+        assert_eq!(
+            result.restart,
+            if mode == "already-stopped" {
+                Restart::NotNeeded
+            } else {
+                restart
+            }
+        );
+        assert_eq!(driver.restarts, usize::from(mode != "already-stopped"));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(f.auth()).unwrap()).unwrap()["account"]
+                ["uid"],
+            "B"
+        );
+        assert_eq!(
+            controller.recover(&mut source, &mut Files).await,
+            Ok(Outcome::AlreadyApplied)
+        );
+    }
+}
+
+#[tokio::test]
+async fn lifecycle_busy_refuses_second_request_before_quit_or_write() {
+    use crate::workbuddy::native_switch_lifecycle as lifecycle;
+    let f = Fixture::new().await;
+    let binding = f.binding();
+    let controller = f.controller(&binding);
+    let mut source = f.port();
+    let mut driver = simulated_lifecycle(&f, &source, "running");
+    let gate = tokio::sync::Mutex::new(());
+    let guard = gate.lock().await;
+    let before = std::fs::read(f.auth()).unwrap();
+    assert_eq!(
+        lifecycle::run_with_gate(&gate, &mut driver, || async {
+            controller.activate(&f.key(), &mut source, &mut Files).await
+        })
+        .await,
+        Err(lifecycle::Error::Busy)
+    );
+    drop(guard);
+    assert_eq!(driver.restarts, 0);
+    assert_eq!(std::fs::read(f.auth()).unwrap(), before);
+}
+
+#[tokio::test]
+async fn lifecycle_rechecks_row_generation_and_incarnation_after_quit() {
+    use crate::workbuddy::native_switch_lifecycle::{
+        self as lifecycle, Driver, Error, Restart, Stop,
+    };
+    struct ChangeRow {
+        session: Arc<SecretSession>,
+        binding: StorageIdentity,
+        kind: &'static str,
+    }
+    impl Driver for ChangeRow {
+        fn stop_and_recheck(&mut self) -> Result<Stop, Error> {
+            let mut rows =
+                serde_json::to_value(store::load(&self.session, &self.binding).unwrap()).unwrap();
+            if self.kind == "generation" {
+                rows[0]["generation"] = json!(99);
+            } else {
+                rows[0]["account"]["native"]["incarnation"] =
+                    json!("33333333-3333-4333-8333-333333333333");
+            }
+            store::save(
+                &self.session,
+                &self.binding,
+                serde_json::from_value(rows).unwrap(),
+            )
+            .unwrap();
+            Ok(Stop::StoppedByUs)
+        }
+        fn restart(&mut self) -> Restart {
+            panic!("stale target must not restart")
+        }
+    }
+    for kind in ["generation", "incarnation"] {
+        let f = Fixture::new().await;
+        let binding = f.binding();
+        let controller = f.controller(&binding);
+        let mut source = f.port();
+        let before = std::fs::read(f.auth()).unwrap();
+        let mut driver = ChangeRow {
+            session: f.session.clone(),
+            binding: binding.clone(),
+            kind,
+        };
+        let gate = tokio::sync::Mutex::new(());
+        assert!(lifecycle::run_with_gate(&gate, &mut driver, || async {
+            controller.activate(&f.key(), &mut source, &mut Files).await
+        })
+        .await
+        .is_err());
+        assert_eq!(std::fs::read(f.auth()).unwrap(), before);
+        assert!(!f
+            .session
+            .root()
+            .join(crate::secrets::owned_file::WORKBUDDY_NATIVE_JOURNAL_FILE)
+            .exists());
+    }
+}
+
+#[tokio::test]
+async fn lifecycle_supports_repeated_a_b_a_using_original_controller() {
+    use crate::workbuddy::native_switch_lifecycle as lifecycle;
+    let f = Fixture::new().await;
+    let binding = f.binding();
+    let controller = f.controller(&binding);
+    let marker = f.client.join("workbuddy-desktop.info.logged-out");
+    std::fs::remove_file(&marker).unwrap();
+    let observed = Observation::read(&f.auth(), &f.context).unwrap();
+    let a = controller
+        .catalog
+        .save(&observed, None, "Synthetic A")
+        .await
+        .unwrap()
+        .selection_key()
+        .unwrap();
+    let mut source = f.port();
+    let mut driver = simulated_lifecycle(&f, &source, "running");
+    let gate = tokio::sync::Mutex::new(());
+    for (key, uid) in [(f.key(), "B"), (a, "A")] {
+        let result = lifecycle::run_with_gate(&gate, &mut driver, || async {
+            controller.activate(&key, &mut source, &mut Files).await
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.transaction, Outcome::Applied);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(f.auth()).unwrap()).unwrap()["account"]
+                ["uid"],
+            uid
+        );
+    }
+    assert_eq!(driver.restarts, 2);
+}
+
 async fn activate_once(
     controller: &Controller<'_>,
     key: &SelectionKey,

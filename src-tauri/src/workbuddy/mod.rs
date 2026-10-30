@@ -49,3 +49,6 @@ mod native_source_tests;
 
 #[cfg(unix)]
 mod native_controller;
+#[cfg(unix)]
+#[cfg_attr(not(test), allow(dead_code))]
+mod native_switch_lifecycle;

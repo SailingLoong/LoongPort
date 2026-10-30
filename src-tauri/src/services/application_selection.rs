@@ -741,7 +741,7 @@ pub async fn apply_reviewed_legacy_application_routing(
     Ok(response)
 }
 
-fn query_routing_request_locked(
+pub(crate) fn query_routing_request_locked(
     state: &AppState,
     app: &AppType,
     request: &crate::mode::state::SaveRequest,
@@ -939,7 +939,7 @@ pub async fn apply_requested_application_routing(
 }
 
 #[cfg(feature = "gui")]
-fn publish_routing_selection(app_handle: &tauri::AppHandle, app: &AppType, id: &str) {
+pub(crate) fn publish_routing_selection(app_handle: &tauri::AppHandle, app: &AppType, id: &str) {
     crate::services::application_overview::record_successful_selection(
         &app_handle.state::<AppState>().db,
         app,
@@ -950,7 +950,7 @@ fn publish_routing_selection(app_handle: &tauri::AppHandle, app: &AppType, id: &
 }
 
 #[cfg(feature = "gui")]
-type RoutingSelectionPublished = Box<dyn FnOnce(&AppType, &str) + Send>;
+pub(crate) type RoutingSelectionPublished = Box<dyn FnOnce(&AppType, &str) + Send>;
 
 /// Setup reuses the existing lifecycle lease and original locked writers. The
 /// worker owns the lease and acknowledgement: cancelling its IPC waiter cannot
@@ -985,7 +985,7 @@ pub(crate) async fn apply_prepared_routing_with_admission(
 /// Both original routing writers and the lifecycle/app leases remain real.
 #[cfg(feature = "gui")]
 #[allow(clippy::too_many_arguments)]
-async fn run_prepared_routing_owned(
+pub(crate) async fn run_prepared_routing_owned(
     state: AppState,
     app: AppType,
     change: ApplicationRoutingChange,
@@ -999,10 +999,10 @@ async fn run_prepared_routing_owned(
     crate::services::sync_protocol::ensure_upgrade_sync_admitted()?;
     tauri::async_runtime::spawn_blocking(move || {
         let _sync_guard = sync_guard;
-        let outcome = {
+        let (result, selected_id, acknowledgement) = {
             let _switch =
                 futures::executor::block_on(state.proxy_service.lock_switch_for_app(app.as_str()));
-            match prepared {
+            let outcome = match prepared {
                 PreparedRoutingRequest::Native { request } => {
                     apply_requested_routing_locked_admitted(
                         &state,
@@ -1028,13 +1028,18 @@ async fn run_prepared_routing_owned(
                         .map(|value| (value, selected))
                         .map_err(|error| AppError::Message(error.to_string()))
                 }),
-            }
+            };
+            let (result, selected_id) = match outcome {
+                Ok((value, selected_id)) => (Ok(value), selected_id),
+                Err(error) => (Err(error), None),
+            };
+            let acknowledgement = acknowledge(&state, &result);
+            (result, selected_id, acknowledgement)
         };
-        if let Ok((_, Some(id))) = &outcome {
+        if let Some(id) = &selected_id {
             selected(&app, id);
         }
-        let result = outcome.map(|(value, _)| value);
-        acknowledge(&state, &result)?;
+        acknowledgement?;
         result
     })
     .await
@@ -1966,6 +1971,9 @@ mod relay_connection_owner_tests {
         let held_during_ack = crate::services::sync_protocol::sync_mutex()
             .try_lock()
             .is_err();
+        let mut app_wait = Box::pin(state.proxy_service.lock_switch_for_app("codex-image"));
+        let app_held_during_ack = futures::poll!(app_wait.as_mut()).is_pending();
+        drop(app_wait);
         let released = release_tx.send(());
         // Acquiring the original owner proves the real worker finished ACK.
         // The existing CI job watchdog bounds deadlocks; there is deliberately
@@ -1977,6 +1985,10 @@ mod relay_connection_owner_tests {
         assert!(
             held_during_ack,
             "cancelled IPC must not unblock restore while ACK runs"
+        );
+        assert!(
+            app_held_during_ack,
+            "original application owner must remain held through ACK"
         );
         released.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
