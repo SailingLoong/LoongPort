@@ -216,6 +216,7 @@ vi.mock("react-i18next", () => ({
 
 import { createTestQueryClient } from "../../../../tests/utils/testQueryClient";
 
+import type { VendorAccountRow } from "@/lib/api/vendor";
 import { RelaySection } from "../RelaySection";
 import { ServicesPage } from "../accounts/ServicesPage";
 import { useAccountSessionStartup } from "../accounts/useAccountSessionStartup";
@@ -1121,13 +1122,19 @@ describe("RelaySection model verification ownership", () => {
           status: "ready",
           canQueryBalance: true,
           canRefresh: true,
-          canEditConfig: true,
-          canSwitch: true,
           canDelete: true,
-          providerId: "vendor-provider",
-          isCurrent: false,
-          userEdited: false,
-        },
+          plans: [
+            {
+              planId: "deepseek",
+              planName: "DeepSeek",
+              providerId: "vendor-provider",
+              isCurrent: false,
+              userEdited: false,
+              canEditConfig: true,
+              canSwitch: true,
+            },
+          ],
+        } satisfies VendorAccountRow,
       ],
     });
     const queryClient = createTestQueryClient();
@@ -1160,7 +1167,7 @@ describe("RelaySection model verification ownership", () => {
     const newer = new Promise((resolve) => {
       resolveNewer = resolve;
     });
-    const account = (accountLabel: string) => ({
+    const account = (accountLabel: string): VendorAccountRow => ({
       id: 9,
       vendorId: "deepseek",
       vendorName: "DeepSeek",
@@ -1168,12 +1175,18 @@ describe("RelaySection model verification ownership", () => {
       status: "ready",
       canQueryBalance: true,
       canRefresh: true,
-      canEditConfig: true,
-      canSwitch: true,
       canDelete: true,
-      providerId: "vendor-provider",
-      isCurrent: accountLabel === "new current",
-      userEdited: false,
+      plans: [
+        {
+          planId: "deepseek",
+          planName: "DeepSeek",
+          providerId: "vendor-provider",
+          isCurrent: accountLabel === "new current",
+          userEdited: false,
+          canEditConfig: true,
+          canSwitch: true,
+        },
+      ],
     });
     api.list
       .mockImplementationOnce(() => older)

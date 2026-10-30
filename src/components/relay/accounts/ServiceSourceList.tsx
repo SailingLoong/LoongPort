@@ -9,7 +9,10 @@ import { PROVIDER_SWITCHED, VENDOR_ACCOUNTS_CHANGED } from "@/lib/api/events";
 import { serviceSourcesApi } from "@/lib/api/serviceSources";
 import type { AppId } from "@/lib/api/types";
 
-export const serviceSourcesKey = ["serviceSources"] as const;
+import { serviceSourcesKey } from "./serviceSourceKeys";
+
+// Existing application/Qoder consumers retain the same canonical key during migration.
+export { serviceSourcesKey } from "./serviceSourceKeys";
 
 /** Existing bindings only. Source discovery and application selection retain their owners. */
 export function ServiceSourceList({

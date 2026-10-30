@@ -7,8 +7,11 @@ use super::types::AppProxyConfig;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+#[cfg(not(test))]
 use std::time::Instant;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
+#[cfg(test)]
+use tokio::time::Instant;
 
 /// 熔断器状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +84,8 @@ const FATAL_OPEN_COOLDOWN_SECONDS: u64 = 1800;
 
 /// 熔断器实例
 pub struct CircuitBreaker {
+    // Serializes every state transition and coherent state/reason/time read.
+    transition: Mutex<()>,
     /// 当前状态
     state: Arc<RwLock<CircuitState>>,
     /// 连续失败计数
@@ -124,9 +129,15 @@ pub struct AllowResult {
 }
 
 impl CircuitBreaker {
+    #[cfg(test)]
+    pub(super) async fn test_lock_transition(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.transition.lock().await
+    }
+
     /// 创建新的熔断器
     pub fn new(config: CircuitBreakerConfig) -> Self {
         Self {
+            transition: Mutex::new(()),
             state: Arc::new(RwLock::new(CircuitState::Closed)),
             consecutive_failures: Arc::new(AtomicU32::new(0)),
             consecutive_successes: Arc::new(AtomicU32::new(0)),
@@ -142,6 +153,7 @@ impl CircuitBreaker {
 
     /// 更新熔断器配置（热更新，不重置状态）
     pub async fn update_config(&self, new_config: CircuitBreakerConfig) {
+        let _transition = self.transition.lock().await;
         *self.config.write().await = new_config;
     }
 
@@ -154,6 +166,20 @@ impl CircuitBreaker {
         }
     }
 
+    /// Only an unexpired fatal Open blocks the automatic current bypass.
+    /// This does not acquire a HalfOpen permit or change recovery state.
+    pub(crate) async fn fatal_open_unexpired(&self) -> bool {
+        let _transition = self.transition.lock().await;
+        if *self.state.read().await != CircuitState::Open || !self.fatal_open.load(Ordering::SeqCst)
+        {
+            return false;
+        }
+        self.last_opened_at
+            .read()
+            .await
+            .is_none_or(|opened| opened.elapsed().as_secs() < FATAL_OPEN_COOLDOWN_SECONDS)
+    }
+
     /// 判断当前 Provider 是否“可被纳入候选链路”
     ///
     /// 这个方法不会占用 HalfOpen 探测名额，仅用于路由选择阶段的“可用性判断”：
@@ -163,6 +189,7 @@ impl CircuitBreaker {
     /// 注意：真正发起请求前仍需调用 `allow_request()` 来获取 HalfOpen 探测名额，
     /// 并在请求结束后通过 `record_success()` / `record_failure()` 释放。
     pub async fn is_available(&self) -> bool {
+        let _transition = self.transition.lock().await;
         let state = *self.state.read().await;
         let config = self.config.read().await;
 
@@ -187,6 +214,7 @@ impl CircuitBreaker {
 
     /// 检查是否允许请求通过
     pub async fn allow_request(&self) -> AllowResult {
+        let _transition = self.transition.lock().await;
         let state = *self.state.read().await;
 
         match state {
@@ -233,6 +261,7 @@ impl CircuitBreaker {
 
     /// 记录成功
     pub async fn record_success(&self, used_half_open_permit: bool) {
+        let _transition = self.transition.lock().await;
         let state = *self.state.read().await;
         let config = self.config.read().await;
 
@@ -261,6 +290,7 @@ impl CircuitBreaker {
     /// 记录失败。返回**本次调用是否新跳闸**（Closed/HalfOpen → Open）——
     /// crowd 上传用它计数站点侧跳闸（致命变体不计：那是用户自己的凭证问题）。
     pub async fn record_failure(&self, used_half_open_permit: bool) -> bool {
+        let _transition = self.transition.lock().await;
         let trips_before = self.trip_count.load(Ordering::SeqCst);
         let state = *self.state.read().await;
         let config = self.config.read().await;
@@ -337,6 +367,7 @@ impl CircuitBreaker {
     /// 致命分级只在成功（`transition_to_closed`）时清除：半开探测失败会沿用上一次
     /// 打开时的致命冷却 —— 一个曾因欠费打开的档位，探测又失败，说明它还是坏的。
     pub async fn record_fatal_failure(&self, used_half_open_permit: bool) -> bool {
+        let _transition = self.transition.lock().await;
         let trips_before = self.trip_count.load(Ordering::SeqCst);
         let config = self.config.read().await;
 
@@ -361,6 +392,7 @@ impl CircuitBreaker {
 
     /// 只读快照：`None` = Closed（正常，不上板）。
     pub async fn snapshot(&self) -> Option<BreakerSnapshot> {
+        let _transition = self.transition.lock().await;
         let state = *self.state.read().await;
         match state {
             CircuitState::Closed => None,
@@ -390,12 +422,14 @@ impl CircuitBreaker {
     /// 获取当前状态
     #[allow(dead_code)]
     pub async fn get_state(&self) -> CircuitState {
+        let _transition = self.transition.lock().await;
         *self.state.read().await
     }
 
     /// 获取统计信息
     #[allow(dead_code)]
     pub async fn get_stats(&self) -> CircuitBreakerStats {
+        let _transition = self.transition.lock().await;
         CircuitBreakerStats {
             state: *self.state.read().await,
             consecutive_failures: self.consecutive_failures.load(Ordering::SeqCst),
@@ -408,6 +442,7 @@ impl CircuitBreaker {
     /// 重置熔断器（手动恢复）
     #[allow(dead_code)]
     pub async fn reset(&self) {
+        let _transition = self.transition.lock().await;
         log::info!("[{}] 熔断器手动重置 → Closed", log_cb::MANUAL_RESET);
         self.transition_to_closed().await;
     }
@@ -460,12 +495,16 @@ impl CircuitBreaker {
     /// `fatal` 决定恢复冷却：普通失败沿用配置超时，致命失败用长冷却。
     /// 普通失败路径传「沿用当前标记」—— 半开探测失败不该把致命冷却悄悄降回 60s。
     async fn transition_to_open(&self, fatal: bool) {
-        *self.state.write().await = CircuitState::Open;
-        *self.last_opened_at.write().await = Some(Instant::now());
+        // Acquire every awaited lock before publishing any part of the new
+        // state. Cancellation while waiting therefore leaves the old state.
+        let mut state = self.state.write().await;
+        let mut opened_at = self.last_opened_at.write().await;
+        *opened_at = Some(Instant::now());
         self.fatal_open.store(fatal, Ordering::SeqCst);
         self.consecutive_failures.store(0, Ordering::SeqCst);
         self.consecutive_successes.store(0, Ordering::SeqCst);
         self.trip_count.fetch_add(1, Ordering::SeqCst);
+        *state = CircuitState::Open;
     }
 
     /// 转换到半开状态
@@ -507,6 +546,142 @@ pub struct CircuitBreakerStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn red_snapshot_waits_for_consistent_fatal_open_transition() {
+        let breaker = Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
+            timeout_seconds: 60,
+            ..Default::default()
+        }));
+        // Force the writer to pause between its state and timestamp writes.
+        let held_timestamp = breaker.last_opened_at.write().await;
+        let writer = {
+            let breaker = breaker.clone();
+            tokio::spawn(async move { breaker.record_fatal_failure(false).await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut locked_observations = 0;
+            loop {
+                match breaker.state.try_read() {
+                    Ok(state) if *state == CircuitState::Open => break,
+                    Err(_) => {
+                        // A synchronized writer retains the state lock while
+                        // waiting for the timestamp lock held by this test.
+                        locked_observations += 1;
+                        if locked_observations >= 10_000 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("writer must reach the open transition");
+        let mut snapshot = Box::pin(breaker.snapshot());
+        assert!(
+            futures::poll!(snapshot.as_mut()).is_pending(),
+            "snapshot must wait for the in-flight transition"
+        );
+        drop(held_timestamp);
+        writer.await.unwrap();
+        let result = snapshot.await.expect("fatal transition must be open");
+        assert!(
+            result.reopen_in_secs.is_some_and(|seconds| seconds >= 1700),
+            "snapshot must use fatal cooldown, not a stale transient reason: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn red_cancelled_open_transition_does_not_publish_partial_state() {
+        let breaker = Arc::new(CircuitBreaker::new(CircuitBreakerConfig::default()));
+        let held_timestamp = breaker.last_opened_at.write().await;
+        let writer = {
+            let breaker = breaker.clone();
+            tokio::spawn(async move { breaker.record_fatal_failure(false).await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut locked_observations = 0;
+            loop {
+                match breaker.state.try_read() {
+                    Ok(state) if *state == CircuitState::Open => break,
+                    Err(_) => {
+                        locked_observations += 1;
+                        if locked_observations >= 10_000 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("writer must reach the open transition");
+        writer.abort();
+        assert!(writer.await.unwrap_err().is_cancelled());
+        drop(held_timestamp);
+        assert_eq!(
+            breaker.get_state().await,
+            CircuitState::Closed,
+            "cancelled transition must not publish Open before its reason and time"
+        );
+        assert!(breaker.snapshot().await.is_none());
+        assert!(!breaker.fatal_open_unexpired().await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fatal_gate_distinguishes_transient_open_and_expiry() {
+        let breaker = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 1,
+            timeout_seconds: 60,
+            success_threshold: 1,
+            ..Default::default()
+        });
+        assert!(!breaker.fatal_open_unexpired().await);
+        breaker.record_failure(false).await;
+        assert!(
+            !breaker.fatal_open_unexpired().await,
+            "ordinary open remains bypassable"
+        );
+        breaker.record_fatal_failure(false).await;
+        assert!(breaker.fatal_open_unexpired().await);
+        tokio::time::advance(Duration::from_secs(1801)).await;
+        assert!(
+            !breaker.fatal_open_unexpired().await,
+            "expired fatal open allows original recovery"
+        );
+        assert!(breaker.is_available().await);
+        let permit = breaker.allow_request().await;
+        assert!(permit.allowed && permit.used_half_open_permit);
+        breaker.record_success(true).await;
+        assert!(!breaker.fatal_open_unexpired().await);
+        assert_eq!(breaker.get_state().await, CircuitState::Closed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fatal_open_expiry_uses_original_half_open_permit() {
+        let breaker = CircuitBreaker::new(CircuitBreakerConfig {
+            success_threshold: 2,
+            ..Default::default()
+        });
+        breaker.record_fatal_failure(false).await;
+        assert!(!breaker.is_available().await);
+        tokio::time::advance(Duration::from_secs(1801)).await;
+        assert!(breaker.is_available().await);
+        let first = breaker.allow_request().await;
+        assert!(first.allowed && first.used_half_open_permit);
+        assert!(!breaker.allow_request().await.allowed);
+        breaker.release_half_open_permit();
+        let second = breaker.allow_request().await;
+        assert!(second.allowed && second.used_half_open_permit);
+        breaker.record_success(true).await;
+        let third = breaker.allow_request().await;
+        assert!(third.allowed && third.used_half_open_permit);
+        breaker.release_half_open_permit();
+    }
 
     #[tokio::test]
     async fn record_failure_returns_tripped_only_on_transition() {

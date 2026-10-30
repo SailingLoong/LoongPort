@@ -6,7 +6,10 @@ use crate::database::{dao::relay_setup_operations as ledger, Database};
 fn new_database_installs_and_validates_the_setup_journal() {
     let db = Database::memory().unwrap();
     let conn = db.conn.lock().unwrap();
-    assert_eq!(loongport_schema::read_stored_version(&conn).unwrap(), 32);
+    assert_eq!(
+        loongport_schema::read_stored_version(&conn).unwrap(),
+        loongport_schema::LOONGPORT_SCHEMA_VERSION
+    );
     ledger::validate_schema(&conn).unwrap();
     assert!(ledger::read_rows(&conn).unwrap().is_empty());
 }
@@ -20,7 +23,10 @@ fn prior_schema_migrates_without_changing_upstream_version() {
     loongport_schema::apply(&conn).unwrap();
     ledger::validate_schema(&conn).unwrap();
     assert_eq!(Database::get_user_version(&conn).unwrap(), upstream);
-    assert_eq!(loongport_schema::read_stored_version(&conn).unwrap(), 32);
+    assert_eq!(
+        loongport_schema::read_stored_version(&conn).unwrap(),
+        loongport_schema::LOONGPORT_SCHEMA_VERSION
+    );
     loongport_schema::apply(&conn).unwrap();
 }
 
@@ -64,4 +70,17 @@ fn malformed_prior_journal_does_not_advance_schema_version() {
         columns, 1,
         "failed migration must not rewrite malformed prior evidence"
     );
+}
+
+#[test]
+fn vendor_operation_schema_migrates_from_32_and_installed_loss_is_rejected() {
+    let db = Database::memory().unwrap();
+    let conn = db.conn.lock().unwrap();
+    conn.execute_batch("DROP TABLE vendor_connection_operations; UPDATE loongport_schema_version SET version=32 WHERE id=1").unwrap();
+    loongport_schema::apply(&conn).unwrap();
+    assert_eq!(loongport_schema::read_stored_version(&conn).unwrap(), 33);
+    conn.execute_batch("DROP TABLE vendor_connection_operations")
+        .unwrap();
+    assert!(Database::create_tables_on_conn(&conn).is_err());
+    assert!(super::vault::preflight_structure(&conn).is_err());
 }

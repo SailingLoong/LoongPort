@@ -692,6 +692,37 @@ pub(crate) struct FixtureTransport {
 }
 #[cfg(any(test, feature = "test-hooks"))]
 impl FixtureTransport {
+    #[cfg(all(feature = "gui", feature = "test-hooks"))]
+    pub(crate) async fn reopen_owner(
+        session: &SecretSession,
+        account_id: &str,
+    ) -> Result<FixtureOwner, Failure> {
+        if !account_id.starts_with("synthetic-") {
+            return Err(Failure::UnsupportedContext);
+        }
+        let root = session
+            .root()
+            .canonicalize()
+            .map_err(|_| Failure::StorageUnavailable)?;
+        catalog::access(session, None, |document, binding| {
+            if !document
+                .accounts
+                .iter()
+                .any(|account| account.id == account_id)
+            {
+                return Err(Failure::UnsupportedContext);
+            }
+            Ok((
+                FixtureOwner {
+                    root,
+                    binding: binding.clone(),
+                    account_ids: Arc::new(vec![account_id.to_owned()]),
+                },
+                false,
+            ))
+        })
+        .await
+    }
     pub(crate) async fn loopback(owner: &FixtureOwner, origin: &str) -> Result<Self, Failure> {
         let url = url::Url::parse(origin).map_err(|_| Failure::UnsupportedContext)?;
         if url.scheme() != "http"
@@ -744,10 +775,20 @@ impl FixtureTransport {
                 .as_ref()
                 .is_some_and(|credentials| {
                     credentials.access_token.starts_with("synthetic-")
-                        && credentials
+                        && (credentials
                             .refresh_token
                             .as_deref()
                             .is_some_and(|r| r.starts_with("synthetic-"))
+                            || (lease.snapshot.account.id == "synthetic-native-a"
+                                && credentials.access_token == "synthetic-native-a-access"
+                                && credentials.kind == catalog::CredentialKind::NativeAccessOnly
+                                && credentials.refresh_token.is_none()
+                                && credentials.native_source.as_ref().is_some_and(|source| {
+                                    source.format == catalog::NativeSourceFormat::PublicCliOAuthV1
+                                        && source.generation == 1
+                                        && source.fingerprint == "a".repeat(64)
+                                        && !source.rejected
+                                })))
                 })
             && self.binding == lease.snapshot.binding
             && lease

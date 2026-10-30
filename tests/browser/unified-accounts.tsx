@@ -24,6 +24,9 @@ import type { VendorAccountRow } from "@/lib/api/vendor";
 import type { MiniMaxCodeAccount } from "@/lib/api/minimaxCode";
 import type { WorkBuddyAccount } from "@/lib/api/workbuddy";
 import { Button } from "@/components/ui/button";
+import { WorkBuddyNativePreview } from "@/components/workbuddy/WorkBuddyNativePreview";
+import { WorkBuddyNativeRecovery } from "@/components/workbuddy/WorkBuddyNativeRecovery";
+import { VendorConnectionReviewDialog } from "@/components/relay/VendorConnectionReviewDialog";
 import en from "@/i18n/locales/en.json";
 import zh from "@/i18n/locales/zh.json";
 import "@/index.css";
@@ -37,6 +40,8 @@ const qoderState = params.get("qoderState") ?? "bound";
 const navigationCalls: string[] = [];
 const language = params.get("lang") === "zh" ? "zh" : "en";
 const rejectedCommands: string[] = [];
+const requestedCommands: string[] = [];
+const safetyEvidence = { vendorConfirms: 0, vendorCancels: 0 };
 const alignment = scenario === "alignment";
 const alignmentControls = { failPolicy: false, failReads: false };
 const qoderPolicy = {
@@ -153,6 +158,7 @@ const nativeAccounts: MiniMaxCodeAccount[] = ["A", "B"].map((id) => ({
 }));
 mockIPC(
   (command, payload) => {
+    requestedCommands.push(command);
     switch (command) {
       case "relay_list_relays":
         return scenario === "empty" ? [] : [relay];
@@ -171,6 +177,24 @@ mockIPC(
         automaticStatusReads[provider] += 1;
         return { ...automaticSnapshots[provider] };
       }
+      case "list_workbuddy_native_captures":
+        // Read-only catalog fixture; no native capture/activation or adoption claim.
+        return {
+          accounts: [],
+          requestOutcome: "unknown",
+          activationAvailable: scenario === "native-safety",
+        };
+      case "inspect_workbuddy_native_recovery":
+        if (scenario !== "native-safety") {
+          rejectedCommands.push(command);
+          throw new Error("Unexpected synthetic fixture command: " + command);
+        }
+        // Read-only synthetic journal. This never permits any native write IPC.
+        return {
+          phase: "pending",
+          requestOutcome: "unknown",
+          canRequestActivation: false,
+        };
       case "list_workbuddy_accounts":
         if (alignmentControls.failReads)
           throw new Error("Synthetic read failure");
@@ -369,6 +393,8 @@ const client = new QueryClient({
 Object.assign(window, {
   unifiedLayout: {
     rejectedCommands,
+    requestedCommands,
+    safetyEvidence,
     checkout:
       typeof __UNIFIED_LAYOUT_CHECKOUT__ === "undefined"
         ? "unrecorded"
@@ -482,8 +508,57 @@ function Fixture() {
     </div>
   );
 }
+
+/** Real dialogs and hooks, synthetic read boundary only. Vendor callback counts
+ * establish presentation behavior, NOT consumer CAS/one-shot transaction safety. */
+export function NativeSafetyFixture() {
+  const [visible, setVisible] = useState(true);
+  const [vendorOpen, setVendorOpen] = useState(false);
+  const [vendorDisabled, setVendorDisabled] = useState(false);
+  return (
+    <main className="p-4 space-y-4">
+      <p>Browser-only cancellation checks; native writes stay rejected.</p>
+      <Button
+        onClick={() => {
+          setVisible((value) => !value);
+          setVendorOpen(false);
+        }}
+      >
+        {visible ? "Leave safety view" : "Return to safety view"}
+      </Button>
+      <PreservedView active={visible}>
+        <WorkBuddyNativePreview />
+        <WorkBuddyNativeRecovery />
+        <Button onClick={() => setVendorOpen(true)}>
+          Review synthetic vendor
+        </Button>
+        <label>
+          <input
+            type="checkbox"
+            checked={vendorDisabled}
+            onChange={(event) => setVendorDisabled(event.target.checked)}
+          />
+          Disable synthetic vendor confirmation
+        </label>
+        <VendorConnectionReviewDialog
+          targetName={visible && vendorOpen ? "Synthetic vendor target" : null}
+          disabled={vendorDisabled}
+          onCancel={() => {
+            safetyEvidence.vendorCancels += 1;
+            setVendorOpen(false);
+          }}
+          onConfirm={() => {
+            safetyEvidence.vendorConfirms += 1;
+            setVendorOpen(false);
+          }}
+        />
+      </PreservedView>
+    </main>
+  );
+}
+
 createRoot(document.getElementById("root")!).render(
   <QueryClientProvider client={client}>
-    <Fixture />
+    {scenario === "native-safety" ? <NativeSafetyFixture /> : <Fixture />}
   </QueryClientProvider>,
 );

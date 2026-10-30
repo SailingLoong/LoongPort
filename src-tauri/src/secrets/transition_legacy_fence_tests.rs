@@ -255,3 +255,280 @@ pub(crate) fn verify(case: &str) {
         case => crate::secrets::bootstrap_restore::verify_legacy_generation_fence_case(case),
     }
 }
+
+#[test]
+#[serial_test::serial]
+fn legacy_native_pending_corrupt_and_wrong_key_refuse_before_writes() {
+    use crate::secrets::storage::StorageContext;
+    use crate::workbuddy::native_owner::testing;
+    for operation in ["rotate", "install", "settings", "upgrade"] {
+        for receipt in ["pending", "corrupt", "wrong-key"] {
+            let f = Fixture::new();
+            let client = crate::secrets::testing::tempdir().unwrap();
+            let storage = StorageContext::Encrypted(if receipt == "wrong-key" {
+                VaultContext::generate().unwrap()
+            } else {
+                f.current()
+            });
+            let (pending, _, terminal) = testing::phase_receipts(f.root(), &storage, client.path());
+            let bytes = match receipt {
+                "pending" => pending,
+                "corrupt" => b"corrupt synthetic native receipt".to_vec(),
+                _ => terminal,
+            };
+            std::fs::write(
+                f.root()
+                    .join(crate::secrets::owned_file::WORKBUDDY_NATIVE_JOURNAL_FILE),
+                bytes,
+            )
+            .unwrap();
+            let before = tree(f.home.path());
+            for _ in 0..2 {
+                let prepare = |_: &Connection, _: &VaultContext, _: &VaultContext| {
+                    panic!("native admission must precede database preparation")
+                };
+                let next = f
+                    .current()
+                    .rotate_key()
+                    .unwrap()
+                    .with_password(PASSWORD)
+                    .unwrap();
+                let result = match operation {
+                    "rotate" => rotate(&f.db, &f.store, PASSWORD, false),
+                    "install" => install_generation(&f.db, &f.store, next, false, prepare, None),
+                    "settings" => install_generation_with_settings(
+                        &f.db,
+                        &f.store,
+                        next,
+                        false,
+                        prepare,
+                        None,
+                        crate::settings::AppSettings::default(),
+                    ),
+                    _ => install_upgrade_database(
+                        &f.db,
+                        &f.store,
+                        crate::live::engine::DeviceStore::for_device().root(),
+                        prepare,
+                        &mut |_, _| panic!("checkpoint must not run"),
+                        &mut |_| panic!("staging must not run"),
+                        None,
+                    ),
+                };
+                assert!(
+                    matches!(result, Err(AppError::Config(ref code)) if code == "secret.recovery_required"),
+                    "{operation}/{receipt}: {result:?}"
+                );
+                assert_untouched(&f, &before);
+                f.db.secrets.ensure_available().unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn legacy_terminal_native_receipts_authenticate_after_repeated_rotation() {
+    use crate::secrets::storage::StorageContext;
+    use crate::workbuddy::native_owner::{inspect, testing, Disposition};
+    for restored in [false, true] {
+        let f = Fixture::new();
+        let client = crate::secrets::testing::tempdir().unwrap();
+        let storage = StorageContext::Encrypted(f.current());
+        let (_, r, c) = testing::phase_receipts(f.root(), &storage, client.path());
+        std::fs::write(
+            f.root()
+                .join(crate::secrets::owned_file::WORKBUDDY_NATIVE_JOURNAL_FILE),
+            if restored { r } else { c },
+        )
+        .unwrap();
+        for _ in 0..2 {
+            rotate(&f.db, &f.store, PASSWORD, false).unwrap();
+            assert_eq!(
+                inspect(f.root(), &StorageContext::Encrypted(f.current())).unwrap(),
+                Disposition::Clear
+            );
+            assert_eq!(
+                f.db.get_setting("global_proxy_url").unwrap().as_deref(),
+                Some("synthetic-fence-value")
+            );
+        }
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn legacy_foreign_bootstrap_intent_refuses_before_writes() {
+    let f = Fixture::new();
+    std::fs::write(
+        f.root().join(".vault-bootstrap"),
+        b"foreign synthetic intent",
+    )
+    .unwrap();
+    let before = tree(f.home.path());
+    assert!(rotate(&f.db, &f.store, PASSWORD, false).is_err());
+    assert_untouched(&f, &before);
+}
+
+#[test]
+#[serial_test::serial]
+fn legacy_native_phase_or_epoch_change_at_staged_refuses_publication() {
+    use crate::secrets::storage::StorageContext;
+    use crate::workbuddy::native_owner::testing;
+    for changed in ["phase", "epoch"] {
+        let f = Fixture::new();
+        let client = crate::secrets::testing::tempdir().unwrap();
+        let (pending, _, terminal) = testing::phase_receipts(
+            f.root(),
+            &StorageContext::Encrypted(f.current()),
+            client.path(),
+        );
+        let journal = f
+            .root()
+            .join(crate::secrets::owned_file::WORKBUDDY_NATIVE_JOURNAL_FILE);
+        std::fs::write(&journal, terminal).unwrap();
+        let database = std::fs::read(f.root().join(crate::config::DB_FILE_NAME)).unwrap();
+        let metadata = std::fs::read(f.root().join("vault.json")).unwrap();
+        let result = rotate_with_hook(&f.db, &f.store, PASSWORD, false, &mut |point| {
+            if point == Checkpoint::Staged {
+                if changed == "phase" {
+                    std::fs::write(&journal, &pending).unwrap();
+                } else {
+                    f.db.secrets.invalidate_database_leases();
+                }
+            }
+            Ok(())
+        });
+        assert!(result.is_err(), "{changed} changed after initial admission");
+        assert_eq!(
+            std::fs::read(f.root().join(crate::config::DB_FILE_NAME)).unwrap(),
+            database
+        );
+        assert_eq!(
+            std::fs::read(f.root().join("vault.json")).unwrap(),
+            metadata
+        );
+        assert!(pending_record(f.root()).unwrap().is_none());
+        assert_eq!(f.store.calls(), 0);
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn legacy_clear_native_receipt_authenticates_after_rotation() {
+    use crate::secrets::storage::StorageContext;
+    use crate::workbuddy::native_owner::{inspect, testing, Disposition};
+    let f = Fixture::new();
+    testing::clear_receipt(f.root(), &StorageContext::Encrypted(f.current()));
+    for _ in 0..2 {
+        rotate(&f.db, &f.store, PASSWORD, false).unwrap();
+        assert_eq!(
+            inspect(f.root(), &StorageContext::Encrypted(f.current())).unwrap(),
+            Disposition::Clear
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn legacy_session_database_context_mismatch_refuses_without_writes() {
+    let f = Fixture::new();
+    vault::stamp(
+        &f.db.conn.lock().unwrap(),
+        &VaultContext::generate().unwrap(),
+    )
+    .unwrap();
+    let before = tree(f.home.path());
+    assert!(rotate(&f.db, &f.store, PASSWORD, false).is_err());
+    assert_untouched(&f, &before);
+}
+
+#[test]
+#[serial_test::serial]
+fn legacy_native_or_epoch_change_after_intent_keeps_database_unpublished() {
+    use crate::secrets::storage::StorageContext;
+    for phase_change in [false, true] {
+        let f = Fixture::new();
+        let client = crate::secrets::testing::tempdir().unwrap();
+        let (pending, _, _) = crate::workbuddy::native_owner::testing::phase_receipts(
+            f.root(),
+            &StorageContext::Encrypted(f.current()),
+            client.path(),
+        );
+        let database = std::fs::read(f.root().join(crate::config::DB_FILE_NAME)).unwrap();
+        let metadata = std::fs::read(f.root().join("vault.json")).unwrap();
+        assert!(
+            rotate_with_hook(&f.db, &f.store, PASSWORD, false, &mut |point| {
+                if point == Checkpoint::Intent {
+                    if phase_change {
+                        std::fs::write(
+                            f.root()
+                                .join(crate::secrets::owned_file::WORKBUDDY_NATIVE_JOURNAL_FILE),
+                            &pending,
+                        )
+                        .unwrap();
+                    } else {
+                        f.db.secrets.invalidate_database_leases();
+                    }
+                }
+                Ok(())
+            })
+            .is_err()
+        );
+        assert_eq!(
+            database,
+            std::fs::read(f.root().join(crate::config::DB_FILE_NAME)).unwrap()
+        );
+        assert_eq!(
+            metadata,
+            std::fs::read(f.root().join("vault.json")).unwrap()
+        );
+        assert!(pending_record(f.root()).unwrap().is_some());
+        assert_eq!(f.store.calls(), 0);
+        if phase_change {
+            let before = tree(f.home.path());
+            assert!(recover(f.root(), &f.store, Some(PASSWORD)).is_err());
+            assert_eq!(before, tree(f.home.path()));
+        }
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn legacy_terminal_native_receipts_survive_original_interrupted_recovery() {
+    use crate::secrets::storage::StorageContext;
+    use crate::workbuddy::native_owner::{inspect, testing, Disposition};
+    for point in [
+        Checkpoint::Intent,
+        Checkpoint::Database,
+        Checkpoint::Artifact(1),
+        Checkpoint::Metadata,
+    ] {
+        let f = Fixture::new();
+        let client = crate::secrets::testing::tempdir().unwrap();
+        testing::phase_receipts(
+            f.root(),
+            &StorageContext::Encrypted(f.current()),
+            client.path(),
+        );
+        assert!(
+            rotate_with_hook(&f.db, &f.store, PASSWORD, false, &mut |at| {
+                if at == point {
+                    Err(AppError::Config("synthetic interruption".into()))
+                } else {
+                    Ok(())
+                }
+            })
+            .is_err()
+        );
+        let intent: Intent =
+            serde_json::from_slice(&pending_record(f.root()).unwrap().unwrap()).unwrap();
+        let next = VaultContext::from_password(intent.next.metadata, PASSWORD).unwrap();
+        recover(f.root(), &f.store, Some(PASSWORD)).unwrap();
+        assert_eq!(
+            inspect(f.root(), &StorageContext::Encrypted(next)).unwrap(),
+            Disposition::Clear
+        );
+        assert!(pending_record(f.root()).unwrap().is_none());
+    }
+}

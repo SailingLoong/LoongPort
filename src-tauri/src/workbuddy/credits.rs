@@ -588,6 +588,92 @@ fn credit_unit(row: &ExpiryObservation, all: &[ExpiryObservation]) -> bool {
     !units.is_empty() && units.iter().all(|v| v.as_str() == Some("credits"))
 }
 
+/// Card facts reuse provider hard deadlines and the original sample/resource
+/// ownership predicates. They do not require a model or an inference grant.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum CreditExpiryStatus {
+    Known,
+    Unavailable,
+    Stale,
+}
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CreditExpiryView {
+    pub expires_at_ms: i64,
+    pub remaining: Option<f64>,
+    pub unit: Option<String>,
+}
+fn owned_sample(row: &super::model::SavedAccount, now: i64) -> bool {
+    row.account.domain == super::model::Domain::WorkBuddy
+        && row.credits.observed_generation == Some(row.generation)
+        && row
+            .credits
+            .updated_at
+            .is_some_and(|at| at >= 0 && at <= now)
+}
+fn resource_detail(bucket: &ExpiryObservation, all: &[ExpiryObservation]) -> bool {
+    bucket.source != "summary"
+        && bucket.resource_id.is_some()
+        && number(bucket.capacity_type.as_ref()) != Some(4.0)
+        && bucket.package_code.as_deref() != Some("TCACA_code_001_PqouKr6QWV")
+        && bucket.package_code.as_ref().is_some_and(|code| {
+            all.iter().any(|summary| {
+                summary.source == "summary" && summary.package_code.as_ref() == Some(code)
+            })
+        })
+}
+pub(super) fn claim_unit(credits: &Credits) -> Option<String> {
+    let rows = &credits.expiry_observations;
+    (!rows.is_empty()
+        && rows
+            .iter()
+            .all(|row| !row.conflicting && credit_unit(row, rows)))
+    .then(|| "workbuddy:credits".into())
+}
+pub(super) fn card_expiry(
+    row: &super::model::SavedAccount,
+    now: i64,
+) -> (CreditExpiryStatus, Option<CreditExpiryView>) {
+    if !owned_sample(row, now) {
+        return (CreditExpiryStatus::Unavailable, None);
+    }
+    let all = &row.credits.expiry_observations;
+    let eligible: Vec<_> = all
+        .iter()
+        .filter(|bucket| {
+            resource_detail(bucket, all)
+                && !bucket.conflicting
+                && credit_unit(bucket, all)
+                && bucket.remaining != Some(0.0)
+        })
+        .filter_map(|bucket| direct_expiry(bucket).map(|at| (at, bucket)))
+        .collect();
+    let next = eligible
+        .iter()
+        .filter(|(at, _)| *at > now)
+        .min_by(|(a_at, a), (b_at, b)| {
+            a_at.cmp(b_at)
+                .then(a.resource_id.cmp(&b.resource_id))
+                .then(a.package_code.cmp(&b.package_code))
+                .then(a.source.cmp(&b.source))
+        });
+    if let Some((at, bucket)) = next {
+        (
+            CreditExpiryStatus::Known,
+            Some(CreditExpiryView {
+                expires_at_ms: *at,
+                remaining: bucket.remaining,
+                unit: Some("workbuddy:credits".into()),
+            }),
+        )
+    } else if eligible.iter().any(|(at, _)| *at <= now) {
+        (CreditExpiryStatus::Stale, None)
+    } else {
+        (CreditExpiryStatus::Unavailable, None)
+    }
+}
+
 pub(crate) async fn expiry_candidates(
     session: &crate::secrets::session::SecretSession,
     account_id: &str,
@@ -627,21 +713,8 @@ fn project(
         .iter()
         .enumerate()
         .map(|(index, bucket)| {
-            let owned = row.account.domain == super::model::Domain::WorkBuddy
-                && row.credits.observed_generation == Some(row.generation)
-                && row
-                    .credits
-                    .updated_at
-                    .is_some_and(|at| at >= 0 && at <= now);
-            let detail = bucket.source != "summary"
-                && bucket.resource_id.is_some()
-                && number(bucket.capacity_type.as_ref()) != Some(4.0)
-                && bucket.package_code.as_deref() != Some("TCACA_code_001_PqouKr6QWV")
-                && bucket.package_code.as_ref().is_some_and(|code| {
-                    row.credits.expiry_observations.iter().any(|summary| {
-                        summary.source == "summary" && summary.package_code.as_ref() == Some(code)
-                    })
-                });
+            let owned = owned_sample(row, now);
+            let detail = resource_detail(bucket, &row.credits.expiry_observations);
             let unit = credit_unit(bucket, &row.credits.expiry_observations);
             Candidate {
                 account_id: account_id.into(),
@@ -729,7 +802,7 @@ mod expiry_review_tests {
             uid: "synthetic".into(),
             domain: super::super::model::Domain::WorkBuddy,
             label: "synthetic".into(),
-            token: "synthetic-token".into(),
+            credential: "synthetic-token".into(),
         });
         row.credits.expiry_observations.push(observation(
             json!({"DeductionEndTime":{"raw":"PRIVATE-RAW-CANARY"}}),

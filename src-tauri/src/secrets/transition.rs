@@ -31,7 +31,8 @@ mod device;
 #[cfg(feature = "test-hooks")]
 pub(crate) use codex_pending_tests::verify as verify_codex_pending;
 pub(crate) use content::{
-    install_sync_content, recovery_input_kind as content_recovery_input_kind, RecoveryInputKind,
+    install_sync_content, recovery_input_kind as content_recovery_input_kind,
+    ContentSelectionPermit, RecoveryInputKind,
 };
 use device::{RootBindings, Roots};
 
@@ -363,6 +364,40 @@ where
     )
 }
 
+/// Only the original authenticated bootstrap owner may retain its pending intent.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn install_bootstrap_generation_with_settings<F>(
+    db: &Database,
+    store: &dyn KeyStore,
+    next: VaultContext,
+    automatic_unlock: bool,
+    prepare_database: F,
+    skills: Option<SkillsReplacement>,
+    settings: crate::settings::AppSettings,
+    owner: &super::bootstrap_restore::BootstrapInstallPermit,
+) -> Result<(), AppError>
+where
+    F: FnOnce(&Connection, &VaultContext, &VaultContext) -> Result<Connection, AppError>,
+{
+    let device = crate::live::engine::DeviceStore::for_device();
+    install_with_roots_scoped(
+        db,
+        store,
+        |_| Ok(next),
+        automatic_unlock,
+        prepare_database,
+        Replacements {
+            skills,
+            settings: Some(settings),
+        },
+        device.root(),
+        None,
+        &mut |_| Ok(()),
+        None,
+        Some(owner),
+    )
+}
+
 pub(crate) struct UpgradeCheckpointReplacement {
     pub(crate) source_digest: String,
     pub(crate) ciphertext: Vec<u8>,
@@ -402,6 +437,7 @@ where
         Some(checkpoint),
         hook,
         original_intent,
+        None,
     )
 }
 
@@ -463,6 +499,7 @@ where
         None,
         hook,
         None,
+        None,
     )
 }
 
@@ -478,17 +515,36 @@ fn install_with_roots_scoped<N, F>(
     mut upgrade: Option<&mut UpgradeCheckpointBuilder<'_>>,
     hook: &mut dyn FnMut(Checkpoint) -> Result<(), AppError>,
     original_intent: Option<&mut Option<Vec<u8>>>,
+    bootstrap_owner: Option<&super::bootstrap_restore::BootstrapInstallPermit>,
 ) -> Result<(), AppError>
 where
     N: FnOnce(&VaultContext) -> Result<VaultContext, AppError>,
     F: FnOnce(&Connection, &VaultContext, &VaultContext) -> Result<Connection, AppError>,
 {
     let session = &db.secrets;
+    let epoch = session.lifecycle_epoch();
     let mut context = session.write()?;
+    content::verify_content_epoch(session, epoch)?;
     let root = session.root();
     ensure_legacy_generation_owner(root)?;
     let current = context.encrypted()?;
     ensure_legacy_metadata(current.metadata())?;
+    // The caller already owns the shared sync operation owner; the original
+    // session write guard excludes native adapters using that same session.
+    // Recheck after every blocking lock and before publishing the first intent.
+    let admission = |expected_epoch: u64, blocked: bool| {
+        content::verify_content_epoch(session, expected_epoch)?;
+        if !blocked {
+            session.ensure_available()?;
+        }
+        if let Some(owner) = bootstrap_owner {
+            owner.verify(root, current)?;
+        } else if super::bootstrap_restore::pending_record(root)?.is_some() {
+            return Err(AppError::Config("secret.recovery_required".into()));
+        }
+        content::verify_native_clear(root, &context)
+    };
+    admission(epoch, false)?;
     let roots = Roots {
         data: root,
         device: device_root,
@@ -511,10 +567,13 @@ where
             &crate::live::engine::DeviceStore::at(roots.device.to_path_buf()),
         )?;
     }
+    #[cfg(test)]
+    super::session::legacy_admission_lock_tests::before_database();
     let mut conn = db
         .conn
         .lock()
         .map_err(|_| AppError::Config("secret.session_unavailable".into()))?;
+    admission(epoch, false)?;
     if upgrade.is_some()
         && conn.path().map(Path::new) != Some(root.join(crate::config::DB_FILE_NAME).as_path())
     {
@@ -573,6 +632,7 @@ where
     };
     let id = uuid::Uuid::new_v4().to_string();
     let staging = stage_root(root, &id)?;
+    admission(epoch, false)?;
     std::fs::create_dir(&staging).map_err(|e| AppError::io(&staging, e))?;
     #[cfg(unix)]
     {
@@ -750,6 +810,7 @@ where
         let _ = validate_stages(roots, &id, &next, &manifest)?;
         device::validate_sources(roots, &manifest)?;
         hook(Checkpoint::Staged)?;
+        admission(epoch, false)?;
         if let Some(binding) = &manifest.database {
             validate_database_version(&conn, Some(binding), true)?;
             if Database::content_digest(&conn)? != binding.source_database {
@@ -778,7 +839,9 @@ where
         manifest: sealed,
     };
     let bytes = serde_json::to_vec(&intent).map_err(|_| invalid())?;
-    session.set_blocked(true);
+    let blocked_epoch = content::block_content_session(session, epoch).inspect_err(|_| {
+        let _ = std::fs::remove_dir_all(&staging);
+    })?;
     write_durable(&root.join(INTENT), &bytes)?;
     if let Some(original) = original_intent {
         // The existing publication owner retains its actual serialized intent
@@ -786,6 +849,7 @@ where
         *original = Some(bytes);
     }
     hook(Checkpoint::Intent)?;
+    admission(blocked_epoch, true)?;
     // SQLite page replacement bypasses row hooks, including same-key sync joins.
     // Invalidate the original session's observations before publishing any pages.
     db.invalidate_pricing_observations()?;
@@ -1205,6 +1269,39 @@ fn remove_key(store: &dyn KeyStore, vault_id: &str, key_id: &str) -> Result<(), 
     }
     Ok(())
 }
+/// Recovery may observe the original ciphertext or an already published target
+/// receipt. Target-key admission requires the exact authenticated artifact digest.
+fn verify_native_finish(
+    root: &Path,
+    manifest: &Manifest,
+    next: &VaultContext,
+) -> Result<(), AppError> {
+    use crate::secrets::storage::StorageContext;
+    use crate::workbuddy::native_owner::{inspect, Disposition};
+    let denied = || AppError::Config("secret.recovery_required".into());
+    let previous = VaultContext::from_key(
+        manifest.previous.metadata.clone(),
+        Zeroizing::new(manifest.previous_key.clone()),
+    )
+    .map_err(inventory::secret_error)?;
+    match inspect(root, &StorageContext::Encrypted(previous)) {
+        Ok(Disposition::Absent | Disposition::Clear) => return Ok(()),
+        Ok(Disposition::Pending) => return Err(denied()),
+        Err(_) => (),
+    }
+    let relative = super::owned_file::WORKBUDDY_NATIVE_JOURNAL_FILE;
+    let bytes = crate::config_file_io::read_regular_file(&root.join(relative), 112 * 1024 * 1024)
+        .map_err(|_| denied())?
+        .ok_or_else(denied)?;
+    if !manifest.artifacts.iter().any(|artifact| {
+        matches!(&artifact.destination, Destination::Owned { relative: path, recovery: false } if path == relative)
+            && artifact.digest == hash(&bytes)
+    }) {
+        return Err(denied());
+    }
+    content::verify_native_clear(root, &StorageContext::Encrypted(next.clone()))
+}
+
 fn finish(
     roots: Roots<'_>,
     intent: &Intent,
@@ -1221,6 +1318,7 @@ fn finish(
     ensure_legacy_metadata(&manifest.next.metadata)?;
     device::validate_bindings(roots, intent.version, manifest)?;
     validate_authorization(root, intent, manifest)?;
+    verify_native_finish(root, manifest, next)?;
     let upgrade_versions = validate_stages(roots, &intent.id, next, manifest)?;
     device::validate_sources(roots, manifest)?;
     let main_path = root.join(crate::config::DB_FILE_NAME);

@@ -2,6 +2,168 @@
 use super::*;
 use crate::services::native_source_guard::storage_fixture::seed_restore_proofs;
 
+pub(super) async fn restore_group(db: Arc<Database>, group_id: &str) -> Arc<Database> {
+    let root = db.secrets.root().to_path_buf();
+    let context = db.secrets.read().unwrap().clone();
+    let StorageContext::Plaintext(identity) = &context else {
+        panic!("plaintext required")
+    };
+    let record = ProtectionRecord {
+        format_version: 1,
+        choice_complete: true,
+        storage: ProtectionStorage::Plaintext {
+            identity: identity.clone(),
+        },
+        commitment: None,
+        cleanup: None,
+    };
+    write_durable(
+        &root.join(crate::secrets::protection::FILE),
+        &serde_json::to_vec(&record).unwrap(),
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("skills")).unwrap();
+    let local = sync_protocol::build_local_snapshot(&db).unwrap();
+    let native_files = [
+        crate::secrets::owned_file::WORKBUDDY_FILE,
+        crate::minimax_code::catalog::FILE,
+    ]
+    .map(|name| std::fs::read(root.join(name)).unwrap());
+    let snapshot = DownloadedSnapshot {
+        manifest: serde_json::from_slice(&local.manifest_bytes).unwrap(),
+        manifest_hash: local.manifest_hash,
+        etag: None,
+        db_sql: local.db_sql,
+        skills_zip: local.skills_zip,
+        layout: RemoteLayout::Current,
+        source_path: "synthetic-same-owner-source".into(),
+    };
+    let original = crate::services::routing_groups::read(&db.conn.lock().unwrap(), group_id)
+        .unwrap()
+        .unwrap();
+    let mut reversed = original.members.clone();
+    reversed.reverse();
+    assert_ne!(reversed, original.members);
+    crate::services::routing_groups::save_named(
+        &mut db.conn.lock().unwrap(),
+        group_id,
+        Some(original.revision),
+        &original.name,
+        &reversed,
+    )
+    .unwrap();
+    assert_ne!(
+        crate::services::routing_groups::read(&db.conn.lock().unwrap(), group_id).unwrap(),
+        Some(original.clone())
+    );
+    let existing = crate::services::routing_groups::binding(&db.conn.lock().unwrap(), "claude")
+        .unwrap()
+        .unwrap();
+    crate::services::routing_groups::set_target(
+        &mut db.conn.lock().unwrap(),
+        "claude",
+        crate::services::routing_groups::RouteTarget::Manual {
+            source_id: "synthetic-changed-source".into(),
+            model: "synthetic-changed-model".into(),
+        },
+        Some(existing.revision),
+        None,
+    )
+    .unwrap();
+    assert_ne!(
+        crate::services::routing_groups::binding(&db.conn.lock().unwrap(), "claude").unwrap(),
+        Some(existing)
+    );
+    let mut provider = db
+        .get_provider_by_id("workbuddy-claude", "claude")
+        .unwrap()
+        .unwrap();
+    provider
+        .meta
+        .as_mut()
+        .unwrap()
+        .auth_binding
+        .as_mut()
+        .unwrap()
+        .account_id = Some("synthetic-changed-account".into());
+    db.save_provider("claude", &provider).unwrap();
+    assert_eq!(
+        db.get_provider_by_id("workbuddy-claude", "claude")
+            .unwrap()
+            .unwrap()
+            .meta
+            .unwrap()
+            .auth_binding
+            .unwrap()
+            .account_id
+            .as_deref(),
+        Some("synthetic-changed-account")
+    );
+    let mut reached = false;
+    let error = prepared(&db, &snapshot, &mut |point| {
+        if point == Checkpoint::Database {
+            reached = true;
+            return Err(AppError::Config(
+                "synthetic pool restore interruption".into(),
+            ));
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(
+        reached
+            && error
+                .to_string()
+                .contains("synthetic pool restore interruption")
+    );
+    assert!(db.secrets.read().is_err());
+    let recovery_root = root.clone();
+    tokio::task::spawn_blocking(move || {
+        let app = recovery_app(&recovery_root);
+        let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+        let status = invoke(&window, "get_startup_recovery", serde_json::json!({})).unwrap();
+        assert_eq!(status["status"], "pending");
+        let done = invoke(
+            &window,
+            "recover_startup_operation",
+            serde_json::json!({"token":status["token"], "password":""}),
+        )
+        .unwrap();
+        assert_eq!(done["status"], "completed");
+        assert_eq!(done["restartRequired"], true);
+    })
+    .await
+    .unwrap();
+    let connection =
+        crate::database::storage::prepare(&root.join(crate::config::DB_FILE_NAME), &context)
+            .unwrap();
+    let fresh = Arc::new(Database::from_connection(
+        connection,
+        SecretSession::from_storage_context(root, context),
+    ));
+    assert!(!Arc::ptr_eq(&fresh.secrets, &db.secrets));
+    assert!(db.secrets.read().is_err());
+    for (name, before) in [
+        crate::secrets::owned_file::WORKBUDDY_FILE,
+        crate::minimax_code::catalog::FILE,
+    ]
+    .into_iter()
+    .zip(native_files)
+    {
+        assert_eq!(
+            std::fs::read(fresh.secrets.root().join(name)).unwrap(),
+            before
+        );
+    }
+    assert_eq!(
+        crate::services::routing_groups::read(&fresh.conn.lock().unwrap(), group_id).unwrap(),
+        Some(original)
+    );
+    fresh
+}
+
 fn prepared(
     db: &Database,
     snapshot: &DownloadedSnapshot,

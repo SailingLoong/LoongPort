@@ -1,4 +1,285 @@
 import { invoke } from "@tauri-apps/api/core";
+export interface WorkBuddyNativeSelectionKey {
+  id: string;
+  generation: number;
+  incarnation: string;
+}
+export interface WorkBuddyNativeCaptureAccount {
+  selection: WorkBuddyNativeSelectionKey;
+  label: string;
+  realm: string;
+}
+export interface WorkBuddyNativeCaptureInput {
+  label: string;
+  expected?: WorkBuddyNativeSelectionKey | null;
+}
+export interface WorkBuddyNativeCaptureSaved {
+  state: "saved";
+  account: WorkBuddyNativeCaptureAccount;
+  activationAvailable: false;
+}
+export interface WorkBuddyNativeCaptureList {
+  accounts: WorkBuddyNativeCaptureAccount[];
+  /** A catalog snapshot never proves the outcome of a lost request. */
+  requestOutcome: "unknown";
+  /** Compiled file-switch support, not source admission or client-current proof. */
+  activationAvailable: boolean;
+}
+/** Native outcomes confirm a local transaction, not login or inference. */
+export type WorkBuddyNativeActivationResult = "applied" | "alreadyApplied";
+export interface WorkBuddyNativeSwitchReport {
+  transaction: WorkBuddyNativeActivationResult;
+  restart: "notNeeded" | "requested" | "failed" | "unknown";
+}
+export type WorkBuddyNativeSwitchStage =
+  | "cancelled"
+  | "busy"
+  | "quitRefused"
+  | "quitTimeout"
+  | "writersRemaining"
+  | "sourceChanged"
+  | "transaction"
+  | "outcomeUnknown";
+export class WorkBuddyNativeSwitchError extends Error {
+  constructor(
+    public readonly stage: WorkBuddyNativeSwitchStage,
+    public readonly reason?: (typeof nativeCaptureFailures)[number],
+  ) {
+    super(stage);
+    this.name = "WorkBuddyNativeSwitchError";
+  }
+}
+export type WorkBuddyNativeRecoveryResult = "restored" | "alreadyApplied";
+export interface WorkBuddyNativeRecoveryInspection {
+  phase: "absent" | "clear" | "pending";
+  requestOutcome: "unknown";
+  /** Current journal snapshot only; not proof that the client is stopped. */
+  canRequestActivation: boolean;
+}
+const nativeCaptureFailures = [
+  "unsafePath",
+  "io",
+  "journal",
+  "sourceChanged",
+  "recoveryRequired",
+  "requestConflict",
+  "rolledBack",
+] as const;
+export type WorkBuddyNativeCaptureFailure =
+  | (typeof nativeCaptureFailures)[number]
+  | "invalidInput"
+  | "invalidResponse"
+  | "unknown"
+  | "cancelled";
+/** Local errors retain no transport payload or credentials. */
+export class WorkBuddyNativeCaptureError extends Error {
+  constructor(public readonly code: WorkBuddyNativeCaptureFailure) {
+    super(code);
+    this.name = "WorkBuddyNativeCaptureError";
+  }
+}
+function nativeRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+function nativeSelection(value: unknown): WorkBuddyNativeSelectionKey {
+  const v = nativeRecord(value);
+  if (
+    typeof v.id !== "string" ||
+    !v.id.trim() ||
+    typeof v.generation !== "number" ||
+    !Number.isSafeInteger(v.generation) ||
+    v.generation < 0 ||
+    typeof v.incarnation !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      v.incarnation,
+    )
+  )
+    throw new WorkBuddyNativeCaptureError("invalidResponse");
+  return { id: v.id, generation: v.generation, incarnation: v.incarnation };
+}
+function nativeCaptureAccount(value: unknown): WorkBuddyNativeCaptureAccount {
+  const v = nativeRecord(value);
+  if (typeof v.label !== "string" || typeof v.realm !== "string")
+    throw new WorkBuddyNativeCaptureError("invalidResponse");
+  return {
+    selection: nativeSelection(v.selection),
+    label: v.label,
+    realm: v.realm,
+  };
+}
+function nativeCaptureInput(value: WorkBuddyNativeCaptureInput) {
+  const v = nativeRecord(value);
+  try {
+    if (
+      typeof v.label !== "string" ||
+      Object.keys(v).some((key) => !["label", "expected"].includes(key))
+    )
+      throw new Error();
+    if (
+      v.expected != null &&
+      Object.keys(nativeRecord(v.expected)).some(
+        (key) => !["id", "generation", "incarnation"].includes(key),
+      )
+    )
+      throw new Error();
+    return {
+      label: v.label,
+      expected: v.expected == null ? null : nativeSelection(v.expected),
+    };
+  } catch {
+    throw new WorkBuddyNativeCaptureError("invalidInput");
+  }
+}
+function nativeActivationTarget(
+  value: WorkBuddyNativeSelectionKey,
+): WorkBuddyNativeSelectionKey {
+  try {
+    const v = nativeRecord(value);
+    if (
+      Object.keys(v).some(
+        (key) => !["id", "generation", "incarnation"].includes(key),
+      )
+    )
+      throw new Error();
+    return nativeSelection(value);
+  } catch {
+    throw new WorkBuddyNativeCaptureError("invalidInput");
+  }
+}
+/** Abort stops this caller's wait only. It never cancels/replays the backend worker. */
+function nativeCaptureRequest<T>(
+  command: string,
+  args: Record<string, unknown> | undefined,
+  decode: (value: unknown) => T,
+  signal?: AbortSignal,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (operation: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", cancel);
+      operation();
+    };
+    const cancel = () =>
+      finish(() => reject(new WorkBuddyNativeCaptureError("cancelled")));
+    if (signal?.aborted) {
+      cancel();
+      return;
+    }
+    signal?.addEventListener("abort", cancel, { once: true });
+    const failed = (cause: unknown) => {
+      const message =
+        typeof cause === "string"
+          ? cause
+          : cause instanceof Error
+            ? cause.message
+            : undefined;
+      const code =
+        nativeCaptureFailures.find((value) => value === message) ?? "unknown";
+      finish(() => reject(new WorkBuddyNativeCaptureError(code)));
+    };
+    try {
+      const pending =
+        args === undefined
+          ? invoke<unknown>(command)
+          : invoke<unknown>(command, args);
+      pending
+        .then((value) => {
+          if (settled) return;
+          try {
+            const decoded = decode(value);
+            finish(() => resolve(decoded));
+          } catch {
+            finish(() =>
+              reject(new WorkBuddyNativeCaptureError("invalidResponse")),
+            );
+          }
+        })
+        .catch(failed);
+    } catch (cause) {
+      failed(cause);
+    }
+  });
+}
+
+/** Cancellation after IPC submission abandons the wait, not the native worker. */
+function nativeSwitchRequest(
+  target: WorkBuddyNativeSelectionKey,
+  signal?: AbortSignal,
+): Promise<WorkBuddyNativeSwitchReport> {
+  const checked = nativeActivationTarget(target);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let submitted = false;
+    const finish = (f: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", cancel);
+      f();
+    };
+    const cancel = () =>
+      finish(() =>
+        reject(
+          new WorkBuddyNativeSwitchError(
+            submitted ? "outcomeUnknown" : "cancelled",
+          ),
+        ),
+      );
+    if (signal?.aborted) return cancel();
+    signal?.addEventListener("abort", cancel, { once: true });
+    submitted = true;
+    try {
+      invoke<unknown>("activate_workbuddy_native_with_restart", {
+        target: checked,
+      })
+        .then((value) => {
+          const v = nativeRecord(value);
+          if (
+            Object.keys(v).length !== 2 ||
+            (v.transaction !== "applied" &&
+              v.transaction !== "alreadyApplied") ||
+            !["notNeeded", "requested", "failed", "unknown"].includes(
+              v.restart as string,
+            )
+          )
+            return finish(() =>
+              reject(new WorkBuddyNativeSwitchError("outcomeUnknown")),
+            );
+          const report: WorkBuddyNativeSwitchReport = {
+            transaction: v.transaction,
+            restart: v.restart as WorkBuddyNativeSwitchReport["restart"],
+          };
+          finish(() => resolve(report));
+        })
+        .catch((cause: unknown) => {
+          const v = nativeRecord(cause);
+          const stage = [
+            "busy",
+            "quitRefused",
+            "quitTimeout",
+            "writersRemaining",
+            "sourceChanged",
+            "outcomeUnknown",
+          ].find((s) => s === v.stage);
+          const reason = nativeCaptureFailures.find((r) => r === v.reason);
+          const error =
+            v.stage === "transaction" && reason
+              ? new WorkBuddyNativeSwitchError("transaction", reason)
+              : new WorkBuddyNativeSwitchError(
+                  (stage as WorkBuddyNativeSwitchStage | undefined) ??
+                    "outcomeUnknown",
+                );
+          finish(() => reject(error));
+        });
+    } catch {
+      finish(() => reject(new WorkBuddyNativeSwitchError("outcomeUnknown")));
+    }
+  });
+}
+
 export type WorkBuddyClaimState =
   | "unconfirmed"
   | "available"
@@ -20,6 +301,21 @@ export interface WorkBuddyAccount {
   canClaim: boolean;
   claimState: WorkBuddyClaimState;
   credited: number | null;
+  /** Optional persisted facts from the WorkBuddy owner; absent on older snapshots. */
+  lastSuccessfulClaim?: {
+    confirmedAtMs: number | null;
+    timeSource: "localReconciled" | null;
+    credited: number | null;
+    unit: string | null;
+  } | null;
+  /** `known` requires an actual credit expiry, never a reset or activity deadline. */
+  creditExpiryStatus?: "known" | "unavailable" | "stale";
+  /** Earliest future actual expiry batch with remaining credit, when known. */
+  nextKnownCreditExpiry?: {
+    expiresAtMs: number;
+    remaining: number | null;
+    unit: string | null;
+  } | null;
   credits: {
     totalRemaining: number | null;
     nearestExpiry: number | null;
@@ -62,6 +358,8 @@ export interface WorkBuddyInferenceModel {
   name: string;
 }
 export const workbuddyApi = {
+  // Untrusted IPC data is validated and redacted by the observation consumer.
+  previewNative: () => invoke<unknown>("preview_workbuddy_native_capture"),
   setInferenceConsent: (id: string, enabled: boolean) =>
     invoke<boolean>("set_workbuddy_inference_consent", { id, enabled }),
   setAutomatic: (account: WorkBuddyAccount, enabled: boolean) =>
@@ -104,4 +402,96 @@ export const workbuddyApi = {
     invoke<{ state: "saved" | "waiting" }>("finish_workbuddy_authorization", {
       flowId,
     }),
+  captureNative: async (
+    input: WorkBuddyNativeCaptureInput,
+    signal?: AbortSignal,
+  ) =>
+    nativeCaptureRequest<WorkBuddyNativeCaptureSaved>(
+      "capture_workbuddy_native_account",
+      { input: nativeCaptureInput(input) },
+      (value) => {
+        const v = nativeRecord(value);
+        if (v.state !== "saved" || v.activationAvailable !== false)
+          throw new Error();
+        return {
+          state: "saved",
+          account: nativeCaptureAccount(v.account),
+          activationAvailable: false,
+        };
+      },
+      signal,
+    ),
+  listNativeCaptures: (signal?: AbortSignal) =>
+    nativeCaptureRequest<WorkBuddyNativeCaptureList>(
+      "list_workbuddy_native_captures",
+      undefined,
+      (value) => {
+        const v = nativeRecord(value);
+        if (
+          !Array.isArray(v.accounts) ||
+          v.requestOutcome !== "unknown" ||
+          typeof v.activationAvailable !== "boolean"
+        )
+          throw new Error();
+        return {
+          accounts: v.accounts.map(nativeCaptureAccount),
+          requestOutcome: "unknown",
+          activationAvailable: v.activationAvailable,
+        };
+      },
+      signal,
+    ),
+  activateNativeWithRestart: async (
+    target: WorkBuddyNativeSelectionKey,
+    signal?: AbortSignal,
+  ): Promise<WorkBuddyNativeSwitchReport> =>
+    nativeSwitchRequest(target, signal),
+  activateNative: async (
+    target: WorkBuddyNativeSelectionKey,
+    signal?: AbortSignal,
+  ) =>
+    nativeCaptureRequest<WorkBuddyNativeActivationResult>(
+      "activate_workbuddy_native_account",
+      { target: nativeActivationTarget(target) },
+      (value) => {
+        if (value !== "applied" && value !== "alreadyApplied")
+          throw new Error();
+        return value;
+      },
+      signal,
+    ),
+  recoverNative: (signal?: AbortSignal) =>
+    nativeCaptureRequest<WorkBuddyNativeRecoveryResult>(
+      "recover_workbuddy_native_switch",
+      undefined,
+      (value) => {
+        if (value !== "restored" && value !== "alreadyApplied")
+          throw new Error();
+        return value;
+      },
+      signal,
+    ),
+  inspectNativeRecovery: (signal?: AbortSignal) =>
+    nativeCaptureRequest<WorkBuddyNativeRecoveryInspection>(
+      "inspect_workbuddy_native_recovery",
+      undefined,
+      (value) => {
+        const v = nativeRecord(value);
+        if (
+          (v.phase !== "absent" &&
+            v.phase !== "clear" &&
+            v.phase !== "pending") ||
+          v.requestOutcome !== "unknown" ||
+          typeof v.canRequestActivation !== "boolean" ||
+          v.canRequestActivation !== (v.phase !== "pending")
+        )
+          throw new Error();
+        return {
+          phase: v.phase,
+          requestOutcome: "unknown",
+          canRequestActivation: v.canRequestActivation,
+        };
+      },
+      signal,
+    ),
 };

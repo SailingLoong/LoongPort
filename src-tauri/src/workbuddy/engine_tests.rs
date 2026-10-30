@@ -79,7 +79,7 @@ fn setup() -> (std::sync::Arc<SecretSession>, String) {
         uid: "synthetic-uid".into(),
         domain: Domain::CodeBuddy,
         label: "Synthetic account".into(),
-        token: "SYNTHETIC_TOKEN_CANARY".into(),
+        credential: "SYNTHETIC_TOKEN_CANARY".into(),
     };
     let id = account.id(b.store_id());
     store::save(&s, &b, vec![SavedAccount::new(account)]).unwrap();
@@ -266,7 +266,7 @@ async fn pending_unknown_claim_survives_verification_and_reauthorization_without
     let rows = store::load(&s, &b).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].account.id(b.store_id()), id);
-    assert!(rows[0].account.token.is_empty());
+    assert!(rows[0].account.api_token().unwrap().is_empty());
     assert!(rows[0].shared_authorization);
     assert!(rows[0].inference.is_some());
     assert_eq!(serde_json::to_value(&rows[0].pending).unwrap(), pending);
@@ -428,7 +428,7 @@ fn identities_are_bound_to_owner_and_official_cn_domain() {
         uid: "same-uid".into(),
         domain: Domain::CodeBuddy,
         label: "Account".into(),
-        token: "synthetic".into(),
+        credential: "synthetic".into(),
     };
     let mut b = a.clone();
     b.domain = Domain::WorkBuddy;
@@ -632,7 +632,7 @@ impl Transport for AccountBoundFake {
             let selected = account.expect("refresh requires the selected account");
             assert_eq!(selected.domain, domain);
             assert_eq!(selected.uid, uid);
-            assert_eq!(selected.token, token);
+            assert_eq!(selected.api_token().unwrap(), token);
             assert_eq!(endpoint, expected);
             Ok(value)
         })
@@ -652,7 +652,7 @@ fn account_isolation_fixture() -> (std::sync::Arc<SecretSession>, Vec<String>) {
             domain,
             uid: uid.into(),
             label: "Synthetic account".into(),
-            token: token.into(),
+            credential: token.into(),
         })
     })
     .collect();
@@ -705,7 +705,10 @@ async fn account_isolation_refresh_selects_domain_and_preserves_other_accounts()
             serde_json::to_value(&before[index]).unwrap()
         );
     }
-    assert_eq!(after[1].account.token, before[1].account.token);
+    assert_eq!(
+        after[1].account.api_token().unwrap(),
+        before[1].account.api_token().unwrap()
+    );
     let dto = serde_json::to_string(&view).unwrap();
     assert!(!dto.contains("SYNTHETIC_") && !dto.contains("same-uid"));
 }
@@ -823,7 +826,7 @@ impl Transport for BatchFake {
                 .expect("unexpected batch request");
             assert_eq!(selected.domain, domain);
             assert_eq!(selected.uid, uid);
-            assert_eq!(selected.token, token);
+            assert_eq!(selected.api_token().unwrap(), token);
             assert_eq!(endpoint, expected);
             self.calls
                 .lock()
@@ -1257,7 +1260,7 @@ async fn automatic_defaults_off_optin_bound_and_stale_setter_rejected() {
         .is_err());
     let b = store::binding(&s).unwrap();
     let mut rows = store::load(&s, &b).unwrap();
-    rows[0].account.token = "SYNTHETIC_REPLACEMENT".into();
+    rows[0].account.credential = "SYNTHETIC_REPLACEMENT".into();
     store::save(&s, &b, rows).unwrap();
     e.automatic_tick().await.unwrap();
     assert!(!e.list().await.unwrap()[0].auto_claim_enabled);
@@ -1692,7 +1695,7 @@ async fn late_claim_receipt_cannot_overwrite_reauthorized_account_or_revive_cons
     let saved = store::load(&s, &b).unwrap().remove(0);
     assert!(saved.generation > before.generation);
     assert!(!saved.automatic_enabled());
-    assert!(saved.account.token.is_empty());
+    assert!(saved.account.api_token().unwrap().is_empty());
     assert!(saved.shared_authorization);
     assert!(saved.inference.is_some());
     assert!(saved.pending == pending);
@@ -1923,7 +1926,7 @@ async fn refresh_late_result_rejects_relogin_generation_token_identity_deletion_
                 let mut rows = store::load(&s, &b).unwrap();
                 match change {
                     "generation" => rows[0].generation += 1,
-                    "token" => rows[0].account.token = "SYNTHETIC_REPLACEMENT_TOKEN".into(),
+                    "token" => rows[0].account.credential = "SYNTHETIC_REPLACEMENT_TOKEN".into(),
                     "identity" => rows[0].account.uid = "replacement-uid".into(),
                     "delete" => rows.clear(),
                     _ => unreachable!(),
@@ -2070,4 +2073,358 @@ async fn expiry_sampling_generation_is_saved_by_refresh_but_hidden_from_view() {
     assert!(view.credits.expiry_observations.is_empty());
     assert_eq!(view.credits.observed_generation, None);
     assert!(!transport.calls.lock().unwrap().contains(&Endpoint::Claim));
+}
+
+mod card_fact_tests {
+    use super::*;
+    async fn successful(s: &std::sync::Arc<SecretSession>, id: &str, now: i64) -> Value {
+        let mut q = vec![status(false)];
+        q.extend(resource(10.0));
+        q.push((Endpoint::Claim, Ok(json!({"code":0,"credit":20}))));
+        q.push(status(true));
+        q.extend(resource(30.0));
+        let transport = Fake::new(q);
+        let engine = Engine {
+            session: s,
+            transport: &transport,
+            clock: &super::super::clock::FixedClock(now),
+        };
+        serde_json::to_value(engine.claim(id).await.unwrap()).unwrap()
+    }
+    #[tokio::test]
+    async fn card_fact_success_is_written_once_and_survives_restart_and_day() {
+        let (s, id) = setup();
+        let first = successful(&s, &id, NOW).await;
+        let fact = first["lastSuccessfulClaim"].clone();
+        assert_eq!(
+            fact["confirmedAtMs"], NOW,
+            "successful original reconciliation must persist its actual local confirmation time"
+        );
+        assert_eq!(fact["timeSource"], "localReconciled");
+        assert_eq!(fact["credited"].as_f64(), Some(20.0));
+        assert!(
+            fact.get("receiptId").is_none(),
+            "internal receipt identity must not reach card DTO"
+        );
+        let transport = Fake::new(vec![status(true)]);
+        let e = Engine {
+            session: &s,
+            transport: &transport,
+            clock: &super::super::clock::FixedClock(NOW + 1000),
+        };
+        let repeated = serde_json::to_value(e.claim(&id).await.unwrap()).unwrap();
+        assert_eq!(
+            repeated["lastSuccessfulClaim"], fact,
+            "alreadyClaimed cannot renew confirmation time"
+        );
+        let context = {
+            let guard = s.read().unwrap();
+            match &*guard {
+                crate::secrets::storage::StorageContext::Encrypted(v) => {
+                    crate::secrets::VaultContext::from_key(v.metadata().clone(), v.export_key())
+                        .unwrap()
+                }
+                _ => unreachable!(),
+            }
+        };
+        let reopened = SecretSession::from_context(s.root().into(), context);
+        let transport = Fake::new(vec![]);
+        let e = Engine {
+            session: &reopened,
+            transport: &transport,
+            clock: &super::super::clock::FixedClock(NOW + 86_400_000),
+        };
+        let listed = serde_json::to_value(e.list().await.unwrap()).unwrap();
+        assert_eq!(
+            listed[0]["lastSuccessfulClaim"], fact,
+            "day rollover must not erase the latest confirmed success"
+        );
+        assert_eq!(listed[0]["claimState"], "unconfirmed");
+        assert!(transport.calls.lock().unwrap().is_empty());
+        let b = store::binding(&reopened).unwrap();
+        let saved = serde_json::to_value(store::load(&reopened, &b).unwrap()).unwrap();
+        assert_eq!(saved[0]["last_successful_claim"]["confirmedAtMs"], NOW);
+        assert!(saved[0]["last_successful_claim"]["receiptId"].is_string());
+    }
+    #[tokio::test]
+    async fn card_fact_time_is_confirmation_not_dispatch_start() {
+        let (s, id) = setup();
+        let clock = MovingClock(std::sync::atomic::AtomicI64::new(NOW));
+        let mut q = vec![status(false)];
+        q.extend(resource(10.0));
+        q.push((Endpoint::Claim, Ok(json!({"code":0,"credit":20}))));
+        q.push(status(true));
+        q.extend(resource(30.0));
+        let transport = CrossMidnight {
+            inner: Fake::new(q),
+            clock: &clock,
+            change_at: Endpoint::Claim,
+            to: NOW + 5000,
+        };
+        let e = Engine {
+            session: &s,
+            transport: &transport,
+            clock: &clock,
+        };
+        let view = serde_json::to_value(e.claim(&id).await.unwrap()).unwrap();
+        assert_eq!(view["lastSuccessfulClaim"]["confirmedAtMs"], NOW + 5000);
+        assert_eq!(view["lastSuccessfulClaim"]["timeSource"], "localReconciled");
+        assert_ne!(view["lastSuccessfulClaim"]["confirmedAtMs"], NOW);
+    }
+    #[tokio::test]
+    async fn card_fact_failures_and_unknown_do_not_replace_last_success() {
+        for result in [
+            Ok(json!({"code":1001})),
+            Ok(json!({"code":401})),
+            Err(Failure::Unconfirmed),
+        ] {
+            let (s, id) = setup();
+            let first = successful(&s, &id, NOW).await;
+            let fact = first["lastSuccessfulClaim"].clone();
+            assert!(
+                fact.is_object(),
+                "control success must produce a real persisted fact"
+            );
+            let unknown = result.is_err();
+            let mut q = vec![status(false)];
+            q.extend(resource(10.0));
+            q.push((Endpoint::Claim, result));
+            q.push(status(true));
+            q.extend(resource(30.0));
+            let transport = Fake::new(q);
+            let e = Engine {
+                session: &s,
+                transport: &transport,
+                clock: &super::super::clock::FixedClock(NOW + 86_400_000),
+            };
+            let view = serde_json::to_value(e.claim(&id).await.unwrap()).unwrap();
+            assert_eq!(view["lastSuccessfulClaim"], fact);
+            let rows = store::load(&s, &store::binding(&s).unwrap()).unwrap();
+            assert_eq!(
+                rows[0].pending.is_some(),
+                unknown,
+                "display metadata must preserve original replay protection"
+            );
+            assert_eq!(
+                rows[0].attempted_day.as_deref(),
+                Some(today(NOW + 86_400_000).as_str())
+            );
+        }
+    }
+    #[tokio::test]
+    async fn card_fact_legacy_claimed_rows_remain_unknown_and_round_trip() {
+        let (s, _) = setup();
+        let b = store::binding(&s).unwrap();
+        let mut rows = store::load(&s, &b).unwrap();
+        rows[0].claim_state = ClaimState::Claimed;
+        rows[0].claim_day = today(NOW);
+        rows[0].credited = Some(20.0);
+        let mut old = serde_json::to_value(rows).unwrap();
+        old[0]
+            .as_object_mut()
+            .unwrap()
+            .remove("last_successful_claim");
+        let rows: Vec<SavedAccount> = serde_json::from_value(old.clone()).unwrap();
+        store::save(&s, &b, rows).unwrap();
+        let loaded = store::load(&s, &b).unwrap();
+        assert_eq!(serde_json::to_value(&loaded).unwrap(), old);
+        let transport = Fake::new(vec![]);
+        let e = Engine {
+            session: &s,
+            transport: &transport,
+            clock: &super::super::clock::FixedClock(NOW),
+        };
+        let view = serde_json::to_value(e.list().await.unwrap()).unwrap();
+        assert!(
+            view[0]["lastSuccessfulClaim"].is_null(),
+            "daily state/credited/day cannot manufacture a success timestamp"
+        );
+        assert_eq!(view[0]["credited"].as_f64(), Some(20.0));
+        assert_eq!(view[0]["claimState"], "claimed");
+    }
+}
+
+mod card_expiry_tests {
+    use super::*;
+    fn saved(raw: Vec<Value>) -> (std::sync::Arc<SecretSession>, String) {
+        let (s, _) = setup();
+        let b = store::binding(&s).unwrap();
+        let mut rows = store::load(&s, &b).unwrap();
+        rows[0].account.domain = Domain::WorkBuddy;
+        rows[0].credits = super::super::credits::normalize(
+            &json!({"code":0,"data":{"Packages":[{"PackageCode":"p","CapacityUnit":"credits","CapacityRemain":15}],"TotalCount":1}}),
+            &json!({"code":0,"data":{"Accounts":raw,"TotalCount":raw.len()}}),
+            &json!({"code":0,"data":{"Accounts":[],"TotalCount":0}}),
+            NOW,
+        );
+        rows[0].credits.observed_generation = Some(rows[0].generation);
+        let id = rows[0].account.id(b.store_id());
+        store::save(&s, &b, rows).unwrap();
+        (s, id)
+    }
+    async fn listed(s: &std::sync::Arc<SecretSession>, now: i64) -> Value {
+        let transport = Fake::new(vec![]);
+        let e = Engine {
+            session: s,
+            transport: &transport,
+            clock: &super::super::clock::FixedClock(now),
+        };
+        let v = serde_json::to_value(e.list().await.unwrap()).unwrap();
+        assert!(transport.calls.lock().unwrap().is_empty());
+        v[0].clone()
+    }
+    #[tokio::test]
+    async fn card_expiry_earliest_future_allows_unknown_remaining_and_ignores_zero() {
+        let (s, _) = saved(vec![
+            json!({"ResourceId":"zero","PackageCode":"p","CapacityRemain":0,"DeductionEndTime":NOW+100}),
+            json!({"ResourceId":"unknown","PackageCode":"p","DeductionEndTime":NOW+200}),
+            json!({"ResourceId":"positive","PackageCode":"p","CapacityRemain":7,"DeductionEndTime":NOW+300}),
+            json!({"ResourceId":"old","PackageCode":"p","CapacityRemain":9,"DeductionEndTime":NOW-100}),
+        ]);
+        let v = listed(&s, NOW).await;
+        assert_eq!(v["creditExpiryStatus"], "known");
+        assert_eq!(v["nextKnownCreditExpiry"]["expiresAtMs"], NOW + 200);
+        assert!(v["nextKnownCreditExpiry"]["remaining"].is_null());
+        assert_eq!(v["nextKnownCreditExpiry"]["unit"], "workbuddy:credits");
+        assert_eq!(v["credits"]["updatedAt"], NOW);
+        assert!(!serde_json::to_string(&v)
+            .unwrap()
+            .contains("expiryObservations"));
+    }
+    #[tokio::test]
+    async fn card_expiry_stale_only_after_trusted_deadline_and_no_future() {
+        let (s, _) = saved(vec![
+            json!({"ResourceId":"old","PackageCode":"p","CapacityRemain":7,"DeductionEndTime":NOW+10}),
+        ]);
+        assert_eq!(listed(&s, NOW).await["creditExpiryStatus"], "known");
+        let v = listed(&s, NOW + 20).await;
+        assert_eq!(v["creditExpiryStatus"], "stale");
+        assert!(v["nextKnownCreditExpiry"].is_null());
+        assert_eq!(
+            v["credits"]["updatedAt"], NOW,
+            "reading must not renew observation time"
+        );
+    }
+    #[tokio::test]
+    async fn card_expiry_rejects_conflicts_unowned_and_display_fallback() {
+        for case in [
+            "cycle",
+            "conflict",
+            "unit",
+            "no-resource",
+            "generation",
+            "future-sample",
+            "no-sample",
+            "realm",
+            "display-only",
+        ] {
+            let raw = match case {
+                "cycle" => vec![
+                    json!({"ResourceId":"r","PackageCode":"p","CapacityRemain":7,"CycleEndTime":"2030-01-01"}),
+                ],
+                "conflict" => vec![
+                    json!({"ResourceId":"r","PackageCode":"p","CapacityRemain":7,"DeductionEndTime":NOW+100}),
+                    json!({"ResourceId":"r","PackageCode":"p","CapacityRemain":7,"DeductionEndTime":NOW+200}),
+                ],
+                "unit" => vec![
+                    json!({"ResourceId":"r","PackageCode":"p","CapacityRemain":7,"CapacityUnit":"tokens","DeductionEndTime":NOW+100}),
+                ],
+                "no-resource" => {
+                    vec![json!({"PackageCode":"p","CapacityRemain":7,"DeductionEndTime":NOW+100})]
+                }
+                _ => vec![
+                    json!({"ResourceId":"r","PackageCode":"p","CapacityRemain":7,"DeductionEndTime":NOW+100}),
+                ],
+            };
+            let (s, _) = saved(raw);
+            let b = store::binding(&s).unwrap();
+            let mut rows = store::load(&s, &b).unwrap();
+            match case {
+                "generation" => rows[0].credits.observed_generation = Some(17),
+                "future-sample" => rows[0].credits.updated_at = Some(NOW + 1),
+                "no-sample" => rows[0].credits.updated_at = None,
+                "realm" => rows[0].account.domain = Domain::CodeBuddy,
+                "display-only" => rows[0].credits.expiry_observations.clear(),
+                _ => {}
+            }
+            store::save(&s, &b, rows).unwrap();
+            let v = listed(&s, NOW).await;
+            assert_eq!(v["creditExpiryStatus"], "unavailable", "accepted {case}");
+            assert!(v["nextKnownCreditExpiry"].is_null());
+        }
+    }
+    /// Export already-serialized production AccountViews for frontend integration.
+    /// Network is the existing explicit synthetic Transport; store/engine/DTO are real.
+    #[tokio::test]
+    async fn card_fact_exports_synthetic_serialized_views() {
+        fn measured_resources(balance: f64) -> Vec<(Endpoint, Result<Value, Failure>)> {
+            let mut items = resource(balance);
+            items[0].1.as_mut().unwrap()["data"]["Packages"][0]["CapacityUnit"] = json!("credits");
+            items[0].1.as_mut().unwrap()["data"]["TotalCount"] = json!(1);
+            items[1].1 = Ok(json!({"code":0,"data":{"Accounts":[{
+                "ResourceId":"synthetic-credit-batch","PackageCode":"p",
+                "CapacityRemain":balance,"CapacityUnit":"credits",
+                "DeductionEndTime":NOW+10000}],"TotalCount":1}}));
+            items
+        }
+        let (session, id) = saved(vec![]);
+        let mut q = vec![status(false)];
+        q.extend(measured_resources(10.0));
+        q.push((Endpoint::Claim, Ok(json!({"code":0,"credit":20}))));
+        q.push(status(true));
+        q.extend(measured_resources(30.0));
+        let transport = Fake::new(q);
+        let engine = Engine {
+            session: &session,
+            transport: &transport,
+            clock: &super::super::clock::FixedClock(NOW),
+        };
+        let known = serde_json::to_value(engine.claim(&id).await.unwrap()).unwrap();
+        let (unknown_session, _) = setup();
+        let unknown = listed(&unknown_session, NOW).await;
+        let stale = listed(&session, NOW + 20000).await;
+        assert_eq!(known["creditExpiryStatus"], "known");
+        assert_eq!(known["lastSuccessfulClaim"]["confirmedAtMs"], NOW);
+        assert_eq!(known["lastSuccessfulClaim"]["unit"], "workbuddy:credits");
+        assert_eq!(known["nextKnownCreditExpiry"]["unit"], "workbuddy:credits");
+        assert_eq!(unknown["creditExpiryStatus"], "unavailable");
+        assert!(unknown["lastSuccessfulClaim"].is_null());
+        assert_eq!(stale["creditExpiryStatus"], "stale");
+        assert!(stale["nextKnownCreditExpiry"].is_null());
+        let bundle = json!({"known":known,"unknown":unknown,"stale":stale});
+        let bytes = serde_json::to_vec_pretty(&bundle).unwrap();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        for secret in [
+            "SYNTHETIC_TOKEN_CANARY",
+            "synthetic-uid",
+            "receiptId",
+            "expiryObservations",
+        ] {
+            assert!(
+                !text.contains(secret),
+                "internal data leaked to account view"
+            );
+        }
+        if let Some(path) = std::env::var_os("LOONGPORT_CARD_DTO_EXPORT") {
+            std::fs::write(path, bytes).unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn card_expiry_equal_deadlines_are_stable_across_response_order() {
+        let a = json!({"ResourceId":"a","PackageCode":"p","CapacityRemain":2,"DeductionEndTime":NOW+100});
+        let z = json!({"ResourceId":"z","PackageCode":"p","CapacityRemain":5,"DeductionEndTime":NOW+100});
+        let (s, _) = saved(vec![z.clone(), a.clone()]);
+        let (t, _) = saved(vec![a, z]);
+        let left = listed(&s, NOW).await;
+        let right = listed(&t, NOW).await;
+        assert_eq!(left["creditExpiryStatus"], "known");
+        assert_eq!(
+            left["nextKnownCreditExpiry"],
+            right["nextKnownCreditExpiry"]
+        );
+        assert_eq!(
+            left["nextKnownCreditExpiry"]["remaining"].as_f64(),
+            Some(2.0)
+        );
+    }
 }

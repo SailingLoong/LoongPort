@@ -590,3 +590,57 @@ async fn late_official_pending_cannot_revive_cancelled_or_retired_flow() {
         }
     }
 }
+
+#[tokio::test]
+async fn same_identity_official_reauthorization_retains_native_snapshot_without_promoting_source() {
+    for version in [1, 2] {
+        let session = SecretSession::ephemeral().unwrap();
+        let binding = store::binding(&session).unwrap();
+        let mut value =
+            serde_json::to_value(super::native_account_tests::native_row_fixture()).unwrap();
+        if version == 2 {
+            value["account"]["native"]["version"] = json!(2);
+            value["account"]["native"]["incarnation"] =
+                json!("11111111-1111-4111-8111-111111111111");
+        }
+        let native: SavedAccount = serde_json::from_value(value).unwrap();
+        let original = serde_json::to_value(&native).unwrap()["account"]["native"].clone();
+        let uid = native.account.uid.clone();
+        store::save(&session, &binding, vec![native]).unwrap();
+        for expected_generation in [1, 2] {
+            let mut t = token();
+            t["data"]["domain"] = json!("www.workbuddy.cn");
+            let mut p = profile();
+            p["data"]["domain"] = json!("www.workbuddy.cn");
+            p["data"]["uid"] = json!(uid);
+            let transport = Fake(Mutex::new(
+                vec![
+                    (Endpoint::AuthState, auth_state()),
+                    (Endpoint::AuthToken, t),
+                    (Endpoint::Profile, p),
+                ]
+                .into(),
+            ));
+            let flow = begin(&session, &transport, LOGIN_NOW).await.unwrap();
+            finish(&session, &transport, &flow.flow_id, LOGIN_NOW + 1)
+                .await
+                .unwrap();
+            let rows = store::load(&session, &binding).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].generation, expected_generation);
+            assert!(rows[0].account.is_api());
+            assert_eq!(rows[0].account.api_token(), Ok(""));
+            assert!(rows[0].shared_authorization && rows[0].inference.is_some());
+            let wire = serde_json::to_value(&rows[0]).unwrap();
+            assert_eq!(wire["account"]["native"], original);
+            assert_eq!(wire["account"]["credential_version"], 1);
+            // Retention of original opaque bytes is not source authentication or native activation.
+            assert!(
+                !serde_json::to_string(&rows[0].view(binding.store_id(), "2026-10-29"))
+                    .unwrap()
+                    .contains("snapshot")
+            );
+            assert!(transport.0.lock().unwrap().is_empty());
+        }
+    }
+}

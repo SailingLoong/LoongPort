@@ -76,6 +76,14 @@ mod services;
 mod trae_accounts;
 #[cfg(any(feature = "gui", test))]
 mod workbuddy;
+// Headless protection/generation must inspect the same registered native journal.
+// Keep GUI account/HTTP/command modules excluded; these primitives expose no IPC.
+#[cfg(not(any(feature = "gui", test)))]
+mod workbuddy {
+    mod native;
+    pub(crate) mod native_owner;
+    mod native_transaction;
+}
 // Native account commands remain gated by the reviewed platform manifest.
 #[cfg(any(feature = "gui", test))]
 mod zcode_accounts;
@@ -2021,6 +2029,13 @@ pub fn run() {
             commands::vendor_refresh,
             commands::vendor_provision,
             commands::vendor_switch,
+            commands::vendor_prepare_connection,
+            commands::vendor_query_connection,
+            commands::vendor_preview_connection_catalog,
+            commands::vendor_preview_connection_review,
+            commands::vendor_review_connection,
+            commands::vendor_preview_new_connection_intent,
+            commands::vendor_confirm_new_connection_intent,
             commands::vendor_balance,
             commands::vendor_remove,
             commands::vendor_reorder,
@@ -2166,6 +2181,13 @@ pub fn run() {
             commands::delete_pi_prompt_template,
             // Pi native provider and session views
             commands::get_pi_current_state,
+            commands::preview_workbuddy_native_capture,
+            commands::capture_workbuddy_native_account,
+            commands::list_workbuddy_native_captures,
+            commands::activate_workbuddy_native_account,
+            commands::activate_workbuddy_native_with_restart,
+            commands::recover_workbuddy_native_switch,
+            commands::inspect_workbuddy_native_recovery,
             commands::list_workbuddy_accounts,
             commands::list_minimax_code_accounts,
             commands::refresh_minimax_code_account,

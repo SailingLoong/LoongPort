@@ -35,7 +35,10 @@ const needsReconciliation = (receipt: RelaySetupReceipt | null) =>
 
 /** The receipt is authoritative; the editable draft never mutates its facts.
  * Discovery/recovery are read-only. No effect runs preparation on mount. */
-export function useRelaySetup(relayId: number) {
+export function useRelaySetup(
+  relayId: number,
+  finishPending?: { readonly current: boolean },
+) {
   const scope = useRef<{
     relayId: number;
     recoveryId: string;
@@ -44,20 +47,34 @@ export function useRelaySetup(relayId: number) {
     version: number;
     operationId: string | null;
     receipt: RelaySetupReceipt | null;
+    needsReplay: boolean;
+    deferredError: string | null;
   } | null>(null);
   if (!scope.current || scope.current.relayId !== relayId) {
+    let remembered: string | null = null;
+    try {
+      remembered = localStorage.getItem(relaySetupOperationKey(relayId));
+    } catch {
+      // Recovery and dispatch below both fail closed if storage is unavailable.
+    }
     scope.current = {
       relayId,
       recoveryId: crypto.randomUUID(),
       pending: false,
       mounted: true,
       version: 0,
-      operationId: null,
+      operationId: remembered,
       receipt: null,
+      needsReplay: false,
+      deferredError: null,
     };
   }
   const owner = scope.current;
   const isActive = () => scope.current === owner && owner.mounted;
+  // Check synchronously before either setup or finish dispatches. React's
+  // rendered busy flag may not have committed when another handler runs.
+  const canStartOperation = () =>
+    isActive() && !owner.pending && !finishPending?.current;
   const discovery = useQuery({
     queryKey: ["relay-discovery", relayId],
     queryFn: () => relayApi.discoverTiers(relayId),
@@ -67,11 +84,16 @@ export function useRelaySetup(relayId: number) {
     // A cached account receipt is evidence, not proof that this mounted owner
     // has completed recovery. Each owner must perform its own native read.
     queryKey: ["relay-setup-recovery", relayId, owner.recoveryId],
-    // The native account lookup also works after storage/UUID loss. A cached
-    // client UUID must not hide a newer unresolved operation on this account.
+    // Read both the account journal and any previously dispatched UUID. An
+    // account-only null can race a command that has not journaled yet.
     queryFn: async () => {
       const version = owner.version;
-      return { receipt: await relayApi.getSetupOperation(relayId), version };
+      const pointer = localStorage.getItem(relaySetupOperationKey(relayId));
+      const [accountReceipt, pointerReceipt] = await Promise.all([
+        relayApi.getSetupOperation(relayId),
+        pointer ? relayApi.getSetupOperation(relayId, pointer) : null,
+      ]);
+      return { accountReceipt, pointerReceipt, pointer, version };
     },
     retry: false,
     refetchOnWindowFocus: false,
@@ -81,7 +103,9 @@ export function useRelaySetup(relayId: number) {
   });
   const [draft, setDraft] = useState<Partial<Record<AppId, string>>>({});
   const [receipt, setReceipt] = useState<RelaySetupReceipt | null>(null);
-  const [phase, setPhase] = useState<Phase>("selection");
+  const [phase, setPhase] = useState<Phase>(
+    owner.operationId !== null ? "result" : "selection",
+  );
   const [reviewed, setReviewed] = useState<ReviewedSelection | null>(null);
   const [connectionReview, setConnectionReview] = useState<{
     app: AppId;
@@ -92,33 +116,116 @@ export function useRelaySetup(relayId: number) {
   } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [unresolved, setUnresolved] = useState(false);
+  const [unresolved, setUnresolved] = useState(owner.operationId !== null);
   useEffect(() => {
     owner.mounted = true;
+    setBusy(owner.pending);
+    if (owner.needsReplay && owner.receipt) {
+      owner.needsReplay = false;
+      accept(owner.receipt);
+    }
+    if (owner.deferredError) {
+      setError(owner.deferredError);
+      setUnresolved(true);
+      setPhase("result");
+      owner.deferredError = null;
+    }
     return () => {
       owner.mounted = false;
     };
   }, [owner]);
 
+  const stateOwner = useRef(owner);
   useEffect(() => {
+    // Activity reconnects effects on reveal; only a different account owner
+    // resets the in-memory draft and review.
+    if (stateOwner.current === owner) return;
+    stateOwner.current = owner;
     setDraft({});
     setConnectionReview(null);
     setReceipt(null);
     setReviewed(null);
-    setPhase("selection");
-    setUnresolved(false);
+    setPhase(owner.operationId !== null ? "result" : "selection");
+    setUnresolved(owner.operationId !== null);
     setError(null);
     setBusy(false);
-  }, [relayId]);
+  }, [owner]);
   useEffect(() => {
-    if (recovery.data?.receipt && recovery.data.version === owner.version) {
-      accept(recovery.data.receipt, true);
+    const data = recovery.data;
+    if (!data || data.version !== owner.version || !isActive()) return;
+    let currentPointer: string | null;
+    try {
+      currentPointer = localStorage.getItem(relaySetupOperationKey(relayId));
+    } catch {
+      setUnresolved(true);
+      setError("recoveryFailed");
+      setPhase("result");
+      return;
     }
+    if (currentPointer !== data.pointer) {
+      owner.operationId = currentPointer ?? owner.operationId;
+      setUnresolved(true);
+      setError("recoveryConflict");
+      setPhase("result");
+      return;
+    }
+    if (data.pointer !== null) {
+      owner.operationId = data.pointer;
+      if (
+        !data.pointerReceipt ||
+        data.pointerReceipt.operationId !== data.pointer ||
+        (data.accountReceipt &&
+          data.accountReceipt.operationId !== data.pointer)
+      ) {
+        setUnresolved(true);
+        setError(
+          data.accountReceipt ? "recoveryConflict" : "recoveryUncertain",
+        );
+        setPhase("result");
+        return;
+      }
+      const next =
+        data.accountReceipt &&
+        data.accountReceipt.receiptRevision >
+          data.pointerReceipt.receiptRevision
+          ? data.accountReceipt
+          : data.pointerReceipt;
+      accept(next, true);
+    } else if (data.accountReceipt) accept(data.accountReceipt, true);
   }, [recovery.data, owner]);
 
   function accept(next: RelaySetupReceipt, fromRecovery = false) {
-    if (!isActive() || next.relayId !== relayId) return;
+    if (scope.current !== owner || next.relayId !== relayId) return;
     const prior = owner.receipt;
+    if (!owner.mounted) {
+      if (owner.operationId && owner.operationId !== next.operationId) {
+        owner.deferredError = "recoveryConflict";
+        return;
+      }
+      if (
+        prior?.operationId === next.operationId &&
+        prior.receiptRevision > next.receiptRevision
+      )
+        return;
+      // Preserve the actual receipt on its original owner. React state updates
+      // are deferred until this same view is active again.
+      owner.receipt = next;
+      owner.operationId = next.operationId;
+      owner.needsReplay = true;
+      owner.deferredError = null;
+      return;
+    }
+    // Reconnecting the same settled receipt is not a new result and must not
+    // displace a subsequent draft/review. Unresolved work still reconciles.
+    if (
+      fromRecovery &&
+      prior?.operationId === next.operationId &&
+      prior.receiptRevision === next.receiptRevision &&
+      !unresolved &&
+      !needsReconciliation(prior) &&
+      !needsReconciliation(next)
+    )
+      return;
     if (
       prior?.operationId === next.operationId &&
       prior.receiptRevision > next.receiptRevision
@@ -148,13 +255,43 @@ export function useRelaySetup(relayId: number) {
     setUnresolved(false);
     setPhase("result");
   }
-  function remember(operationId: string) {
-    owner.operationId = operationId;
-    // A convenience pointer only; native account recovery is always available.
+  // Only remove the operation we own; another window may have advanced it.
+  function forget(operationId: string): boolean {
     try {
-      localStorage.setItem(relaySetupOperationKey(relayId), operationId);
+      const key = relaySetupOperationKey(relayId);
+      const current = localStorage.getItem(key);
+      if (current !== null && current !== operationId) return false;
+      if (current !== null) localStorage.removeItem(key);
+      return localStorage.getItem(key) === null;
     } catch {
-      /* unavailable client storage cannot erase native journal facts */
+      return false;
+    }
+  }
+  function remember(operationId: string): boolean {
+    try {
+      const key = relaySetupOperationKey(relayId);
+      const current = localStorage.getItem(key);
+      if (current !== null) {
+        owner.operationId = current;
+        setUnresolved(true);
+        setError("recoveryConflict");
+        setPhase("result");
+        return false;
+      }
+      localStorage.setItem(key, operationId);
+      const stored = localStorage.getItem(key);
+      if (stored !== operationId) {
+        owner.operationId = stored;
+        setUnresolved(true);
+        setError("recoveryConflict");
+        setPhase("result");
+        return false;
+      }
+      owner.operationId = operationId;
+      return true;
+    } catch {
+      setError("operationStorageUnavailable");
+      return false;
     }
   }
   async function observeOriginal(
@@ -165,7 +302,9 @@ export function useRelaySetup(relayId: number) {
       const found = await relayApi.getSetupOperation(relayId, operationId);
       if (found) accept(found);
       else if (isActive()) {
-        if (rejection) {
+        if (rejection && forget(operationId)) {
+          // The pointer change invalidates any already-started recovery read.
+          owner.version += 1;
           // This invocation was rejected before operation creation. Preserve any
           // prior result; only the newly rejected draft can be reviewed again.
           owner.operationId = owner.receipt?.operationId ?? null;
@@ -213,8 +352,7 @@ export function useRelaySetup(relayId: number) {
   }
   async function confirmSelection() {
     if (
-      !isActive() ||
-      owner.pending ||
+      !canStartOperation() ||
       phase !== "review" ||
       !reviewed ||
       !recovery.isSuccess ||
@@ -226,12 +364,12 @@ export function useRelaySetup(relayId: number) {
       setError("discoveryChanged");
       return;
     }
+    const operationId = crypto.randomUUID();
+    if (!remember(operationId)) return;
     owner.pending = true;
     owner.version += 1;
     setBusy(true);
     setError(null);
-    const operationId = crypto.randomUUID();
-    remember(operationId);
     try {
       accept(
         await relayApi.prepareTiers({
@@ -242,7 +380,11 @@ export function useRelaySetup(relayId: number) {
         }),
       );
     } catch (cause) {
-      if (!isActive()) return;
+      if (!isActive()) {
+        if (scope.current === owner)
+          owner.deferredError = "preparationOutcomeUncertain";
+        return;
+      }
       setError("preparationOutcomeUncertain");
       setUnresolved(true);
       setPhase("result");
@@ -251,15 +393,25 @@ export function useRelaySetup(relayId: number) {
         isRelayPreparationRejection(cause, operationId) ? cause : undefined,
       );
     } finally {
-      if (isActive()) {
-        owner.pending = false;
-        setBusy(false);
-      }
+      owner.pending = false;
+      if (isActive()) setBusy(false);
     }
   }
   async function reconcile() {
-    const operationId = receipt?.operationId ?? owner.operationId;
-    if (!isActive() || owner.pending || !operationId) return;
+    const operationId = owner.operationId ?? receipt?.operationId;
+    if (!canStartOperation() || !operationId) return;
+    try {
+      const pointer = localStorage.getItem(relaySetupOperationKey(relayId));
+      if (pointer !== null && pointer !== operationId) {
+        setUnresolved(true);
+        setError("recoveryConflict");
+        return;
+      }
+    } catch {
+      setUnresolved(true);
+      setError("recoveryFailed");
+      return;
+    }
     owner.pending = true;
     owner.version += 1;
     setBusy(true);
@@ -267,20 +419,21 @@ export function useRelaySetup(relayId: number) {
     try {
       accept(await relayApi.reconcileSetupOperation(operationId));
     } catch {
-      if (!isActive()) return;
+      if (!isActive()) {
+        if (scope.current === owner)
+          owner.deferredError = "reconciliationFailed";
+        return;
+      }
       setError("reconciliationFailed");
       await observeOriginal(operationId);
     } finally {
-      if (isActive()) {
-        owner.pending = false;
-        setBusy(false);
-      }
+      owner.pending = false;
+      if (isActive()) setBusy(false);
     }
   }
   async function resumeFailed(apps: AppId[]) {
     if (
-      !isActive() ||
-      owner.pending ||
+      !canStartOperation() ||
       !receipt ||
       unresolved ||
       needsReconciliation(receipt) ||
@@ -311,15 +464,17 @@ export function useRelaySetup(relayId: number) {
         }),
       );
     } catch {
-      if (!isActive()) return;
+      if (!isActive()) {
+        if (scope.current === owner)
+          owner.deferredError = "preparationOutcomeUncertain";
+        return;
+      }
       setError("preparationOutcomeUncertain");
       setUnresolved(true);
       await observeOriginal(receipt.operationId);
     } finally {
-      if (isActive()) {
-        owner.pending = false;
-        setBusy(false);
-      }
+      owner.pending = false;
+      if (isActive()) setBusy(false);
     }
   }
   async function reviewConnection(
@@ -329,8 +484,7 @@ export function useRelaySetup(relayId: number) {
     const current = owner.receipt;
     const target = current?.targets.find((target) => target.app === app);
     if (
-      !isActive() ||
-      owner.pending ||
+      !canStartOperation() ||
       !recovery.isSuccess ||
       !current ||
       !target ||
@@ -369,6 +523,8 @@ export function useRelaySetup(relayId: number) {
         });
     } catch {
       if (isActive()) setError("connectionReviewFailed");
+      else if (scope.current === owner)
+        owner.deferredError = "connectionReviewFailed";
       await observeOriginal(current.operationId);
     } finally {
       owner.pending = false;
@@ -379,8 +535,7 @@ export function useRelaySetup(relayId: number) {
     const current = owner.receipt;
     const app = connectionReview?.app;
     if (
-      !isActive() ||
-      owner.pending ||
+      !canStartOperation() ||
       !current ||
       !app ||
       !connectionReview ||
@@ -423,7 +578,8 @@ export function useRelaySetup(relayId: number) {
       if (isActive()) {
         setError("applicationOutcomeUnknown");
         setConnectionReview(null);
-      }
+      } else if (scope.current === owner)
+        owner.deferredError = "applicationOutcomeUnknown";
       await observeOriginal(current.operationId);
     } finally {
       owner.pending = false;
@@ -441,6 +597,14 @@ export function useRelaySetup(relayId: number) {
       needsReconciliation(receipt)
     )
       return;
+    if (receipt && !forget(receipt.operationId)) {
+      setUnresolved(true);
+      setError("recoveryConflict");
+      setPhase("result");
+      return;
+    }
+    if (receipt) owner.version += 1;
+    owner.operationId = null;
     setConnectionReview(null);
     setDraft({});
     setReviewed(null);
@@ -455,6 +619,7 @@ export function useRelaySetup(relayId: number) {
   return {
     discovery,
     recovery,
+    canStartOperation,
     draft,
     setDraft,
     receipt,

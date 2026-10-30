@@ -1,4 +1,7 @@
-use super::{checkin::ClaimState, credits::Credits};
+use super::{
+    checkin::ClaimState,
+    credits::{CreditExpiryStatus, CreditExpiryView, Credits},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -33,20 +36,15 @@ impl Domain {
         }
     }
 }
-// Credentials are backend-only. Deliberately no Debug implementation.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+// Backend-only credentials, without Debug or DTO serialization.
+mod credential;
+pub(crate) use credential::Credential;
+#[derive(Clone)]
 pub(crate) struct Account {
     pub uid: String,
     pub domain: Domain,
     pub label: String,
-    pub token: String,
-}
-impl Drop for Account {
-    fn drop(&mut self) {
-        use zeroize::Zeroize;
-        self.token.zeroize();
-    }
+    pub credential: Credential,
 }
 impl Account {
     pub fn id(&self, owner: &str) -> String {
@@ -65,6 +63,34 @@ pub(crate) struct Attempt {
     pub before: Option<f64>,
     pub expected: Option<f64>,
     pub receipt: ClaimState,
+}
+/// One local reconciliation fact, persisted by the original claim owner.
+/// receipt_id is internal correlation only, never a provider receipt or replay permit.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct SuccessfulClaimFact {
+    pub confirmed_at_ms: i64,
+    pub credited: f64,
+    pub unit: Option<String>,
+    pub receipt_id: String,
+}
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SuccessfulClaimView {
+    pub confirmed_at_ms: Option<i64>,
+    pub time_source: Option<&'static str>,
+    pub credited: Option<f64>,
+    pub unit: Option<String>,
+}
+impl SuccessfulClaimFact {
+    fn view(&self) -> SuccessfulClaimView {
+        SuccessfulClaimView {
+            confirmed_at_ms: Some(self.confirmed_at_ms),
+            time_source: Some("localReconciled"),
+            credited: Some(self.credited),
+            unit: self.unit.clone(),
+        }
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -93,6 +119,8 @@ pub(crate) struct SavedAccount {
     pub(super) inference_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) credit_models: Option<super::credits::CreditModelSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) last_successful_claim: Option<SuccessfulClaimFact>,
     pub account: Account,
     pub credits: Credits,
     pub claim_state: ClaimState,
@@ -120,6 +148,7 @@ impl SavedAccount {
             inference_consent: None,
             inference_revision: 0,
             credit_models: None,
+            last_successful_claim: None,
             account,
             credits: Credits::default(),
             claim_state: ClaimState::Unconfirmed,
@@ -129,10 +158,29 @@ impl SavedAccount {
         }
     }
     pub(super) fn inference_allowed(&self) -> bool {
-        self.inference_consent.unwrap_or(self.inference.is_some())
+        self.account.is_api() && self.inference_consent.unwrap_or(self.inference.is_some())
     }
     pub fn credential_binding(&self) -> String {
         let mut hash = Sha256::new();
+        let api_token = match &self.account.credential {
+            Credential::Api(token) => token.as_str(),
+            Credential::ApiWithNative { token, snapshot } => {
+                hash.update(b"workbuddy:api-native-auto:v1");
+                hash.update(credential::fingerprint_with_native(token, snapshot));
+                token.as_str()
+            }
+            Credential::NativeOnly(_) => {
+                for value in [
+                    "workbuddy:native-only:v1",
+                    self.account.domain.host(),
+                    &self.account.uid,
+                ] {
+                    hash.update((value.len() as u64).to_be_bytes());
+                    hash.update(value.as_bytes());
+                }
+                return hex::encode(hash.finalize());
+            }
+        };
         for value in [
             self.account.domain.host(),
             &self.account.uid,
@@ -142,7 +190,7 @@ impl SavedAccount {
                     .map(|grant| grant.id())
                     .unwrap_or("")
             } else {
-                &self.account.token
+                api_token
             },
         ] {
             hash.update((value.len() as u64).to_be_bytes());
@@ -151,16 +199,45 @@ impl SavedAccount {
         hex::encode(hash.finalize())
     }
     pub fn automatic_enabled(&self) -> bool {
-        self.auto_claim_enabled
+        self.account.is_api()
+            && self.auto_claim_enabled
             && self.auto_claim_policy_version == AUTO_CLAIM_POLICY_VERSION
             && self.auto_claim_credential.as_deref() == Some(&self.credential_binding())
     }
     pub fn can_set_automatic(&self) -> bool {
-        (if self.shared_authorization {
-            self.inference.is_some()
-        } else {
-            !self.account.token.is_empty()
-        }) && self.claim_state != ClaimState::NeedsVerification
+        self.account.is_api()
+            && (if self.shared_authorization {
+                self.inference.is_some()
+            } else {
+                self.account
+                    .api_token()
+                    .is_ok_and(|token| !token.is_empty())
+            })
+            && self.claim_state != ClaimState::NeedsVerification
+    }
+    pub(super) fn validate_for_store(&self) -> Result<(), Failure> {
+        self.account.validate_credential()?;
+        if matches!(&self.account.credential, Credential::ApiWithNative { token, .. } if token.is_empty())
+            && !(self.shared_authorization
+                && self
+                    .inference
+                    .as_ref()
+                    .is_some_and(|grant| super::inference::valid_grant(grant, self)))
+        {
+            return Err(Failure::StorageUnavailable);
+        }
+        if !self.account.is_api()
+            && (self.auto_claim_enabled
+                || self.auto_claim_credential.is_some()
+                || self.inference.is_some()
+                || self.shared_authorization
+                || self.inference_consent.is_some()
+                || self.pending.is_some()
+                || self.attempted_day.is_some())
+        {
+            return Err(Failure::StorageUnavailable);
+        }
+        Ok(())
     }
     pub fn view(&self, owner: &str, day: &str) -> AccountView {
         let same_day = self.claim_day == day;
@@ -175,8 +252,15 @@ impl SavedAccount {
             credits: self.credits.for_display(),
             claim_state: state,
             credited: if same_day { self.credited } else { None },
-            can_refresh: true,
-            can_claim: self.pending.is_none()
+            last_successful_claim: self
+                .last_successful_claim
+                .as_ref()
+                .map(SuccessfulClaimFact::view),
+            credit_expiry_status: CreditExpiryStatus::Unavailable,
+            next_known_credit_expiry: None,
+            can_refresh: self.account.is_api(),
+            can_claim: self.account.is_api()
+                && self.pending.is_none()
                 && self.attempted_day.as_deref().is_none_or(|old| old < day)
                 && matches!(state, ClaimState::Available | ClaimState::Unconfirmed),
             generation: self.generation,
@@ -204,6 +288,9 @@ pub(crate) struct AccountView {
     pub credited: Option<f64>,
     pub can_refresh: bool,
     pub can_claim: bool,
+    pub last_successful_claim: Option<SuccessfulClaimView>,
+    pub credit_expiry_status: CreditExpiryStatus,
+    pub next_known_credit_expiry: Option<CreditExpiryView>,
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

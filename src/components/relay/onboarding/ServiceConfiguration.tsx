@@ -6,6 +6,7 @@ import { getAppDisplayName, PROVIDER_STORE_APP_IDS } from "@/config/appConfig";
 import type { AppId } from "@/lib/api";
 import { isTextEditableTarget } from "@/utils/domUtils";
 import { extractErrorMessage } from "@/utils/errorUtils";
+import { VendorConnectionReviewDialog } from "../VendorConnectionReviewDialog";
 import { SwitchTierConfirmDialog } from "../SwitchTierConfirmDialog";
 import type { ConnectedService } from "./useServiceOnboarding";
 import { useVendorServiceConfiguration } from "./useServiceConfiguration";
@@ -55,6 +56,9 @@ function VendorServiceConfiguration({
     results,
     completionError,
     reapply,
+    pendingReview,
+    confirmReview,
+    cancelReview,
     confirmation,
     catalog,
     quitRequired,
@@ -221,6 +225,20 @@ function VendorServiceConfiguration({
           )}
         </Button>
       </div>
+      <VendorConnectionReviewDialog
+        targetName={
+          pendingReview
+            ? (choices.data?.find(
+                (choice) =>
+                  choice.app === pendingReview.app &&
+                  choice.id === pendingReview.id,
+              )?.name ?? pendingReview.id)
+            : null
+        }
+        disabled={busy}
+        onCancel={cancelReview}
+        onConfirm={confirmReview}
+      />
       <SwitchTierConfirmDialog
         targetName={confirmation}
         catalog={catalog}

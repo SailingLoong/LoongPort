@@ -26,7 +26,7 @@ impl Fixture {
                     uid: format!("synthetic-{id}"),
                     domain: Domain::WorkBuddy,
                     label: format!("Synthetic {id}"),
-                    token: format!("old-checkin-{id}"),
+                    credential: format!("old-checkin-{id}").into(),
                 });
                 if authorized {
                     row.inference = Some(Authorization {
@@ -202,7 +202,7 @@ async fn explicit_new_grant_binds_only_matching_original_row_and_keeps_checkin()
     let b = store::binding(&f.session).unwrap();
     let rows = store::load(&f.session, &b).unwrap();
     assert_eq!(rows.len(), 2);
-    assert!(rows[0].account.token.is_empty());
+    assert!(rows[0].account.api_token().unwrap().is_empty());
     assert!(rows[0].shared_authorization);
     assert!(rows[0].inference_allowed());
     assert_eq!(rows[0].account.id(b.store_id()), f.ids[0]);
@@ -247,7 +247,7 @@ async fn wrong_uid_or_domain_or_platform_never_binds_or_migrates() {
     let f = Fixture::new(false);
     let b = store::binding(&f.session).unwrap();
     let rows = store::load(&f.session, &b).unwrap();
-    let owner = Owner::from_row(&f.session, b, &rows[0]);
+    let owner = Owner::from_row(&f.session, b, &rows[0]).unwrap();
     let t = json!({"code":0,"data":{"accessToken":"synthetic","refreshToken":"synthetic","domain":"www.workbuddy.cn","expiresIn":3600,"platform":"workbuddy-ai"}});
     assert!(new_grant(
         &owner,
@@ -1779,4 +1779,165 @@ pub(crate) async fn verify_private_protocol(case: &str) {
         }
         _ => panic!("unknown private protocol regression"),
     }
+}
+
+#[tokio::test]
+async fn native_only_credential_cannot_authorize_lease_or_dispatch_shared_http() {
+    let f = Fixture::new(true);
+    let binding = store::binding(&f.session).unwrap();
+    let old = store::load(&f.session, &binding).unwrap();
+    let native = crate::workbuddy::native_account_tests::native_row_fixture();
+    let id = native.account.id(binding.store_id());
+    store::save(&f.session, &binding, vec![native.clone()]).unwrap();
+    let before = std::fs::read(f.session.root().join(store::FILE)).unwrap();
+    let t = Fake::default();
+    assert!(matches!(
+        PendingAuthorization::begin_protocol_with(f.session.clone(), &id, &t, 1000).await,
+        Err(Failure::UnsupportedContext)
+    ));
+    assert!(matches!(
+        Lease::acquire_with_expected(f.session.clone(), &id, true, None).await,
+        Err(Failure::UnsupportedContext)
+    ));
+    assert_eq!(
+        set_inference_consent(&f.session, &id, false).await,
+        Err(Failure::UnsupportedContext)
+    );
+    let mut forged = native;
+    forged.inference = old[0].inference.clone();
+    forged.shared_authorization = true;
+    assert!(!valid_grant(forged.inference.as_ref().unwrap(), &forged));
+    assert!(store::save(&f.session, &binding, vec![forged.clone()]).is_err());
+    let clock = crate::workbuddy::clock::FixedClock(1000);
+    assert!(matches!(
+        shared_account::request_with(
+            &f.session,
+            &forged,
+            crate::workbuddy::protocol::Endpoint::Summary,
+            None,
+            None,
+            &clock,
+            &t
+        )
+        .await,
+        Err(crate::workbuddy::protocol::DispatchFailure::NotDispatched(
+            Failure::UnsupportedContext
+        ))
+    ));
+    assert_eq!(t.count(), 0);
+    assert!(std::fs::read(f.session.root().join(store::FILE)).unwrap() == before);
+}
+
+#[tokio::test]
+async fn legacy_empty_api_token_shared_grant_remains_usable() {
+    let f = Fixture::new(true);
+    let binding = store::binding(&f.session).unwrap();
+    let mut rows = store::load(&f.session, &binding).unwrap();
+    rows[0].account.clear_api_token().unwrap();
+    rows[0].shared_authorization = true;
+    rows[0].inference_consent = Some(true);
+    let expected = serde_json::to_value(&rows[0]).unwrap();
+    assert_eq!(expected["account"]["token"], "");
+    assert!(expected["account"].get("native").is_none());
+    store::save(&f.session, &binding, rows).unwrap();
+    let reopened = store::load(&f.session, &binding).unwrap();
+    assert_eq!(serde_json::to_value(&reopened[0]).unwrap(), expected);
+    assert!(reopened[0].account.is_api());
+    assert_eq!(reopened[0].account.api_token(), Ok(""));
+    assert!(
+        reopened[0]
+            .view(binding.store_id(), "2026-10-29")
+            .can_refresh
+    );
+    assert!(
+        Lease::acquire_with_expected(f.session.clone(), &f.ids[0], true, None)
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn retained_native_image_and_original_generation_fence_old_api_owner() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let f = Fixture::new(true);
+    let binding = store::binding(&f.session).unwrap();
+    let mut api = store::load(&f.session, &binding).unwrap().remove(0);
+    let mut native = crate::workbuddy::native_account_tests::native_row_fixture();
+    api.account.uid = native.account.uid.clone();
+    api.inference.as_mut().unwrap().uid = native.account.uid.clone();
+    native
+        .account
+        .replace_api_preserving_native(api.account)
+        .unwrap();
+    api.account = native.account;
+    store::save(&f.session, &binding, vec![api]).unwrap();
+    let rows = store::load(&f.session, &binding).unwrap();
+    let owner = Owner::from_row(&f.session, binding.clone(), &rows[0]).unwrap();
+    let mut wire = serde_json::to_value(&rows[0]).unwrap();
+    let mut bytes = STANDARD
+        .decode(wire["account"]["native"]["snapshot"].as_str().unwrap())
+        .unwrap();
+    bytes.push(b'\n');
+    wire["account"]["native"]["snapshot"] = json!(STANDARD.encode(bytes));
+    let changed: SavedAccount = serde_json::from_value(wire).unwrap();
+    store::save(&f.session, &binding, vec![changed]).unwrap();
+    assert!(matches!(
+        owner.rows(&f.session),
+        Err(Failure::ExpiredAuthorization)
+    ));
+    let mut rows = store::load(&f.session, &binding).unwrap();
+    let owner = Owner::from_row(&f.session, binding.clone(), &rows[0]).unwrap();
+    rows[0].generation += 1;
+    store::save(&f.session, &binding, rows).unwrap();
+    assert!(matches!(
+        owner.rows(&f.session),
+        Err(Failure::ExpiredAuthorization)
+    ));
+    let rows = store::load(&f.session, &binding).unwrap();
+    let owner = Owner::from_row(&f.session, binding.clone(), &rows[0]).unwrap();
+    store::save(
+        &f.session,
+        &binding,
+        vec![crate::workbuddy::native_account_tests::native_row_fixture()],
+    )
+    .unwrap();
+    assert!(matches!(
+        owner.rows(&f.session),
+        Err(Failure::ExpiredAuthorization)
+    ));
+}
+
+#[tokio::test]
+async fn native_v2_lifetime_change_retires_original_http_owner() {
+    let f = Fixture::new(true);
+    let binding = store::binding(&f.session).unwrap();
+    let mut api = store::load(&f.session, &binding).unwrap().remove(0);
+    let mut value =
+        serde_json::to_value(crate::workbuddy::native_account_tests::native_row_fixture()).unwrap();
+    value["account"]["native"]["version"] = json!(2);
+    value["account"]["native"]["incarnation"] = json!("11111111-1111-4111-8111-111111111111");
+    let mut native: SavedAccount = serde_json::from_value(value).unwrap();
+    api.account.uid = native.account.uid.clone();
+    api.inference.as_mut().unwrap().uid = native.account.uid.clone();
+    native
+        .account
+        .replace_api_preserving_native(api.account)
+        .unwrap();
+    api.account = native.account;
+    store::save(&f.session, &binding, vec![api]).unwrap();
+    let rows = store::load(&f.session, &binding).unwrap();
+    let owner = Owner::from_row(&f.session, binding.clone(), &rows[0]).unwrap();
+    assert!(owner.rows(&f.session).is_ok());
+    let mut value = serde_json::to_value(&rows[0]).unwrap();
+    value["account"]["native"]["incarnation"] = json!("22222222-2222-4222-8222-222222222222");
+    let changed: SavedAccount = serde_json::from_value(value).unwrap();
+    assert_ne!(
+        changed.account.http_fingerprint().unwrap(),
+        rows[0].account.http_fingerprint().unwrap()
+    );
+    store::save(&f.session, &binding, vec![changed]).unwrap();
+    assert!(matches!(
+        owner.rows(&f.session),
+        Err(Failure::ExpiredAuthorization)
+    ));
 }

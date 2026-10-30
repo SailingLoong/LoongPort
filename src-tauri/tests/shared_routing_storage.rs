@@ -19,6 +19,10 @@ storage_case!(
     "workbuddy"
 );
 storage_case!(
+    restored_plaintext_workbuddy_keeps_original_ordered_consumers,
+    "workbuddy_restore"
+);
+storage_case!(
     plaintext_openrouter_keeps_original_cross_app_auth,
     "openrouter"
 );

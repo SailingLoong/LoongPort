@@ -4,6 +4,112 @@ use crate::provider::{Provider, ProviderMeta};
 use axum::http::StatusCode;
 use serde_json::{json, Value};
 
+#[derive(Clone)]
+pub(crate) struct PhaseTrace {
+    id: u64,
+    start: std::time::Instant,
+}
+
+impl PhaseTrace {
+    pub(crate) fn from_headers(headers: &http::HeaderMap) -> Option<Self> {
+        let id = headers
+            .get("x-loopback-fixture-id")?
+            .to_str()
+            .ok()?
+            .parse()
+            .ok()?;
+        Some(Self {
+            id,
+            start: std::time::Instant::now(),
+        })
+    }
+
+    pub(crate) fn emit(&self, phase: &'static str) {
+        eprintln!(
+            "loopback server phase={phase} id={} elapsed_ms={}",
+            self.id,
+            self.start.elapsed().as_millis()
+        );
+    }
+}
+
+tokio::task_local! { static GUARD_TRACE: Option<PhaseTrace>; }
+
+pub(crate) async fn traced_guard<F: std::future::Future>(
+    trace: Option<PhaseTrace>,
+    future: F,
+) -> F::Output {
+    GUARD_TRACE.scope(trace, future).await
+}
+
+pub(crate) fn guard_phase(phase: &'static str) {
+    let _ = GUARD_TRACE.try_with(|trace| {
+        if let Some(trace) = trace {
+            trace.emit(phase);
+        }
+    });
+}
+
+// Emit only known error class names and boolean flags, never error text or URLs.
+fn safe_request_error(error: &reqwest::Error) -> String {
+    let mut classes = Vec::new();
+    let mut current = std::error::Error::source(error);
+    while let Some(source) = current {
+        classes.push(if source.is::<std::io::Error>() {
+            "io"
+        } else if source.is::<hyper::Error>() {
+            "hyper"
+        } else if source.is::<hyper_util::client::legacy::Error>() {
+            "hyper_util_legacy"
+        } else if source.is::<tokio::time::error::Elapsed>() {
+            "tokio_elapsed"
+        } else if source.is::<reqwest::Error>() {
+            "reqwest"
+        } else {
+            "other"
+        });
+        current = source.source();
+    }
+    format!(
+        "timeout={} connect={} request={} causes={classes:?}",
+        error.is_timeout(),
+        error.is_connect(),
+        error.is_request()
+    )
+}
+
+#[tokio::test]
+async fn loopback_diagnostic_classifies_timeout_without_url_disclosure() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let (_stream, _) = listener.accept().await.unwrap();
+        std::future::pending::<()>().await;
+    });
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_millis(30))
+        .build()
+        .unwrap()
+        .get(format!("http://{address}/private-path?key=private-query"))
+        .send()
+        .await;
+    task.abort();
+    let error = match response {
+        Err(error) => error,
+        Ok(_) => panic!("timeout fixture unexpectedly returned a response"),
+    };
+    let summary = safe_request_error(&error);
+    assert!(
+        error.is_timeout(),
+        "local fixture must produce a real timeout"
+    );
+    assert!(summary.contains("timeout=true"));
+    assert!(!summary.contains("private-path"));
+    assert!(!summary.contains("private-query"));
+    assert!(!summary.contains(&address.to_string()));
+}
+
 /// Regression for #3787: a provider accidentally pointing at the proxy must
 /// fail before it creates another request, even with a dynamically bound port.
 #[tokio::test]
@@ -51,8 +157,13 @@ async fn loopback_wildcard_rejects_local_interface_dns_alias() {
 }
 
 async fn assert_rejected(listen_address: &str, hosts: &[&str]) {
+    let fixture_start = std::time::Instant::now();
     let _ = rustls::crypto::ring::default_provider().install_default();
     let db = Arc::new(Database::memory().expect("memory database"));
+    eprintln!(
+        "loopback fixture phase=database elapsed_ms={}",
+        fixture_start.elapsed().as_millis()
+    );
     let proxy = ProxyServer::new(
         ProxyConfig {
             listen_port: 0,
@@ -66,6 +177,10 @@ async fn assert_rejected(listen_address: &str, hosts: &[&str]) {
         Arc::new(super::super::model_alignment::ModelAlignmentAlerts::new()),
     );
     let info = proxy.start().await.expect("start proxy");
+    eprintln!(
+        "loopback fixture phase=first_listener elapsed_ms={}",
+        fixture_start.elapsed().as_millis()
+    );
     // A second live instance changes the legacy global proxy port. The guard
     // must keep using this request's actual listener owner.
     let other = ProxyServer::new(
@@ -81,6 +196,10 @@ async fn assert_rejected(listen_address: &str, hosts: &[&str]) {
         Arc::new(super::super::model_alignment::ModelAlignmentAlerts::new()),
     );
     let other_info = other.start().await.unwrap();
+    eprintln!(
+        "loopback fixture phase=second_listener elapsed_ms={}",
+        fixture_start.elapsed().as_millis()
+    );
     assert_ne!(info.port, other_info.port);
     let client_host = if listen_address.contains(':') {
         "[::1]"
@@ -93,6 +212,8 @@ async fn assert_rejected(listen_address: &str, hosts: &[&str]) {
         .build()
         .unwrap();
     for (index, host) in hosts.iter().enumerate() {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let trace_id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let full_url = index % 2 == 1;
         let stream = index % 2 == 0;
         let base_url = if full_url {
@@ -115,9 +236,14 @@ async fn assert_rejected(listen_address: &str, hosts: &[&str]) {
         });
         db.save_provider("codex", &provider).unwrap();
         db.set_current_provider("codex", &provider.id).unwrap();
+        eprintln!(
+            "loopback fixture phase=provider_ready id={trace_id} index={index} elapsed_ms={}",
+            fixture_start.elapsed().as_millis()
+        );
         let before = proxy.get_status().await.total_requests;
         let request = client
             .post(format!("http://{}:{}/v1/responses", client_host, info.port))
+            .header("x-loopback-fixture-id", trace_id.to_string())
             .json(&json!({
                 "model": "gpt-5",
                 "stream": stream,
@@ -125,13 +251,21 @@ async fn assert_rejected(listen_address: &str, hosts: &[&str]) {
             }));
         // Bound the regression itself if the guard is ever removed: stop
         // after the first internal request instead of letting the loop grow.
+        eprintln!(
+            "loopback fixture phase=request_ready id={trace_id} index={index} fixture_elapsed_ms={}",
+            fixture_start.elapsed().as_millis()
+        );
+        let request_start = std::time::Instant::now();
         let response = tokio::select! {
             response = request.send() => match response {
                 Ok(response) => response,
                 Err(error) => {
+                    let request_elapsed = request_start.elapsed().as_millis();
+                    let fixture_elapsed = fixture_start.elapsed().as_millis();
+                    let summary = safe_request_error(&error);
                     let status = proxy.get_status().await;
                     proxy.stop().await.unwrap();
-                    panic!("request failed: {error}; total_requests={}, active_connections={}", status.total_requests, status.active_connections);
+                    panic!("request failed: {summary}; id={trace_id}; index={index}; request_elapsed_ms={request_elapsed}; fixture_elapsed_ms={fixture_elapsed}; total_requests={}, active_connections={}", status.total_requests, status.active_connections);
                 }
             },
             _ = async {
@@ -143,9 +277,16 @@ async fn assert_rejected(listen_address: &str, hosts: &[&str]) {
                 panic!("provider request looped back into the proxy");
             }
         };
+        eprintln!("loopback fixture phase=response_headers id={trace_id} index={index} request_elapsed_ms={} fixture_elapsed_ms={}", request_start.elapsed().as_millis(), fixture_start.elapsed().as_millis());
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let error: Value = response.json().await.unwrap();
-        assert!(error.to_string().contains("own proxy listener"), "{error}");
+        let error: Value = response.json().await.unwrap_or_else(|error| {
+            panic!("response body read failed: {}", safe_request_error(&error))
+        });
+        eprintln!("loopback fixture phase=response_body id={trace_id} index={index} request_elapsed_ms={} fixture_elapsed_ms={}", request_start.elapsed().as_millis(), fixture_start.elapsed().as_millis());
+        assert!(
+            error.to_string().contains("own proxy listener"),
+            "unexpected rejection body"
+        );
         for secret in [
             "upstream-secret",
             "synthetic-user",
@@ -166,6 +307,10 @@ async fn assert_rejected(listen_address: &str, hosts: &[&str]) {
         })
         .await
         .expect("rejected request releases its connection");
+        eprintln!(
+            "loopback fixture phase=connection_released id={trace_id} index={index} fixture_elapsed_ms={}",
+            fixture_start.elapsed().as_millis()
+        );
     }
     other.stop().await.unwrap();
     proxy.stop().await.unwrap();

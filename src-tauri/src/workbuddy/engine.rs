@@ -7,6 +7,7 @@ use super::{
     store,
 };
 use crate::secrets::{session::SecretSession, storage::StorageIdentity};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, OnceLock, Weak},
@@ -36,12 +37,18 @@ pub(crate) struct Engine<'a, T: Transport> {
     pub clock: &'a dyn super::clock::Clock,
 }
 impl<T: Transport> Engine<'_, T> {
+    fn account_view(&self, row: &SavedAccount, owner: &str) -> AccountView {
+        let now = self.clock.now_ms();
+        let mut view = row.view(owner, &today(now));
+        (view.credit_expiry_status, view.next_known_credit_expiry) = credits::card_expiry(row, now);
+        view
+    }
     pub async fn list(&self) -> Result<Vec<AccountView>, Failure> {
         let _owner = crate::services::sync_protocol::sync_mutex().lock().await;
         let binding = store::binding(self.session)?;
         Ok(store::load(self.session, &binding)?
             .iter()
-            .map(|r| r.view(binding.store_id(), &today(self.clock.now_ms())))
+            .map(|r| self.account_view(r, binding.store_id()))
             .collect())
     }
     async fn request(
@@ -50,7 +57,7 @@ impl<T: Transport> Engine<'_, T> {
         e: Endpoint,
         snapshot: &SavedAccount,
     ) -> serde_json::Value {
-        if store::binding(self.session).ok().as_ref() != Some(b) {
+        if !snapshot.account.is_api() || store::binding(self.session).ok().as_ref() != Some(b) {
             return serde_json::json!({});
         }
         if snapshot.shared_authorization {
@@ -99,15 +106,22 @@ impl<T: Transport> Engine<'_, T> {
         rows: Vec<SavedAccount>,
         index: usize,
     ) -> Result<AccountView, Failure> {
-        let view = rows[index].view(b.store_id(), &today(self.clock.now_ms()));
+        let view = self.account_view(&rows[index], b.store_id());
         store::save(self.session, b, rows)?;
         Ok(view)
     }
-    fn resolve_pending(&self, row: &mut SavedAccount, state: ClaimState, credits: &Credits) {
+    fn resolve_pending(
+        &self,
+        row: &mut SavedAccount,
+        state: ClaimState,
+        credits: &Credits,
+        owner: &str,
+    ) {
         let Some(attempt) = row.pending.as_ref() else {
             return;
         };
-        if attempt.day != today(self.clock.now_ms()) {
+        let confirmed_at_ms = self.clock.now_ms();
+        if attempt.day != today(confirmed_at_ms) {
             // A previous day's receipt cannot prove today's check-in.
             // Today's status cannot resolve an older write with an uncertain outcome.
             row.claim_state = ClaimState::Unconfirmed;
@@ -126,6 +140,37 @@ impl<T: Transport> Engine<'_, T> {
             row.claim_state = ClaimState::NeedsVerification;
             row.credited = None;
             return;
+        }
+        // The original reconciliation, not status/day/refresh alone, establishes
+        // a new fact. Derive a local correlation ID from its existing one-per-day
+        // attempt; no new durable attempt/epoch/replay protocol is introduced.
+        if result == ClaimState::Claimed {
+            if let Some(amount) = credited {
+                let mut hash = Sha256::new();
+                for value in [
+                    "workbuddy:claim-confirmed:v1",
+                    &row.account.id(owner),
+                    &attempt.day,
+                ] {
+                    hash.update((value.len() as u64).to_be_bytes());
+                    hash.update(value.as_bytes());
+                }
+                let receipt_id = hex::encode(hash.finalize());
+                if row
+                    .last_successful_claim
+                    .as_ref()
+                    .is_none_or(|old| old.receipt_id != receipt_id)
+                {
+                    row.last_successful_claim = Some(SuccessfulClaimFact {
+                        confirmed_at_ms,
+                        credited: amount,
+                        unit: (row.account.domain == Domain::WorkBuddy)
+                            .then(|| credits::claim_unit(credits))
+                            .flatten(),
+                        receipt_id,
+                    });
+                }
+            }
         }
         row.claim_state = result;
         row.credited = credited;
@@ -147,6 +192,7 @@ impl<T: Transport> Engine<'_, T> {
         snapshot: &SavedAccount,
         endpoint: Endpoint,
     ) -> Result<serde_json::Value, Failure> {
+        snapshot.account.api_token()?;
         if snapshot.shared_authorization {
             self.check_epoch(b, epoch)?;
             return Ok(self.request(b, endpoint, snapshot).await);
@@ -208,6 +254,7 @@ impl<T: Transport> Engine<'_, T> {
                 today(self.clock.now_ms()),
             )
         };
+        snapshot.account.api_token()?;
         // Retain the account lease, but never retain the shared owner over HTTP.
         let summary = self
             .refresh_read(&b, epoch, &snapshot, Endpoint::Summary)
@@ -240,10 +287,10 @@ impl<T: Transport> Engine<'_, T> {
         if read_day != day {
             // The final owner wait can cross midnight after status() returned.
             // Keep the latest row intact instead of relabeling yesterday's read.
-            return Ok(rows[i].view(b.store_id(), &day));
+            return Ok(self.account_view(&rows[i], b.store_id()));
         }
         if rows[i].pending.is_some() {
-            self.resolve_pending(&mut rows[i], status, &credits);
+            self.resolve_pending(&mut rows[i], status, &credits, b.store_id());
         } else if rows[i].claim_day != day
             || !(rows[i].claim_state == ClaimState::Claimed && status == ClaimState::AlreadyClaimed)
         {
@@ -259,7 +306,7 @@ impl<T: Transport> Engine<'_, T> {
     }
     pub async fn refresh_all(&self) -> Result<Vec<AccountView>, Failure> {
         let rows = self.list().await?;
-        for row in rows {
+        for row in rows.into_iter().filter(|row| row.can_refresh) {
             match self.refresh(&row.id).await {
                 Ok(_) | Err(Failure::Busy) => {}
                 Err(e) => return Err(e),
@@ -317,7 +364,7 @@ impl<T: Transport> Engine<'_, T> {
                     .as_deref()
                     .is_some_and(|d| d >= operation_day.as_str()))
         {
-            return Ok(snapshot.view(b.store_id(), &operation_day));
+            return Ok(self.account_view(&snapshot, b.store_id()));
         }
         let status = self.status(&b, &snapshot).await;
         let credits = if snapshot.pending.is_some() || status == ClaimState::Available {
@@ -338,7 +385,7 @@ impl<T: Transport> Engine<'_, T> {
                 rows[i].credits.observed_generation = Some(rows[i].generation);
             }
             if rows[i].pending.is_some() {
-                self.resolve_pending(&mut rows[i], status, &credits);
+                self.resolve_pending(&mut rows[i], status, &credits, b.store_id());
                 return self.persist(&b, rows, i);
             }
             rows[i].claim_state = status;
@@ -408,7 +455,7 @@ impl<T: Transport> Engine<'_, T> {
         let mut rows = store::load(self.session, &b)?;
         let i = matched(&rows, &b, &prepared)?;
         if today(self.clock.now_ms()) == operation_day {
-            self.resolve_pending(&mut rows[i], after, &credits);
+            self.resolve_pending(&mut rows[i], after, &credits, b.store_id());
         } else {
             rows[i].claim_day = today(self.clock.now_ms());
             rows[i].claim_state = ClaimState::Unconfirmed;
@@ -495,7 +542,7 @@ pub(super) fn matched(
         .position(|r| {
             r.account.id(b.store_id()) == expected.account.id(b.store_id())
                 && r.generation == expected.generation
-                && r.account.token == expected.account.token
+                && r.account.credential == expected.account.credential
         })
         .ok_or(Failure::ExpiredAuthorization)
 }
@@ -503,6 +550,7 @@ pub(super) fn automatic_admission(
     row: &SavedAccount,
     policy: Option<(u64, u64)>,
 ) -> Result<(), Failure> {
+    row.account.api_token()?;
     if policy.is_some_and(|(generation, revision)| {
         !row.automatic_enabled()
             || !row.can_set_automatic()

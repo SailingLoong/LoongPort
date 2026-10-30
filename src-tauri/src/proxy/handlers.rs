@@ -901,11 +901,23 @@ async fn handle_responses_for_app(
     let uri = parts.uri;
     let mut headers = parts.headers;
     let mut extensions = parts.extensions;
+    #[cfg(test)]
+    let trace = extensions
+        .get::<super::server::loopback_tests::PhaseTrace>()
+        .cloned();
+    #[cfg(test)]
+    if let Some(trace) = &trace {
+        trace.emit("body_read_start");
+    }
     let body_bytes = req_body
         .collect()
         .await
         .map_err(|e| ProxyError::Internal(format!("Failed to read request body: {e}")))?
         .to_bytes();
+    #[cfg(test)]
+    if let Some(trace) = &trace {
+        trace.emit("body_read_complete");
+    }
     let body_bytes = decode_codex_request_body(&mut headers, body_bytes)?;
     let body: Value = serde_json::from_slice(&body_bytes)
         .map_err(|e| ProxyError::Internal(format!("Failed to parse request body: {e}")))?;
@@ -926,6 +938,10 @@ async fn handle_responses_for_app(
     let namespace_restore_map = transform_codex_responses_namespace::namespace_restore_map(&body);
 
     let budget_route = extensions.get::<crate::paperclip::RouteBinding>().cloned();
+    #[cfg(test)]
+    if let Some(trace) = &trace {
+        trace.emit("forwarder_start");
+    }
     let forwarder = ctx.create_forwarder(&state);
     let forwarder = if let Some(route) = &budget_route {
         forwarder.with_request_identity(Some(route.identity.clone()))
@@ -946,11 +962,24 @@ async fn handle_responses_for_app(
     {
         Ok(result) => result,
         Err(mut err) => {
+            #[cfg(test)]
+            if let Some(trace) = &trace {
+                trace.emit("forwarder_error");
+            }
             if let Some(provider) = err.provider.take() {
                 ctx.provider = provider;
             }
             log_forward_error(&state, &ctx, is_stream, &err.error);
-            return build_codex_proxy_error_response(&ctx, &endpoint, &err.error, is_stream);
+            let response = build_codex_proxy_error_response(&ctx, &endpoint, &err.error, is_stream);
+            #[cfg(test)]
+            if let Some(trace) = &trace {
+                trace.emit(if response.is_ok() {
+                    "error_response_constructed"
+                } else {
+                    "error_response_build_failed"
+                });
+            }
+            return response;
         }
     };
 

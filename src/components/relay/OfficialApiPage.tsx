@@ -1,16 +1,12 @@
-import { useState, useEffect, useRef } from "react";
+import { useRef } from "react";
 import { useTranslation } from "react-i18next";
-import { toast } from "sonner";
 import { ArrowLeft, Loader2 } from "lucide-react";
-
 import { OpenCodeLocalImportForm } from "./OpenCodeLocalImportForm";
 import { OpenCodePersonalKeyForm } from "./OpenCodePersonalKeyForm";
 import { Button } from "@/components/ui/button";
 import type { AppId } from "@/lib/api";
-import { vendorApi, VENDOR_CATALOG } from "@/lib/api/vendor";
 import type { ConnectedService } from "./onboarding/useServiceOnboarding";
-import { extractErrorMessage } from "@/utils/errorUtils";
-
+import { useOfficialApiPageViewModel } from "./useOfficialApiPageViewModel";
 /**
  * 「官方 API」页：与中转站广场并列的厂商选择页。
  *
@@ -29,7 +25,6 @@ export interface OfficialApiPageProps {
   /** 内嵌在统一添加聚合页（`AddHubPage`）里时不带返回箭头与页面级容器。 */
   embedded?: boolean;
 }
-
 export function OfficialApiPage({
   sourceAppId,
   vendorId,
@@ -38,52 +33,20 @@ export function OfficialApiPage({
   onConnected,
 }: OfficialApiPageProps) {
   const { t } = useTranslation();
-  const [loginningVendor, setLoginningVendor] = useState<string | null>(null);
-  const [showOpenCodeRecovery, setShowOpenCodeRecovery] = useState(false);
   const openCodeKeyForms = useRef<HTMLDivElement>(null);
-
-  const alive = useRef(true);
-  const generation = useRef(0);
-  useEffect(() => {
-    alive.current = true;
-    setLoginningVendor(null);
-    setShowOpenCodeRecovery(false);
-    return () => {
-      alive.current = false;
-      generation.current += 1;
-    };
-  }, []);
-  const handlePick = async (vendorId: string) => {
-    if (loginningVendor) return;
-    const request = generation.current;
-    const current = () => alive.current && request === generation.current;
-    setLoginningVendor(vendorId);
-    setShowOpenCodeRecovery(false);
-    try {
-      const result = await vendorApi.openLogin(vendorId, sourceAppId);
-      // null = 用户自己关了窗或超时，不出提示（他知道自己干了什么）。
-      if (!current() || result === null) return;
-      toast.success(t("loongport.session.connected"));
-      if (onConnected)
-        onConnected({
-          kind: "vendor",
-          rowId: result.rowId,
-          name:
-            VENDOR_CATALOG.find((vendor) => vendor.id === vendorId)
-              ?.displayName ?? vendorId,
-        });
-      else onBack();
-    } catch (e) {
-      if (current()) {
-        toast.error(extractErrorMessage(e));
-        // Offer existing forms, not a diagnosis or an automatic credential import.
-        if (vendorId === "opencode") setShowOpenCodeRecovery(true);
-      }
-    } finally {
-      if (current()) setLoginningVendor(null);
-    }
-  };
-
+  const {
+    loginningVendor,
+    visibleVendors,
+    showOpenCodeEntry,
+    recoveryVisible,
+    handlePick,
+    back,
+  } = useOfficialApiPageViewModel({
+    sourceAppId,
+    vendorId,
+    onBack,
+    onConnected,
+  });
   return (
     <div
       className={
@@ -97,7 +60,7 @@ export function OfficialApiPage({
             variant="ghost"
             size="sm"
             className="mt-0.5 h-8 w-8 shrink-0"
-            onClick={onBack}
+            onClick={back}
             aria-label={t("common.back")}
           >
             <ArrowLeft className="mr-2 h-4 w-4" />
@@ -114,7 +77,7 @@ export function OfficialApiPage({
         </div>
       </div>
 
-      {(!vendorId || vendorId === "opencode") && (
+      {showOpenCodeEntry && (
         <div
           ref={openCodeKeyForms}
           role="region"
@@ -135,9 +98,7 @@ export function OfficialApiPage({
         </div>
       )}
       <div className="grid gap-4 py-6 sm:grid-cols-2">
-        {VENDOR_CATALOG.filter(
-          (vendor) => !vendorId || vendor.id === vendorId,
-        ).map((vendor) => (
+        {visibleVendors.map((vendor) => (
           <button
             key={vendor.id}
             type="button"
@@ -162,7 +123,7 @@ export function OfficialApiPage({
           </button>
         ))}
       </div>
-      {showOpenCodeRecovery && (!vendorId || vendorId === "opencode") && (
+      {recoveryVisible && (
         <div
           role="alert"
           className="space-y-3 rounded-lg border border-border-default p-4"

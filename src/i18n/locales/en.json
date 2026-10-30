@@ -1,4 +1,47 @@
 {
+  "accountsOverview": {
+    "nativeSwitch": {
+      "title": "Confirm account switch",
+      "confirm": "WorkBuddy will be asked to quit normally and its authentication file switched to {{name}}. It will be reopened only if this operation stopped it. Verify account adoption separately.",
+      "action": "Switch account",
+      "applied": "Authentication file switched.",
+      "alreadyApplied": "The authentication file already matches the target.",
+      "notNeeded": "The client was already closed and was not started.",
+      "requested": "Restart requested; account adoption remains unverified.",
+      "failed": "Restart failed.",
+      "unknown": "Restart outcome is unknown.",
+      "error": {
+        "outcomeUnknown": "Switch outcome unknown. Check the original operation before trying again.",
+        "quitRefused": "The client refused to quit. No authentication file was switched.",
+        "quitTimeout": "Client quit timed out. No authentication file was switched.",
+        "writersRemaining": "Client processes are still running. No authentication file was switched.",
+        "busy": "Another switch is in progress. This switch was not performed.",
+        "sourceChanged": "The client source changed. No authentication file was switched.",
+        "transaction": "Authentication file transaction reported an issue ({{reason}}). Check recovery status before trying again."
+      }
+    },
+    "switch": "Switch",
+    "switchUnavailable": "Verified client switching is not available yet.",
+    "hideExhausted": "Hide exhausted",
+    "sort": "Sort",
+    "moveLeft": "Move left",
+    "moveRight": "Move right",
+    "moveUp": "Move up",
+    "moveDown": "Move down",
+    "appSort": "App sort",
+    "details": "Details",
+    "collapse": "Collapse {{name}}",
+    "expand": "Expand {{name}}",
+    "accountSort": "Account sort",
+    "expiryAsc": "Earliest expiry",
+    "balanceDesc": "Remaining balance",
+    "nameAsc": "Name",
+    "hiddenCount": "{{count}} exhausted accounts hidden",
+    "sessionOnly": "Preferences apply to this session; saving failed.",
+    "viewAccount": "View {{name}}",
+    "drag": "Drag {{name}} to reorder",
+    "dragInstructions": "Drag to change display order. Use the Sort menu with a keyboard or touch."
+  },
   "qoderApplicationEntry": {
     "defaultNavigationNamed": "View and configure in {{app}}",
     "defaultNavigation": "View and configure in the application",
@@ -8,6 +51,21 @@
     "loading": "Loading application bindings…",
     "error": "Could not load application bindings. Check the configuration in the original application.",
     "empty": "No backend-confirmed application bindings for this configuration. Check the original Codex configuration."
+  },
+  "accountRewardGlance": {
+    "confirmationTime": "Local confirmation time",
+    "expiryPending": "Expiry data awaiting update",
+    "lastSuccess": "Latest success",
+    "nextExpiry": "Next expiry",
+    "noSuccess": "No verifiable successful claim",
+    "noExpiry": "Expiry time not provided",
+    "timeUnknown": "Time not recorded",
+    "amountUnknown": "Amount not provided",
+    "unitUnknown": "Unit not provided",
+    "workbuddyCredits": "credits",
+    "points": "points",
+    "remaining": "Remaining {{amount}}",
+    "pending": "Data awaiting update"
   },
   "claimSettings": {
     "title": "Automatic claims management",
@@ -23,6 +81,7 @@
     "saving": "Saving automatic claim settings…",
     "saved": "Confirmed settings for {{count}} accounts",
     "uncertain": "Setting not confirmed. Refresh to check.",
+    "notDispatched": "Settings were not submitted. Refresh and review before trying again.",
     "readFailed": "Account status could not be read. Refresh to try again.",
     "reason": {
       "actionRequired": "Claims need attention. Open the account to check.",
@@ -3933,7 +3992,7 @@
         "cancelled": "Cancelled",
         "changed": "Configuration changed — review required",
         "verificationFailed": "Could not verify — retry reading",
-        "unverified": "Applied result not verified — review required"
+        "unverified": "Application status not verified — review required"
       },
       "reapply": "Apply this configuration again",
       "continueSetup": "Continue setup",
@@ -4415,6 +4474,11 @@
       "chooseReasoning": "Choose a reasoning default explicitly",
       "sourceChangeEffectsUnavailable": "The reset details could not be verified. Reopen this dialog before continuing.",
       "sourceConfirmationRequired": "The current source must be explicitly confirmed with fresh model and reasoning choices."
+    },
+    "vendorRecovery": {
+      "title": "Review and start a new connection",
+      "description": "The outcome of the previous connection operation cannot be verified. Confirming will preserve its record and start a new connection for {{name}}. This does not mean the previous operation succeeded.",
+      "confirm": "Confirm new connection"
     }
   },
   "secrets": {
@@ -5055,6 +5119,72 @@
     }
   },
   "workbuddy": {
+    "nativeRecovery": {
+      "title": "Recover authentication files",
+      "description": "First exit WorkBuddy and related processes. Recovery uses the original journal in the current vault; it does not quit or start the client.",
+      "check": "Check recovery status",
+      "open": "Recover authentication files",
+      "busy": "Processing; leaving this view does not cancel a submitted recovery.",
+      "phase": {
+        "pending": "The current journal snapshot has a pending recovery.",
+        "clear": "The current journal snapshot has no pending recovery.",
+        "absent": "There is no current journal."
+      },
+      "after": {
+        "pending": "Current journal snapshot read after recovery: recovery pending.",
+        "clear": "Current journal snapshot read after recovery: no pending recovery.",
+        "absent": "Current journal snapshot read after recovery: absent."
+      },
+      "restored": "Most recently received recovery receipt: original files restored.",
+      "alreadyApplied": "Most recently received recovery receipt: the committed target files still match.",
+      "error": {
+        "unsupported": "This platform does not support this operation.",
+        "checkFailed": "The check failed; check again.",
+        "afterCheckFailed": "A recovery receipt was received, but the subsequent journal check failed.",
+        "recoveryUnknown": "The recovery result is unconfirmed; the operation may still be running and will not be retried automatically."
+      },
+      "unresolved": "A previous recovery result remains unconfirmed; the current snapshot and later receipts do not establish its outcome.",
+      "unknown": "A journal snapshot does not establish the outcome of a previous unknown request or prove the client account is active.",
+      "confirmTitle": "Confirm authentication file recovery",
+      "confirmDescription": "First exit WorkBuddy and related processes. Recovery uses the original journal in the current vault; it will not start the client or replay a switch.",
+      "confirm": "Confirm recovery"
+    },
+    "nativeCapture": {
+      "open": "Save current native account",
+      "title": "Save current WorkBuddy account",
+      "description": "Save the current client’s local authentication snapshot to the LoongPort vault. This is for switching the local client only; it does not establish that the login is valid or grant API access.",
+      "existing": "If this account already exists (including as an API account), it cannot be added to that account here. Nothing will be deleted or overwritten.",
+      "conflict": "The source conflicts with an existing account or a changed state. Existing accounts will not be overwritten or deleted.",
+      "label": "Account label (not a credential)",
+      "confirm": "Confirm and save snapshot",
+      "cancel": "Cancel",
+      "close": "Close",
+      "busy": "Saving… Leaving this view does not stop a task already in progress.",
+      "unknown": "The result is unconfirmed. Checking the list cannot prove that this operation failed; it will not be retried automatically.",
+      "saved": "The most recent capture was saved; this does not establish login validity or API access."
+    },
+    "nativePreview": {
+      "title": "WorkBuddy native client observation",
+      "description": "Read the known local CN auth-file location only when you click. No account or settings are saved or changed.",
+      "inspect": "Inspect native format",
+      "inspecting": "Inspecting…",
+      "missing": "No auth file observed at the known location.",
+      "recognized": "A supported personal-account document format was observed.",
+      "realmWorkbuddy": "Document realm: WorkBuddy CN (www.workbuddy.cn)",
+      "realmCodebuddy": "Document realm: CodeBuddy CN (www.codebuddy.cn)",
+      "markerPresent": "Logout marker observed: present.",
+      "markerAbsent": "Logout marker observed: absent.",
+      "notActivation": "Known location only; installation and login validity are not verified. Marker presence is not login status.",
+      "error": {
+        "unsafeSource": "The source is unsafe to inspect.",
+        "sourceChanged": "The files changed during inspection. Try again later.",
+        "unreadableSource": "The source could not be read.",
+        "invalidDocument": "The document format could not be recognized safely.",
+        "unsupportedContext": "This account context is not supported for observation.",
+        "unsupportedPlatform": "Observation is not supported on this platform.",
+        "unknown": "No reliable observation was returned."
+      }
+    },
     "auto": {
       "unknown": "Automatic claim: unconfirmed",
       "label": "Automatic claim for this account",

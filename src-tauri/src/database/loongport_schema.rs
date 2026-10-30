@@ -48,7 +48,7 @@ use crate::error::AppError;
 /// LoongPort 自己的 schema 版本。加迁移时 +1。
 ///
 /// **与 `SCHEMA_VERSION`（上游那个）无关**，两者各自独立计数。
-pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 32;
+pub(crate) const LOONGPORT_SCHEMA_VERSION: i32 = 33;
 
 /// The authenticated snapshot contract starts at the original vault schema.
 /// Snapshots retain their recorded identity; this bound does not migrate them.
@@ -443,6 +443,19 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
                 }
                 conn.execute_batch("RELEASE relay_setup_journal_migration")?;
             }
+            32 => {
+                conn.execute_batch("SAVEPOINT vendor_connection_migration")?;
+                let result = (|| {
+                    super::dao::vendor_connection_operations::create_schema(conn)?;
+                    super::dao::vendor_connection_operations::read_rows(conn)?;
+                    set_version(conn, 33)
+                })();
+                if let Err(error) = result {
+                    conn.execute_batch("ROLLBACK TO vendor_connection_migration; RELEASE vendor_connection_migration")?;
+                    return Err(error);
+                }
+                conn.execute_batch("RELEASE vendor_connection_migration")?;
+            }
             other => {
                 return Err(AppError::Database(format!(
                     "未知的 LoongPort 数据版本 {other}，无法迁移到 {LOONGPORT_SCHEMA_VERSION}"
@@ -452,6 +465,8 @@ pub(crate) fn apply(conn: &Connection) -> Result<(), AppError> {
         version = current_version(conn)?;
     }
 
+    super::dao::vendor_connection_operations::validate_schema(conn)?;
+    super::dao::vendor_connection_operations::read_rows(conn)?;
     super::dao::relay_setup_operations::validate_schema(conn)?;
     super::dao::relay_setup_operations::read_rows(conn)?;
     super::credential_revision::validate_schema(conn)?;

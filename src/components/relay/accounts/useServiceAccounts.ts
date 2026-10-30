@@ -79,14 +79,4 @@ export function useServiceAccounts() {
   };
 }
 
-export function configuredApps(account: ServiceAccount): AppId[] {
-  // These are existing configurations reported by the backend, not a frontend
-  // registry of supported protocols or an inferred login/current status.
-  return PROVIDER_STORE_APP_IDS.filter((appId) =>
-    account.kind === "relay"
-      ? Boolean(account.apps.get(appId)?.tiers.length)
-      : account.apps
-          .get(appId)
-          ?.plans.some((plan) => plan.canEditConfig || plan.canSwitch),
-  );
-}
+export { configuredApps } from "./serviceAccountDetailsProjection";

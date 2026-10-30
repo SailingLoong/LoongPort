@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import i18n from "i18next";
 import {
   platformAccountFilterName,
+  overviewAccountDetailsName,
   nativeAccountKeyboardSteps,
   nativeAccountOverviewCounts,
 } from "../browser/unified-account-locators.mjs";
@@ -81,8 +82,20 @@ for (const language of ["en", "zh"]) {
       within(main).queryAllByRole("region", { name: "账号详情" }),
     ).toHaveLength(0);
     const second = await within(main).findByRole("button", {
-      name: "查看 Synthetic account B",
+      name: overviewAccountDetailsName(t, "Synthetic account B"),
     });
+    const row = within(main).getByRole("article", {
+      name: "Synthetic account B",
+    });
+    expect(
+      within(row).getByRole("button", {
+        name: overviewAccountDetailsName(t, "Synthetic account B"),
+      }),
+    ).toBe(second);
+    expect(row.querySelector("button button")).toBeNull();
+    expect(
+      within(row).getByRole("button", { name: t("accountsOverview.switch") }),
+    ).toBeDisabled();
     await user.click(second);
     expect(
       await within(main).findByRole("heading", { name: "Synthetic account B" }),
@@ -100,13 +113,17 @@ for (const language of ["en", "zh"]) {
     ).toHaveLength(0);
     await user.click(minimax);
     expect(
-      within(main).getByRole("button", { name: "查看 Synthetic account B" }),
+      within(main).getByRole("button", {
+        name: overviewAccountDetailsName(t, "Synthetic account B"),
+      }),
     ).toBeVisible();
     expect(
       within(main).queryByRole("heading", { name: "Synthetic account B" }),
     ).not.toBeInTheDocument();
     await user.click(
-      within(main).getByRole("button", { name: "查看 Synthetic account A" }),
+      within(main).getByRole("button", {
+        name: overviewAccountDetailsName(t, "Synthetic account A"),
+      }),
     );
     expect(
       within(main).getByRole("heading", { name: "Synthetic account A" }),
@@ -117,7 +134,9 @@ for (const language of ["en", "zh"]) {
       }),
     );
     await user.click(
-      within(main).getByRole("button", { name: "查看 Synthetic account B" }),
+      within(main).getByRole("button", {
+        name: overviewAccountDetailsName(t, "Synthetic account B"),
+      }),
     );
     expect(
       within(main).getByRole("heading", { name: "Synthetic account B" }),
@@ -146,8 +165,8 @@ for (const language of ["en", "zh"]) {
       }),
     );
     for (const name of [
-      "查看 Synthetic account A",
-      "查看 Synthetic account B",
+      overviewAccountDetailsName(t, "Synthetic account A"),
+      overviewAccountDetailsName(t, "Synthetic account B"),
     ]) {
       expect(within(main).queryAllByRole("button", { name })).toHaveLength(
         nativeAccountOverviewCounts.accountButtons,
@@ -159,11 +178,13 @@ for (const language of ["en", "zh"]) {
       }),
     ).toHaveAttribute("aria-selected", "true");
     expect(
-      within(main).getByRole("button", { name: "查看 Synthetic account A" }),
+      within(main).getByRole("button", {
+        name: overviewAccountDetailsName(t, "Synthetic account A"),
+      }),
     ).toBeInTheDocument();
     expect(
       within(main).getByRole("button", {
-        name: "查看 Synthetic WorkBuddy account",
+        name: overviewAccountDetailsName(t, "Synthetic WorkBuddy account"),
       }),
     ).toBeInTheDocument();
     expect(window.unifiedLayout.rejectedCommands).toEqual([]);

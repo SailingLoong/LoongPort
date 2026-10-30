@@ -10,6 +10,8 @@ const mocks = vi.hoisted(() => ({
   relayModel: vi.fn(),
   apply: vi.fn(),
   vendor: vi.fn(),
+  prepare: vi.fn(),
+  query: vi.fn(),
   error: vi.fn(),
   success: vi.fn(),
 }));
@@ -22,7 +24,13 @@ vi.mock("@/lib/api/relay", () => ({
 vi.mock("@/lib/api/applicationRouting", () => ({
   applicationRoutingApi: { apply: mocks.apply },
 }));
-vi.mock("@/lib/api/vendor", () => ({ vendorApi: { switch: mocks.vendor } }));
+vi.mock("@/lib/api/vendor", () => ({
+  vendorApi: {
+    switchPreparedConnection: mocks.vendor,
+    prepareConnection: mocks.prepare,
+    queryConnection: mocks.query,
+  },
+}));
 vi.mock("@/hooks/useTauriEvent", () => ({ useTauriEvent: vi.fn() }));
 vi.mock("sonner", () => ({
   toast: { error: mocks.error, success: mocks.success, warning: vi.fn() },
@@ -101,6 +109,26 @@ describe("configuration selection", () => {
     expect(result.current.confirmation).toBeNull();
   });
   it("replays the exact vendor plan only after the explicit confirmation", async () => {
+    let operationId = "";
+    const receipt = (status: "prepared" | "completed") => ({
+      operationId,
+      rowId: 3,
+      plan: "standard",
+      app: "codex",
+      providerId: "relay-config",
+      receiptRevision: 1,
+      status,
+      operationState: status,
+      completedConfigurationRevision:
+        status === "completed" ? "configured" : null,
+    });
+    mocks.query.mockImplementation(async (_app, operation) =>
+      operation === null ? { status: "none" } : receipt("completed"),
+    );
+    mocks.prepare.mockImplementation(async (input) => {
+      operationId = input.operationId;
+      return receipt("prepared");
+    });
     mocks.vendor
       .mockResolvedValueOnce({
         status: "confirmationRequired",
@@ -124,12 +152,15 @@ describe("configuration selection", () => {
     });
     act(() => result.current.confirm(false));
     await waitFor(() =>
-      expect(mocks.vendor).toHaveBeenLastCalledWith(
-        3,
-        "standard",
-        "codex",
-        false,
-      ),
+      expect(mocks.vendor).toHaveBeenLastCalledWith({
+        rowId: 3,
+        plan: "standard",
+        app: "codex",
+        providerId: "relay-config",
+        quitChatgpt: false,
+        operationId,
+        expectedRevision: 1,
+      }),
     );
     await waitFor(() => expect(result.current.busy).toBe(false));
     expect(mocks.success).toHaveBeenCalledTimes(1);

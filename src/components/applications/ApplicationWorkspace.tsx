@@ -40,6 +40,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import { VendorConnectionReviewDialog } from "@/components/relay/VendorConnectionReviewDialog";
 import { SwitchTierConfirmDialog } from "@/components/relay/SwitchTierConfirmDialog";
 import { useApplicationOverview } from "./useApplicationOverview";
 import { useApplicationRouting } from "./useApplicationRouting";
@@ -631,6 +632,15 @@ export function ApplicationWorkspace({
           {typeof children === "function" ? children(mutationBusy) : children}
         </CollapsibleContent>
       </Collapsible>
+      <VendorConnectionReviewDialog
+        targetName={model.vendorRecovery?.target.name ?? null}
+        disabled={writesBlocked || routing.busy || model.busy}
+        onCancel={model.cancelVendorRecovery}
+        onConfirm={() => {
+          if (!writesBlocked && !routing.busy)
+            return model.confirmVendorRecovery();
+        }}
+      />
       <SwitchTierConfirmDialog
         targetName={model.confirmation}
         onCancel={model.cancel}

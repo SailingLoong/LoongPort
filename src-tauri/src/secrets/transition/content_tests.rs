@@ -193,6 +193,77 @@ fn remote_content_into_text_keeps_current_user_key() {
     fixture.restore(SOURCE_TEXT).unwrap();
     fixture.assert_installed();
 }
+
+#[cfg(feature = "gui")]
+#[test]
+#[serial_test::serial]
+fn foreign_restore_preserves_vendor_receipt_as_unknown_without_rebinding() {
+    let fixture = Fixture::new(plain());
+    let db = fixture.db.clone();
+    let account = "synthetic-restore-vendor-account";
+    {
+        let vault = db.secrets.read().unwrap();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO loongport_vendor(id,vendor_id,account_id) VALUES(702,'opencode',?1)",
+            [account],
+        )
+        .unwrap();
+        crate::vendor::creds::set_api_key(&conn, &vault, 702, "synthetic-only-key").unwrap();
+    }
+    let bundle = crate::vendor::provision::plan_rows_for(
+        crate::vendor::Vendor::OpenCode,
+        account,
+        "synthetic-only-key",
+    )
+    .into_iter()
+    .find(|row| row.plan.id_segment == "opencode")
+    .unwrap();
+    let settings = bundle
+        .rows
+        .iter()
+        .find(|(app, _)| *app == crate::app_config::AppType::Codex)
+        .unwrap()
+        .1
+        .clone();
+    let provider =
+        crate::provider::Provider::with_id(bundle.provider_id, "synthetic".into(), settings, None);
+    db.save_provider("codex", &provider).unwrap();
+    let state = crate::store::AppState::new(db.clone()).unwrap();
+    let app = tauri::test::mock_builder()
+        .manage(state)
+        .invoke_handler(tauri::generate_handler![
+            crate::commands::vendor_prepare_connection,
+            crate::commands::vendor_query_connection
+        ])
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+        .build()
+        .unwrap();
+    let operation = "8d75e8d4-9140-45eb-b67d-000000000001";
+    let prepare = invoke(&window, "vendor_prepare_connection", serde_json::json!({
+        "rowId":702,"plan":"opencode","app":"codex","operationId":operation,"catalogDecision":null
+    })).unwrap();
+    assert_eq!(prepare["status"], "prepared");
+    let binding = db.secrets.read().unwrap().identity().store_id().to_owned();
+    fixture.restore(SOURCE_TEXT).unwrap();
+    assert_eq!(db.secrets.read().unwrap().identity().store_id(), binding);
+    let query = invoke(
+        &window,
+        "vendor_query_connection",
+        serde_json::json!({"app":"codex","operationId":operation}),
+    )
+    .unwrap();
+    assert_eq!(query["status"], "unknown");
+    assert_eq!(query["operationId"], operation);
+    let conn = db.conn.lock().unwrap();
+    let retained = crate::database::vendor_connection_operations::read_on(&conn, operation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.storage_binding, binding);
+    assert_eq!(retained.state, "prepared");
+}
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]
 fn wrong_source_text_never_changes_receiver_or_skills() {
@@ -506,6 +577,22 @@ fn recovery_does_not_retarget_unified_skills_to_changed_home() {
 #[cfg_attr(test, test)]
 #[cfg_attr(test, serial_test::serial)]
 fn actual_process_exit_reenters_original_recovery_command() {
+    process_exit_reentry(Checkpoint::Database);
+}
+#[cfg(all(test, feature = "gui"))]
+#[test]
+#[serial_test::serial]
+fn process_exit_before_intent_allows_authenticated_new_content_operation() {
+    process_exit_reentry(Checkpoint::Staged);
+}
+#[cfg(all(test, feature = "gui"))]
+#[test]
+#[serial_test::serial]
+fn process_exit_after_intent_clear_allows_authenticated_new_content_operation() {
+    process_exit_reentry(Checkpoint::Keys);
+}
+#[cfg(feature = "gui")]
+fn process_exit_reentry(exit: Checkpoint) {
     if std::env::var_os("LOONGPORT_JOINT_RESTORE_CHILD").is_some() {
         let root = crate::config::get_app_config_dir();
         let (record, _) = crate::secrets::protection::read_with_bytes(&root)
@@ -548,7 +635,12 @@ fn actual_process_exit_reenters_original_recovery_command() {
             &snapshot,
             crate::services::skill::SkillStorageLocation::LoongPort,
             &mut |point| {
-                if point == Checkpoint::Database {
+                let exit = match std::env::var("LP_CONTENT_EXIT_BOUNDARY").as_deref() {
+                    Ok("staged") => Checkpoint::Staged,
+                    Ok("cleared") => Checkpoint::Keys,
+                    _ => Checkpoint::Database,
+                };
+                if point == exit {
                     std::process::exit(77);
                 }
                 Ok(())
@@ -583,6 +675,14 @@ fn actual_process_exit_reenters_original_recovery_command() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", exact, "--nocapture"])
             .env("LOONGPORT_JOINT_RESTORE_CHILD", "1")
+            .env(
+                "LP_CONTENT_EXIT_BOUNDARY",
+                match exit {
+                    Checkpoint::Staged => "staged",
+                    Checkpoint::Keys => "cleared",
+                    _ => "database",
+                },
+            )
             .output()
             .unwrap();
         assert_eq!(
@@ -591,8 +691,12 @@ fn actual_process_exit_reenters_original_recovery_command() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let status = recover_registered(&root, SOURCE_TEXT).unwrap();
-        assert_eq!(status["restartRequired"], true);
+        if exit == Checkpoint::Database {
+            let status = recover_registered(&root, SOURCE_TEXT).unwrap();
+            assert_eq!(status["restartRequired"], true);
+        } else {
+            assert!(pending_record(&root).unwrap().is_none());
+        }
         let connection =
             crate::database::storage::prepare(&root.join(crate::config::DB_FILE_NAME), &current)
                 .unwrap();
@@ -600,6 +704,18 @@ fn actual_process_exit_reenters_original_recovery_command() {
             connection,
             SecretSession::from_storage_context(root.clone(), current),
         );
+        if exit != Checkpoint::Database {
+            crate::settings::unlock_settings_for_test(db.secrets.clone()).unwrap();
+            prepared_install(
+                &db,
+                &snapshot,
+                crate::services::skill::SkillStorageLocation::LoongPort,
+                &mut |_| Ok(()),
+            )
+            .unwrap();
+        }
+        let store = crate::app_store::tauri_store_path().unwrap();
+        assert!(crate::app_store::isolated_scope::lock_selection_at(&store).is_ok());
         assert_eq!(
             db.get_setting("common_config_claude").unwrap().as_deref(),
             Some("remote-joint-canary")
@@ -632,4 +748,462 @@ mod pool_restore_consumer_tests;
 #[cfg(all(feature = "gui", feature = "test-hooks"))]
 pub(crate) async fn verify_pool_restore(case: &str) {
     pool_restore_consumer_tests::verify(case).await;
+}
+
+#[cfg(all(feature = "gui", feature = "test-hooks"))]
+pub(crate) async fn restore_pool_fixture(db: Arc<Database>, group_id: &str) -> Arc<Database> {
+    pool_restore_consumer_tests::restore_group(db, group_id).await
+}
+
+#[cfg(test)]
+mod native_content_admission {
+    use crate::app_store::isolated_scope::{
+        capture_selection_at, lock_content_source_at, SelectionSnapshot,
+    };
+    use crate::secrets::{
+        session::SecretSession,
+        storage::{PlaintextIdentity, StorageContext},
+        VaultContext,
+    };
+    use crate::workbuddy::native_owner::testing;
+    use std::path::{Path, PathBuf};
+    struct Fixture {
+        _temp: tempfile::TempDir,
+        root: PathBuf,
+        selection: SelectionSnapshot,
+        storage: StorageContext,
+    }
+    impl Fixture {
+        fn new(encrypted: bool) -> Self {
+            let t = crate::secrets::testing::tempdir().unwrap();
+            let root = t.path().join("data");
+            std::fs::create_dir(&root).unwrap();
+            let store = t.path().join("control/app_paths.json");
+            let selection = capture_selection_at(&store, &root, &root).unwrap();
+            let storage = if encrypted {
+                StorageContext::Encrypted(VaultContext::generate().unwrap())
+            } else {
+                StorageContext::Plaintext(PlaintextIdentity {
+                    format_version: 1,
+                    store_id: uuid::Uuid::new_v4().to_string(),
+                    generation_id: uuid::Uuid::new_v4().to_string(),
+                    revision: 1,
+                })
+            };
+            Self {
+                _temp: t,
+                root,
+                selection,
+                storage,
+            }
+        }
+        fn journal(&self) -> PathBuf {
+            self.root
+                .join(crate::secrets::owned_file::WORKBUDDY_NATIVE_JOURNAL_FILE)
+        }
+        fn receipts(&self) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+            let client = crate::secrets::testing::tempdir().unwrap();
+            testing::receipts(&self.root, &self.storage, client.path())
+        }
+    }
+    fn check(
+        root: &Path,
+        storage: &StorageContext,
+        guard: &crate::app_store::isolated_scope::SelectedSourceGuard,
+    ) -> Result<(), crate::error::AppError> {
+        crate::secrets::transition::content::verify_native_content_admission(root, storage, guard)
+    }
+    #[test]
+    fn original_session_blocking_advances_only_the_owned_epoch_and_foreign_changes_refuse() {
+        use crate::secrets::transition::content::{block_content_session, verify_content_epoch};
+        let root = crate::secrets::testing::tempdir().unwrap();
+        let storage = StorageContext::Plaintext(crate::secrets::storage::PlaintextIdentity {
+            format_version: 1,
+            store_id: "11111111-1111-4111-8111-111111111111".into(),
+            generation_id: "22222222-2222-4222-8222-222222222222".into(),
+            revision: 1,
+        });
+        let session = SecretSession::from_storage_context(root.path().to_path_buf(), storage);
+        let _old = session.write().unwrap();
+        let epoch = session.lifecycle_epoch();
+        verify_content_epoch(&session, epoch).unwrap();
+        let blocked = block_content_session(&session, epoch).unwrap();
+        assert_eq!(blocked, epoch + 1);
+        verify_content_epoch(&session, blocked).unwrap();
+        assert!(verify_content_epoch(&session, epoch).is_err());
+        session.set_blocked(true);
+        assert!(verify_content_epoch(&session, blocked).is_err());
+        let foreign = session.lifecycle_epoch();
+        assert!(block_content_session(&session, epoch).is_err());
+        assert_eq!(session.lifecycle_epoch(), foreign);
+    }
+    #[test]
+    fn prepared_blocks_with_original_old_context_and_preserves_receipt() {
+        for encrypted in [false, true] {
+            let f = Fixture::new(encrypted);
+            let (prepared, _, _) = f.receipts();
+            std::fs::write(f.journal(), &prepared).unwrap();
+            let guard = lock_content_source_at(&f.selection, &[&f.root.join("skills")]).unwrap();
+            assert!(check(&f.root, &f.storage, &guard).is_err());
+            assert_eq!(std::fs::read(f.journal()).unwrap(), prepared);
+        }
+    }
+    #[test]
+    fn absent_and_terminal_allow_under_held_session_write_without_touching_receipt() {
+        for encrypted in [false, true] {
+            let f = Fixture::new(encrypted);
+            let guard = lock_content_source_at(&f.selection, &[]).unwrap();
+            let session = SecretSession::from_storage_context(f.root.clone(), f.storage.clone());
+            let old = session.write().unwrap();
+            check(&f.root, &old, &guard).unwrap();
+            let (_, restored, committed) = f.receipts();
+            for bytes in [restored, committed] {
+                std::fs::write(f.journal(), &bytes).unwrap();
+                check(&f.root, &old, &guard).unwrap();
+                assert_eq!(std::fs::read(f.journal()).unwrap(), bytes);
+            }
+        }
+    }
+    #[test]
+    fn wrong_key_unknown_or_corrupt_is_not_absent() {
+        let f = Fixture::new(true);
+        let (_, _, committed) = f.receipts();
+        let guard = lock_content_source_at(&f.selection, &[]).unwrap();
+        let foreign = StorageContext::Encrypted(VaultContext::generate().unwrap());
+        assert!(check(&f.root, &foreign, &guard).is_err());
+        assert_eq!(std::fs::read(f.journal()).unwrap(), committed);
+        std::fs::write(f.journal(), b"unknown/corrupt synthetic receipt").unwrap();
+        assert!(check(&f.root, &f.storage, &guard).is_err());
+        assert_eq!(
+            std::fs::read(f.journal()).unwrap(),
+            b"unknown/corrupt synthetic receipt"
+        );
+    }
+    #[test]
+    fn phase_and_identity_changes_are_rechecked_on_each_admission() {
+        let f = Fixture::new(false);
+        let (prepared, _, _) = f.receipts();
+        let guard = lock_content_source_at(&f.selection, &[]).unwrap();
+        check(&f.root, &f.storage, &guard).unwrap();
+        std::fs::write(f.journal(), &prepared).unwrap();
+        assert!(check(&f.root, &f.storage, &guard).is_err());
+        let other = f._temp.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        assert!(check(&other, &f.storage, &guard).is_err());
+    }
+}
+
+#[cfg(test)]
+mod native_content_consumer {
+    use super::*;
+    use crate::app_store::isolated_scope;
+    use crate::workbuddy::native_owner::testing;
+    fn journal(f: &Fixture) -> PathBuf {
+        f.db.secrets
+            .root()
+            .join(crate::secrets::owned_file::WORKBUDDY_NATIVE_JOURNAL_FILE)
+    }
+    fn receipts(f: &Fixture) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let client = crate::secrets::testing::tempdir().unwrap();
+        let old = f.db.secrets.write().unwrap();
+        testing::receipts(f.db.secrets.root(), &old, client.path())
+    }
+    fn digest(f: &Fixture) -> String {
+        Database::content_digest(&f.db.conn.lock().unwrap()).unwrap()
+    }
+    fn install(
+        f: &Fixture,
+        hook: &mut dyn FnMut(Checkpoint) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        prepared_install(
+            &f.db,
+            &f.snapshot,
+            crate::services::skill::SkillStorageLocation::LoongPort,
+            hook,
+        )
+    }
+    #[test]
+    #[serial_test::serial]
+    fn prepared_or_corrupt_native_receipt_blocks_original_content_before_stage() {
+        for encrypted in [false, true] {
+            let f = Fixture::new(if encrypted {
+                text(TARGET_TEXT)
+            } else {
+                plain()
+            });
+            let (prepared, _, _) = receipts(&f);
+            let before = digest(&f);
+            let skills = tree(&f.db.secrets.root().join("skills"));
+            for bytes in [prepared, b"corrupt synthetic receipt".to_vec()] {
+                std::fs::write(journal(&f), &bytes).unwrap();
+                let mut called = false;
+                assert!(install(&f, &mut |_| {
+                    called = true;
+                    Ok(())
+                })
+                .is_err());
+                assert!(!called);
+                assert_eq!(digest(&f), before);
+                assert_eq!(tree(&f.db.secrets.root().join("skills")), skills);
+                assert_eq!(std::fs::read(journal(&f)).unwrap(), bytes);
+                assert!(pending_record(f.db.secrets.root()).unwrap().is_none());
+                assert!(f.db.secrets.ensure_available().is_ok());
+                assert!(std::fs::read_dir(f.db.secrets.root()).unwrap().all(|e| !e
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".vault-transition-")));
+            }
+        }
+    }
+    #[test]
+    #[serial_test::serial]
+    fn terminal_native_receipts_survive_actual_plain_and_encrypted_restore() {
+        for encrypted in [false, true] {
+            for restored in [false, true] {
+                let f = Fixture::new(if encrypted {
+                    text(TARGET_TEXT)
+                } else {
+                    plain()
+                });
+                let (_, r, c) = receipts(&f);
+                let bytes = if restored { r } else { c };
+                std::fs::write(journal(&f), &bytes).unwrap();
+                install(&f, &mut |_| Ok(())).unwrap();
+                f.assert_installed();
+                assert_eq!(std::fs::read(journal(&f)).unwrap(), bytes);
+            }
+        }
+    }
+    #[test]
+    #[serial_test::serial]
+    fn original_no_native_restore_holds_selector_lock_through_actual_finish() {
+        let f = Fixture::new(plain());
+        let store = crate::app_store::tauri_store_path().unwrap();
+        assert!(!journal(&f).exists());
+        let mut phases = Vec::new();
+        let idle_epoch = f.db.secrets.lifecycle_epoch();
+        install(&f, &mut |phase| {
+            let expected = if phase == Checkpoint::Staged {
+                idle_epoch
+            } else {
+                idle_epoch + 1
+            };
+            assert_eq!(f.db.secrets.lifecycle_epoch(), expected);
+            assert!(isolated_scope::lock_selection_at(&store).is_err());
+            let test = format!(
+                "{}::child_selector_is_busy",
+                module_path!().split_once("::").unwrap().1
+            );
+            let out = run_selector_child(&test, &store);
+            assert!(
+                selector_child_observed_busy(&out),
+                "{}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+            phases.push(phase);
+            Ok(())
+        })
+        .unwrap();
+        assert!(phases.contains(&Checkpoint::Staged));
+        assert!(phases.contains(&Checkpoint::Database));
+        assert!(phases.contains(&Checkpoint::Metadata));
+        assert_eq!(f.db.secrets.lifecycle_epoch(), idle_epoch + 1);
+        assert!(f.db.secrets.ensure_available().is_ok());
+        f.assert_installed();
+        assert!(!journal(&f).exists());
+        assert!(isolated_scope::lock_selection_at(&store).is_ok());
+    }
+    fn run_selector_child(test: &str, store: &Path) -> std::process::Output {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", test])
+            .env("LP_CONTENT_CONSUMER_STORE", store)
+            .output()
+            .unwrap()
+    }
+    fn selector_child_observed_busy(output: &std::process::Output) -> bool {
+        // libtest returns 0 for zero matches; only the reached helper emits 79.
+        output.status.code() == Some(79)
+    }
+    #[test]
+    fn selector_child_protocol_rejects_zero_matches_and_requires_busy_hit() {
+        let temporary = crate::secrets::testing::tempdir().unwrap();
+        let store = temporary.path().join("app_paths.json");
+        let guard = isolated_scope::lock_selection_at(&store).unwrap();
+        let exact = format!(
+            "{}::child_selector_is_busy",
+            module_path!().split_once("::").unwrap().1
+        );
+        let missing = run_selector_child(&format!("{exact}__not_a_test"), &store);
+        assert!(
+            missing.status.success(),
+            "zero matches is a harness success"
+        );
+        assert!(!selector_child_observed_busy(&missing));
+        let matched = run_selector_child(&exact, &store);
+        assert!(
+            selector_child_observed_busy(&matched),
+            "{}",
+            String::from_utf8_lossy(&matched.stdout)
+        );
+        drop(guard);
+        let free = run_selector_child(&exact, &store);
+        assert!(!selector_child_observed_busy(&free));
+    }
+    #[test]
+    #[ignore]
+    fn child_selector_is_busy() {
+        let path = std::env::var_os("LP_CONTENT_CONSUMER_STORE")
+            .expect("parent fixture sets selector path");
+        assert!(isolated_scope::lock_selection_at(Path::new(&path)).is_err());
+        std::process::exit(79);
+    }
+    #[test]
+    #[serial_test::serial]
+    fn selector_change_after_staging_blocks_intent_and_preserves_original_database() {
+        let f = Fixture::new(plain());
+        let before = digest(&f);
+        let skills = tree(&f.db.secrets.root().join("skills"));
+        let store = crate::app_store::tauri_store_path().unwrap();
+        assert!(install(&f, &mut |phase| {
+            if phase == Checkpoint::Staged {
+                std::fs::write(&store, b"{\"syntheticForeignSelector\":true}").unwrap();
+            }
+            Ok(())
+        })
+        .is_err());
+        assert_eq!(digest(&f), before);
+        assert_eq!(tree(&f.db.secrets.root().join("skills")), skills);
+        assert!(pending_record(f.db.secrets.root()).unwrap().is_none());
+        assert!(f.db.secrets.ensure_available().is_ok());
+        assert_eq!(
+            std::fs::read(&store).unwrap(),
+            b"{\"syntheticForeignSelector\":true}"
+        );
+    }
+    #[test]
+    #[serial_test::serial]
+    fn native_phase_change_after_staging_is_not_only_checked_at_constructor() {
+        let f = Fixture::new(plain());
+        let (prepared, _, _) = receipts(&f);
+        let before = digest(&f);
+        assert!(install(&f, &mut |phase| {
+            if phase == Checkpoint::Staged {
+                std::fs::write(journal(&f), &prepared).unwrap();
+            }
+            Ok(())
+        })
+        .is_err());
+        assert_eq!(digest(&f), before);
+        assert_eq!(std::fs::read(journal(&f)).unwrap(), prepared);
+        assert!(pending_record(f.db.secrets.root()).unwrap().is_none());
+        assert!(f.db.secrets.ensure_available().is_ok());
+    }
+    #[test]
+    #[serial_test::serial]
+    fn foreign_epoch_changes_at_real_staging_or_intent_hook_block_database_publication() {
+        for boundary in [Checkpoint::Staged, Checkpoint::Intent] {
+            let f = Fixture::new(plain());
+            let before = digest(&f);
+            assert!(install(&f, &mut |point| {
+                if point == boundary {
+                    f.db.secrets.set_blocked(true);
+                }
+                Ok(())
+            })
+            .is_err());
+            // The deliberate interruption must keep business reads blocked. Inspect a
+            // private physical snapshot instead; never unblock just to test the DB.
+            assert!(matches!(
+                f.db.conn.lock(),
+                Err(AppError::Config(code)) if code == "secret.recovery_required"
+            ));
+            let captured = crate::database::inspection::capture(
+                &f.db.secrets.root().join(crate::config::DB_FILE_NAME),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(Database::content_digest(&captured.image).unwrap(), before);
+            assert_eq!(
+                pending_record(f.db.secrets.root()).unwrap().is_some(),
+                boundary == Checkpoint::Intent
+            );
+        }
+    }
+    fn leave_selector_lock_from_exited_process(f: &Fixture) -> (PathBuf, Vec<u8>) {
+        let store = crate::app_store::tauri_store_path().unwrap();
+        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "app_store::isolated_scope::tests::content_source_owner::child_leave_owned_selector_lock"])
+            .env("LP_CONTENT_DEAD_LOCK", &store).output().unwrap();
+        assert_eq!(out.status.code(), Some(77));
+        let lock = store.parent().unwrap().join("app_paths.selection.lock");
+        let owner = std::fs::read_dir(lock)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let before = std::fs::read(&owner).unwrap();
+        assert_eq!(f.db.secrets.root(), crate::config::get_app_config_dir());
+        (owner, before)
+    }
+    #[test]
+    #[serial_test::serial]
+    fn every_original_pending_owner_blocks_before_dead_selector_lock_reclamation() {
+        for kind in [
+            "transition",
+            "reset",
+            "bootstrap",
+            "rewrap",
+            "mode",
+            "zcode",
+            "zcode-key",
+            "upgrade",
+            "generation",
+            "native",
+        ] {
+            let f = Fixture::new(plain());
+            let root = f.db.secrets.root();
+            let device = crate::live::engine::DeviceStore::for_device();
+            let (owner, owner_before) = leave_selector_lock_from_exited_process(&f);
+            let before = digest(&f);
+            let store = crate::app_store::tauri_store_path().unwrap();
+            let path = match kind {
+                "transition" => root.join(INTENT),
+                "reset" => root.parent().unwrap().join(format!(
+                    ".{}-vault-reset",
+                    root.file_name().unwrap().to_str().unwrap()
+                )),
+                "bootstrap" => root.join(".vault-bootstrap"),
+                "rewrap" => root.join(".vault-rewrap"),
+                "mode" => device
+                    .root()
+                    .join(crate::secrets::owned_file::DEVICE_STATE_FILE),
+                "zcode" => root.join(crate::secrets::owned_file::JOURNAL_FILE),
+                "zcode-key" => root.join(crate::secrets::owned_file::KEY_INTENT_FILE),
+                "upgrade" => device
+                    .root()
+                    .join(crate::secrets::owned_file::UPGRADE_CHECKPOINT_FILE),
+                "generation" => store
+                    .parent()
+                    .unwrap()
+                    .join("isolated-configs/unknown-candidate/sentinel"),
+                "native" => journal(&f),
+                _ => unreachable!(),
+            };
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"unknown pending synthetic artifact").unwrap();
+            assert!(
+                install(&f, &mut |_| panic!("pending must refuse before staging")).is_err(),
+                "{kind}"
+            );
+            assert_eq!(digest(&f), before);
+            assert_eq!(std::fs::read(&owner).unwrap(), owner_before, "{kind}");
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                b"unknown pending synthetic artifact"
+            );
+        }
+    }
 }

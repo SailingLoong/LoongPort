@@ -77,6 +77,8 @@ pub(crate) mod sync_support;
 // rustc 报 `hidden_glob_reexports`，而 `-D warnings` 把它当错误。
 // 与本目录其它模块同一形状：模块私有、符号 glob 导出。
 mod vendor;
+#[cfg(feature = "gui")]
+mod vendor_connection;
 mod xai_oauth;
 
 mod lightweight;
@@ -122,6 +124,8 @@ pub use star_reward::*;
 pub use stream_check::*;
 pub use subscription::*;
 pub use vendor::*;
+#[cfg(feature = "gui")]
+pub use vendor_connection::*;
 pub use xai_oauth::*;
 
 pub use lightweight::*;

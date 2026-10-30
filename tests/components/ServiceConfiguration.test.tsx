@@ -13,6 +13,8 @@ import { createTestQueryClient } from "../utils/testQueryClient";
 import { ServiceConfiguration } from "@/components/relay/onboarding/ServiceConfiguration";
 const switchTier = vi.fn();
 const complete = vi.fn();
+const records = new Map<string, any>();
+const outcomes = new Map<string, any>();
 vi.mock("@/lib/api/applicationOverview", () => ({
   applicationOverviewApi: {
     state: async () => ({
@@ -56,6 +58,37 @@ vi.mock("@/lib/api/vendor", () => ({
             ]
           : [],
     }),
+    queryConnection: async (_app: string, id: string | null) =>
+      id === null
+        ? { status: "none" }
+        : (outcomes.get(id) ?? { status: "unknown", operationId: id }),
+    prepareConnection: async (input: any) => {
+      const record = {
+        ...input,
+        providerId: "p1",
+        receiptRevision: 1,
+        status: "prepared",
+        operationState: "prepared",
+        completedConfigurationRevision: null,
+      };
+      records.set(input.operationId, record);
+      return record;
+    },
+    switchPreparedConnection: async (input: any) => {
+      const result = await switchTier(
+        input.plan,
+        input.app,
+        input.quitChatgpt ?? undefined,
+      );
+      if (result?.status === "switched")
+        outcomes.set(input.operationId, {
+          ...records.get(input.operationId),
+          status: "completed",
+          operationState: "completed",
+          completedConfigurationRevision: "fixture-revision",
+        });
+      return result;
+    },
     switch: (_rowId: number, id: string, app: string, quit?: boolean) =>
       switchTier(id, app, quit),
   },
@@ -63,7 +96,11 @@ vi.mock("@/lib/api/vendor", () => ({
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  records.clear();
+  outcomes.clear();
+});
 function renderConfiguration() {
   const onDone = vi.fn();
   const onBack = vi.fn();
@@ -121,6 +158,7 @@ describe("ServiceConfiguration", () => {
     switchTier.mockResolvedValue({
       status: "confirmationRequired",
       targetName: "Standard",
+      quitRequired: true,
     });
     const { onDone } = renderConfiguration();
     await screen.findByText("Standard");

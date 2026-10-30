@@ -496,7 +496,7 @@ it("releases the real submit gate after resolver validation fails", async () => 
   expect(save).toHaveBeenCalledTimes(1);
 });
 
-it("does not release a restored session's pending submit gate when an older save fails", async () => {
+it("keeps the retained draft single-flight across hide and restores retry after failure", async () => {
   let rejectOld!: (error: Error) => void;
   let resolveNew!: () => void;
   const save = vi
@@ -518,14 +518,79 @@ it("does not release a restored session's pending submit gate when an older save
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
   rendered.rerender(view(false));
   rendered.rerender(view(true));
+  const addButton = document.querySelector<HTMLButtonElement>(
+    'button[type="submit"][form="provider-form"]',
+  )!;
+  expect(addButton).toBeVisible();
+  await waitFor(() => expect(addButton).toBeDisabled());
+  await act(async () => submit());
+  expect(save).toHaveBeenCalledTimes(1);
+  expect(back).not.toHaveBeenCalled();
+
+  await act(async () => rejectOld(new Error("Old submission failed")));
+  expect(
+    screen.queryByText("notifications.saveFailedGeneric"),
+  ).not.toBeInTheDocument();
+  expect(document.querySelector('input[name="name"]')).toHaveValue(
+    "Retained draft",
+  );
+  expect(back).not.toHaveBeenCalled();
+  await waitFor(() => expect(addButton).toBeEnabled());
   submit();
   await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
-  await act(async () => rejectOld(new Error("Old submission failed")));
+  await waitFor(() => expect(addButton).toBeDisabled());
   await act(async () => submit());
   expect(save).toHaveBeenCalledTimes(2);
   await act(async () => resolveNew());
   expect(save).toHaveBeenCalledTimes(2);
   expect(back).toHaveBeenCalledTimes(1);
+});
+
+it("does not release a new draft's pending gate when the old draft fails", async () => {
+  let rejectOld!: (error: Error) => void;
+  let resolveNew!: () => void;
+  const save = vi
+    .fn()
+    .mockImplementationOnce(
+      () =>
+        new Promise<void>((_, fail) => {
+          rejectOld = fail;
+        }),
+    )
+    .mockImplementationOnce(
+      () =>
+        new Promise<void>((done) => {
+          resolveNew = done;
+        }),
+    );
+  const oldDraft = await setupManualSave(save);
+  oldDraft.submit();
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  oldDraft.rendered.unmount();
+
+  const newDraft = await setupManualSave(save);
+  const newName = document.querySelector('input[name="name"]')!;
+  await newDraft.user.clear(newName);
+  await newDraft.user.type(newName, "Distinct new draft");
+  newDraft.submit();
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+  const addButton = document.querySelector<HTMLButtonElement>(
+    'button[type="submit"][form="provider-form"]',
+  )!;
+  await waitFor(() => expect(addButton).toBeDisabled());
+  await act(async () => rejectOld(new Error("Old submission failed")));
+  expect(
+    screen.queryByText("notifications.saveFailedGeneric"),
+  ).not.toBeInTheDocument();
+  expect(oldDraft.back).not.toHaveBeenCalled();
+  expect(newDraft.back).not.toHaveBeenCalled();
+  expect(newName).toHaveValue("Distinct new draft");
+  expect(addButton).toBeDisabled();
+  await act(async () => newDraft.submit());
+  expect(save).toHaveBeenCalledTimes(2);
+  await act(async () => resolveNew());
+  expect(save).toHaveBeenCalledTimes(2);
+  expect(newDraft.back).toHaveBeenCalledTimes(1);
 });
 
 it("does not attach a late failure after only the Hermes provider key changes", async () => {

@@ -50,6 +50,7 @@ pub struct StreamingTimeoutConfig {
 /// - 日志标签
 /// - Session ID（用于日志关联）
 pub struct RequestContext {
+    legacy_multi_candidate: bool,
     /// One request-local diagnostic identity, independent of authorization and sessions.
     pub(crate) diagnostic_id: ProxyDiagnosticId,
     request_identity: Option<crate::services::proxy::RequestIdentity>,
@@ -237,6 +238,7 @@ impl RequestContext {
                 _ => ProxyError::DatabaseError(e.to_string()),
             })?;
 
+        let legacy_multi_candidate = selection.legacy_multi_candidate;
         let group_route = selection.group;
         let failover_active = group_route
             .as_ref()
@@ -257,6 +259,7 @@ impl RequestContext {
         );
 
         Ok(Self {
+            legacy_multi_candidate,
             caller: None,
             diagnostic_id: ProxyDiagnosticId::new(),
             request_identity,
@@ -367,6 +370,7 @@ impl RequestContext {
                 }),
         )
         .with_group_route(self.group_route.clone())
+        .with_legacy_multi_candidate(self.legacy_multi_candidate)
         .with_request_start(self.start_time)
         .with_request_identity(self.request_identity.clone())
         .with_personal_session_hint(self.personal_session_hint.clone())

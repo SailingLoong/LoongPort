@@ -1,5 +1,5 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { useTranslation } from "react-i18next";
+import { useZCodeBundleImport } from "./viewmodels/useZCodeBundleImport";
+
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -13,14 +13,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ZCodeAccountEvidence } from "./ZCodeAccountEvidence";
-import {
-  accountErrorText,
-  safeAccountError,
-  zcodeAccountsApi,
-  type BundlePreview,
-  type BundleCheckProgress,
-  type AccountError,
-} from "@/lib/api/zcodeAccounts";
 
 type ImportProps = {
   open: boolean;
@@ -29,26 +21,7 @@ type ImportProps = {
   libraryDataRoot?: string;
   catalogRevision: string;
 };
-type Row = BundlePreview["rows"][number];
-type Choice = { index: number; updateDuplicate: boolean };
-const choiceKey = (choices: Choice[]) =>
-  JSON.stringify(
-    [...choices]
-      .sort((a, b) => a.index - b.index)
-      .map(({ index, updateDuplicate }) => [index, updateDuplicate]),
-  );
-type Outcome = "saved" | "refreshed" | "kept" | "unknown";
-function readFile(file: File): Promise<ArrayBuffer> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error("read failed"));
-    reader.onload = () =>
-      reader.result instanceof ArrayBuffer
-        ? resolve(reader.result)
-        : reject(new Error("invalid file"));
-    reader.readAsArrayBuffer(file);
-  });
-}
+
 export function ZCodeBundleImport(props: ImportProps) {
   // Changing the library retires the old preview before any new interaction.
   return props.open ? (
@@ -64,460 +37,50 @@ function ImportSession({
   libraryDataRoot,
   catalogRevision,
 }: ImportProps) {
-  const { t } = useTranslation();
-  const copy = (
-    key: string,
-    defaultValue: string,
-    values?: Record<string, string | number>,
-  ) => t(`zcode.accounts.${key}`, { defaultValue, ...values });
-  const [dismissed, setDismissed] = useState(false);
-  const [file, setFile] = useState<File | null>(null);
-  const [password, setPassword] = useState("");
-  const [review, setReview] = useState<{
-    preview: BundlePreview;
-    revision: string;
-  } | null>(null);
-  const [selected, setSelected] = useState(new Set<number>());
-  const [updates, setUpdates] = useState(new Set<number>());
-  const [consent, setConsent] = useState(false);
-  const [checkRequested, setCheckRequested] = useState(false);
-  const [checkProgress, setCheckProgress] =
-    useState<BundleCheckProgress | null>(null);
-  const [checkedSelection, setCheckedSelection] = useState<string | null>(null);
-  const [checkMismatch, setCheckMismatch] = useState(false);
-  const [busy, setBusy] = useState<
-    "preview" | "check" | "read" | "save" | null
-  >(null);
-  const [error, setError] = useState<AccountError | null>(null);
-  const [refreshFailed, setRefreshFailed] = useState(false);
-  const [originalRequest, setOriginalRequest] = useState<string | null>(() => {
-    try {
-      return zcodeAccountsApi.pendingBundleImport(libraryDataRoot);
-    } catch {
-      return null;
-    } // The pre-dispatch storage guard still fails closed.
+  const {
+    chooseBundle,
+    selectRow,
+    updateRow,
+    t,
+    copy,
+    dismissed,
+    file,
+    password,
+    setPassword,
+    review,
+    reviewRows,
+    consentDisabled,
+    consent,
+    setConsent,
+    checkRequested,
+    checkProgress,
+    checkMismatch,
+    busy,
+    error,
+    refreshFailed,
+    originalRequest,
+    recoveryUnknown,
+    notRecorded,
+    resultRows,
+    resultSummary,
+    submitted,
+    fileInput,
+    close,
+    canCheck,
+    canSave,
+    preview,
+    check,
+    queryCheck,
+    commit,
+    queryOriginal,
+    errorText,
+  } = useZCodeBundleImport({
+    onClose,
+    onImported,
+    libraryDataRoot,
+    catalogRevision,
   });
-  const [recoveryUnknown, setRecoveryUnknown] = useState(false);
-  const [notRecorded, setNotRecorded] = useState(false);
-  const [resultRows, setResultRows] = useState<
-    { row: Row; outcome: Outcome }[]
-  >([]);
-  const [submitted, setSubmitted] = useState(false);
-  const alive = useRef(false);
-  const generation = useRef(0);
-  const checkEpoch = useRef(0);
-  const inFlight = useRef(false);
-  const lease = useRef<string | null>(null);
-  const didSubmit = useRef(false);
-  const seenRevision = useRef(catalogRevision);
-  const fileInput = useRef<HTMLInputElement>(null);
 
-  const retire = () => {
-    generation.current += 1;
-    checkEpoch.current += 1;
-    inFlight.current = false;
-    const previous = lease.current;
-    lease.current = null;
-    if (previous) void zcodeAccountsApi.cancelBundle(previous).catch(() => {});
-  };
-  const clearFile = () => {
-    setFile(null);
-    setPassword("");
-    if (fileInput.current) fileInput.current.value = "";
-  };
-  const invalidateCheck = () => {
-    checkEpoch.current += 1;
-    setCheckProgress(null);
-    setCheckRequested(false);
-    setCheckedSelection(null);
-    setConsent(false);
-    setError(null);
-    setCheckMismatch(false);
-  };
-  useLayoutEffect(() => {
-    alive.current = true;
-    return () => {
-      alive.current = false;
-      retire();
-    };
-  }, []);
-  useLayoutEffect(() => {
-    if (seenRevision.current === catalogRevision) return;
-    seenRevision.current = catalogRevision;
-    // A completed save remains a fact when the caller refreshes its catalog.
-    if (didSubmit.current) return;
-    retire();
-    setReview(null);
-    clearFile();
-    setSelected(new Set());
-    setUpdates(new Set());
-    invalidateCheck();
-    setBusy(null);
-  }, [catalogRevision]);
-  const current = (version: number) =>
-    alive.current && generation.current === version;
-  const close = () => {
-    alive.current = false;
-    retire();
-    clearFile();
-    setDismissed(true);
-    onClose();
-  };
-  const fail = (cause: unknown) => setError(safeAccountError(cause));
-  const choices: Choice[] =
-    review?.preview.rows
-      .filter((row) => selected.has(row.index) && !row.error)
-      .map((row) => ({
-        index: row.index,
-        updateDuplicate: updates.has(row.index),
-      })) ?? [];
-  const selectionKey = choiceKey(choices);
-  const checking =
-    checkRequested && (!checkProgress || checkProgress.status === "checking");
-  const selectionLocked = !!busy || checking || submitted;
-  const canCheck =
-    !!review &&
-    !originalRequest &&
-    choices.length > 0 &&
-    consent &&
-    !busy &&
-    !checking &&
-    !submitted;
-  const canSave =
-    !!review &&
-    !originalRequest &&
-    checkProgress?.status === "ready" &&
-    checkedSelection === selectionKey &&
-    choices.length > 0 &&
-    !busy &&
-    !submitted;
-
-  const preview = async () => {
-    if (
-      !alive.current ||
-      inFlight.current ||
-      review ||
-      originalRequest ||
-      !file ||
-      password.length === 0
-    )
-      return;
-    if (
-      !/\.zsb$/i.test(file.name) ||
-      file.size === 0 ||
-      file.size > 10 * 1024 * 1024
-    ) {
-      fail({
-        code: "zcode.account.bundle_invalid",
-        remedy: "reviewSavedData",
-        committed: false,
-      });
-      return;
-    }
-    inFlight.current = true;
-    setBusy("preview");
-    setError(null);
-    setNotRecorded(false);
-    const version = generation.current;
-    const inputPassword = password;
-    const revision = catalogRevision;
-    setPassword("");
-    let bytes: Uint8Array | null = null;
-    try {
-      bytes = new Uint8Array(await readFile(file));
-      if (!current(version)) return;
-      const next = await zcodeAccountsApi.previewBundle(
-        libraryDataRoot,
-        revision,
-        Array.from(bytes),
-        inputPassword,
-      );
-      if (!current(version)) {
-        void zcodeAccountsApi.cancelBundle(next.previewId).catch(() => {});
-        return;
-      }
-      lease.current = next.previewId;
-      setReview({ preview: next, revision });
-      setSelected(
-        new Set(
-          next.rows
-            .filter((row) => !row.error && !row.ambiguous)
-            .map((row) => row.index),
-        ),
-      );
-      setUpdates(new Set());
-      invalidateCheck();
-    } catch (cause) {
-      if (current(version)) fail(cause);
-    } finally {
-      bytes?.fill(0);
-      if (current(version)) {
-        inFlight.current = false;
-        setBusy(null);
-        clearFile();
-      }
-    }
-  };
-  const applyCheck = (
-    result: BundleCheckProgress,
-    version: number,
-    epoch: number,
-    previewId: string,
-    expectedSelection: string,
-  ) => {
-    if (
-      !current(version) ||
-      checkEpoch.current !== epoch ||
-      result.previewId !== previewId
-    )
-      return;
-    if (choiceKey(result.selected ?? []) !== expectedSelection) {
-      setCheckMismatch(true);
-      setCheckProgress(null);
-      setCheckRequested(false);
-      setCheckedSelection(null);
-      setConsent(false);
-      setError(null);
-      return;
-    }
-    setCheckProgress(result);
-    setError(result.error ? safeAccountError(result.error) : null);
-  };
-  const check = async () => {
-    if (!alive.current || !review || !canCheck || inFlight.current) return;
-    const version = generation.current;
-    const epoch = ++checkEpoch.current;
-    const previewId = review.preview.previewId;
-    inFlight.current = true;
-    setBusy("check");
-    setError(null);
-    setCheckRequested(true);
-    setCheckProgress(null);
-    setCheckMismatch(false);
-    setCheckedSelection(selectionKey);
-    try {
-      applyCheck(
-        await zcodeAccountsApi.checkBundle(previewId, choices, true),
-        version,
-        epoch,
-        previewId,
-        selectionKey,
-      );
-    } catch (cause) {
-      if (current(version) && checkEpoch.current === epoch) fail(cause);
-    } finally {
-      if (current(version) && checkEpoch.current === epoch) {
-        inFlight.current = false;
-        setBusy(null);
-      }
-    }
-  };
-  const queryCheck = async () => {
-    if (
-      !alive.current ||
-      !review ||
-      !checkRequested ||
-      inFlight.current ||
-      submitted
-    )
-      return;
-    const version = generation.current;
-    const epoch = checkEpoch.current;
-    const previewId = review.preview.previewId;
-    inFlight.current = true;
-    setBusy("read");
-    setError(null);
-    try {
-      applyCheck(
-        await zcodeAccountsApi.bundleCheck(previewId),
-        version,
-        epoch,
-        previewId,
-        checkedSelection ?? "",
-      );
-    } catch (cause) {
-      if (current(version) && checkEpoch.current === epoch) fail(cause);
-    } finally {
-      if (current(version) && checkEpoch.current === epoch) {
-        inFlight.current = false;
-        setBusy(null);
-      }
-    }
-  };
-  useEffect(() => {
-    if (
-      !alive.current ||
-      busy ||
-      error ||
-      submitted ||
-      checkProgress?.status !== "checking"
-    )
-      return;
-    const timer = setTimeout(() => void queryCheck(), 1000);
-    return () => clearTimeout(timer);
-  }, [checkProgress, busy, error, submitted]);
-  const commit = async () => {
-    if (
-      !alive.current ||
-      !review ||
-      !canSave ||
-      inFlight.current ||
-      didSubmit.current
-    )
-      return;
-    const version = generation.current;
-    const rows = review.preview.rows.filter((row) =>
-      choices.some((choice) => choice.index === row.index),
-    );
-    inFlight.current = true;
-    didSubmit.current = true;
-    setSubmitted(true);
-    setBusy("save");
-    setError(null);
-    setOriginalRequest(review.preview.previewId);
-    setRecoveryUnknown(false);
-    try {
-      const outcomes = await zcodeAccountsApi.importBundle(
-        libraryDataRoot,
-        review.revision,
-        review.preview.previewId,
-        choices,
-        review.preview.ownerBinding,
-      );
-      if (
-        !Array.isArray(outcomes) ||
-        outcomes.length !== rows.length ||
-        !outcomes.every((outcome) =>
-          ["saved", "refreshed", "kept"].includes(outcome),
-        )
-      )
-        throw {
-          code: "zcode.account.saved_data_invalid",
-          remedy: "reviewSavedData",
-          committed: false,
-        };
-      if (!current(version)) return;
-      setOriginalRequest(null);
-      setResultRows(
-        rows.map((row, index) => ({ row, outcome: outcomes[index] })),
-      );
-      zcodeAccountsApi.acknowledgeBundleImport(
-        libraryDataRoot,
-        review.preview.previewId,
-      );
-      try {
-        await onImported();
-      } catch {
-        if (current(version)) setRefreshFailed(true);
-      }
-    } catch (cause) {
-      if (current(version)) {
-        // Another window may have retained a different request before dispatch.
-        // Follow that existing pointer; absence/read failure never proves unsent.
-        try {
-          const pending = zcodeAccountsApi.pendingBundleImport(libraryDataRoot);
-          if (pending) setOriginalRequest(pending);
-        } catch {
-          // Keep the current unresolved ID and the original safe storage error.
-        }
-        setResultRows(rows.map((row) => ({ row, outcome: "unknown" })));
-        fail(cause);
-      }
-    } finally {
-      if (current(version)) {
-        inFlight.current = false;
-        setBusy(null);
-      }
-    }
-  };
-  const queryOriginal = async () => {
-    if (!alive.current || !originalRequest || inFlight.current) return;
-    const version = generation.current;
-    inFlight.current = true;
-    setBusy("read");
-    setError(null);
-    setRecoveryUnknown(false);
-    try {
-      const result = await zcodeAccountsApi.bundleImportResult(
-        libraryDataRoot,
-        originalRequest,
-      );
-      if (!current(version)) return;
-      if (!result || result.status === "unknown") {
-        setRecoveryUnknown(true);
-        return;
-      }
-      if (result.status === "notRecorded") {
-        zcodeAccountsApi.acknowledgeBundleImport(
-          libraryDataRoot,
-          originalRequest,
-        );
-        setOriginalRequest(null);
-        setNotRecorded(true);
-        setSubmitted(false);
-        didSubmit.current = false;
-        lease.current = null;
-        setReview(null);
-        setResultRows([]);
-        clearFile();
-        invalidateCheck();
-        setSelected(new Set());
-        setUpdates(new Set());
-        try {
-          await onImported();
-        } catch {
-          if (current(version))
-            fail({
-              code: "zcode.account.catalog_changed",
-              remedy: "inspectAgain",
-              committed: false,
-            });
-        }
-        return;
-      }
-      didSubmit.current = true;
-      setSubmitted(true);
-      setOriginalRequest(null);
-      setResultRows(
-        result.rows.map(({ index, id, family, outcome }) => ({
-          row: {
-            index,
-            id,
-            family,
-            label: null,
-            duplicate: false,
-            ambiguous: false,
-            error: null,
-          },
-          outcome,
-        })),
-      );
-      zcodeAccountsApi.acknowledgeBundleImport(
-        libraryDataRoot,
-        originalRequest,
-      );
-      try {
-        await onImported();
-      } catch {
-        if (current(version)) setRefreshFailed(true);
-      }
-    } catch (cause) {
-      if (current(version)) fail(cause);
-    } finally {
-      if (current(version)) {
-        inFlight.current = false;
-        setBusy(null);
-      }
-    }
-  };
-  const errorText = (failure: AccountError) => {
-    const key = safeAccountError(failure).code.slice("zcode.account.".length);
-    return t(`zcode.accounts.errors.${key}`, {
-      defaultValue:
-        accountErrorText[key as keyof typeof accountErrorText] ??
-        accountErrorText.operation_failed,
-    });
-  };
   if (dismissed) return null;
   return (
     <Dialog
@@ -555,8 +118,7 @@ function ImportSession({
                   accept=".zsb"
                   disabled={!!busy || !!review || !!originalRequest}
                   onChange={(event) => {
-                    setFile(event.target.files?.[0] ?? null);
-                    setError(null);
+                    chooseBundle(event.target.files?.[0] ?? null);
                   }}
                 />
                 <Label htmlFor="zcode-bundle-password">
@@ -587,126 +149,114 @@ function ImportSession({
                     )}
                   </p>
                   <div className="space-y-3">
-                    {review.preview.rows.map((row) => {
-                      const checked = checkProgress?.rows.find(
-                        (entry) => entry.index === row.index,
-                      );
-                      return (
-                        <div
-                          key={row.index}
-                          className="space-y-2 rounded border border-border-default p-3"
-                        >
-                          <label className="flex items-start gap-2">
-                            <Checkbox
-                              aria-label={copy(
-                                "bundleSelect",
-                                "Select account {{number}}",
-                                { number: row.index + 1 },
-                              )}
-                              checked={selected.has(row.index)}
-                              disabled={selectionLocked || !!row.error}
-                              onCheckedChange={(value) => {
-                                setSelected((previous) => {
-                                  const next = new Set(previous);
-                                  if (value === true) {
-                                    for (const peer of review.preview.rows)
-                                      if (peer.id === row.id)
-                                        next.delete(peer.index);
-                                    next.add(row.index);
-                                  } else next.delete(row.index);
-                                  return next;
-                                });
-                                invalidateCheck();
-                              }}
-                            />
-                            <span className="break-all text-sm">
-                              {row.index + 1}.{" "}
-                              {row.label ??
-                                row.id ??
-                                copy(
-                                  "bundleInvalidEntry",
-                                  "Unusable account entry",
-                                )}{" "}
-                              · {row.family}
-                            </span>
-                          </label>
-                          {row.error && (
-                            <p className="text-sm">
-                              {row.error === "incompatibleCredentials"
-                                ? copy(
-                                    "bundleIncompatibleV2",
-                                    "These credentials cannot be decrypted in this environment. Restore them in the original environment; this is not an account-expiration result.",
-                                  )
-                                : copy(
-                                    "bundleInvalidEntry",
-                                    "Unusable account entry",
-                                  )}
-                            </p>
-                          )}
-                          {row.ambiguous && (
-                            <p className="text-sm">
-                              {copy(
-                                "bundleAmbiguous",
-                                "Same identity appears more than once. Explicitly choose one record; none is selected by default.",
-                              )}
-                            </p>
-                          )}
-                          {row.duplicate && (
+                    {reviewRows.map(
+                      ({
+                        row,
+                        checked,
+                        selected,
+                        updateDuplicate,
+                        selectionDisabled,
+                        updateDisabled,
+                      }) => {
+                        return (
+                          <div
+                            key={row.index}
+                            className="space-y-2 rounded border border-border-default p-3"
+                          >
                             <label className="flex items-start gap-2">
                               <Checkbox
                                 aria-label={copy(
-                                  "bundleUpdate",
-                                  "Update existing account {{number}}",
+                                  "bundleSelect",
+                                  "Select account {{number}}",
                                   { number: row.index + 1 },
                                 )}
-                                checked={updates.has(row.index)}
-                                disabled={
-                                  selectionLocked || !selected.has(row.index)
-                                }
+                                checked={selected}
+                                disabled={selectionDisabled}
                                 onCheckedChange={(value) => {
-                                  setUpdates((previous) => {
-                                    const next = new Set(previous);
-                                    if (value === true) next.add(row.index);
-                                    else next.delete(row.index);
-                                    return next;
-                                  });
-                                  invalidateCheck();
+                                  selectRow(row, value === true);
                                 }}
                               />
-                              <span className="text-sm">
-                                {copy(
-                                  "updateDuplicate",
-                                  "Explicitly update this existing saved account",
-                                )}
+                              <span className="break-all text-sm">
+                                {row.index + 1}.{" "}
+                                {row.label ??
+                                  row.id ??
+                                  copy(
+                                    "bundleInvalidEntry",
+                                    "Unusable account entry",
+                                  )}{" "}
+                                · {row.family}
                               </span>
                             </label>
-                          )}
-                          {checked?.capabilities && (
-                            <ZCodeAccountEvidence
-                              value={checked.capabilities}
-                            />
-                          )}
-                          {checked?.error && (
-                            <p className="text-sm text-destructive">
-                              {errorText(checked.error)}
-                            </p>
-                          )}
-                          {checked && !checked.capabilities && (
-                            <p className="text-xs text-muted-foreground">
-                              {copy(
-                                "bundleChecksUnknown",
-                                "No verified capability details are available for this account. Unknown does not mean expired.",
-                              )}
-                            </p>
-                          )}
-                        </div>
-                      );
-                    })}
+                            {row.error && (
+                              <p className="text-sm">
+                                {row.error === "incompatibleCredentials"
+                                  ? copy(
+                                      "bundleIncompatibleV2",
+                                      "These credentials cannot be decrypted in this environment. Restore them in the original environment; this is not an account-expiration result.",
+                                    )
+                                  : copy(
+                                      "bundleInvalidEntry",
+                                      "Unusable account entry",
+                                    )}
+                              </p>
+                            )}
+                            {row.ambiguous && (
+                              <p className="text-sm">
+                                {copy(
+                                  "bundleAmbiguous",
+                                  "Same identity appears more than once. Explicitly choose one record; none is selected by default.",
+                                )}
+                              </p>
+                            )}
+                            {row.duplicate && (
+                              <label className="flex items-start gap-2">
+                                <Checkbox
+                                  aria-label={copy(
+                                    "bundleUpdate",
+                                    "Update existing account {{number}}",
+                                    { number: row.index + 1 },
+                                  )}
+                                  checked={updateDuplicate}
+                                  disabled={updateDisabled}
+                                  onCheckedChange={(value) => {
+                                    updateRow(row.index, value === true);
+                                  }}
+                                />
+                                <span className="text-sm">
+                                  {copy(
+                                    "updateDuplicate",
+                                    "Explicitly update this existing saved account",
+                                  )}
+                                </span>
+                              </label>
+                            )}
+                            {checked?.capabilities && (
+                              <ZCodeAccountEvidence
+                                value={checked.capabilities}
+                              />
+                            )}
+                            {checked?.error && (
+                              <p className="text-sm text-destructive">
+                                {errorText(checked.error)}
+                              </p>
+                            )}
+                            {checked && !checked.capabilities && (
+                              <p className="text-xs text-muted-foreground">
+                                {copy(
+                                  "bundleChecksUnknown",
+                                  "No verified capability details are available for this account. Unknown does not mean expired.",
+                                )}
+                              </p>
+                            )}
+                          </div>
+                        );
+                      },
+                    )}
                   </div>
                   <label className="flex items-start gap-2 rounded-md border border-border-default bg-muted/30 p-3 text-sm">
                     <Checkbox
                       checked={consent}
-                      disabled={selectionLocked || choices.length === 0}
+                      disabled={consentDisabled}
                       onCheckedChange={(value) => setConsent(value === true)}
                       aria-label={copy(
                         "bundleCheckConsentLabel",
@@ -791,20 +341,12 @@ function ImportSession({
           )}
           {resultRows.length > 0 && (
             <>
-              {resultRows.every((row) => row.outcome !== "unknown") && (
+              {resultSummary && (
                 <p role="status" className="text-sm">
                   {copy(
                     "bundleImportedV2",
                     "Import completed: {{saved}} saved, {{updated}} updated, {{kept}} kept. Connection evidence remains separate from the native current account.",
-                    {
-                      saved: resultRows.filter((row) => row.outcome === "saved")
-                        .length,
-                      updated: resultRows.filter(
-                        (row) => row.outcome === "refreshed",
-                      ).length,
-                      kept: resultRows.filter((row) => row.outcome === "kept")
-                        .length,
-                    },
+                    resultSummary,
                   )}
                 </p>
               )}

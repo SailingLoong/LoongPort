@@ -26,7 +26,9 @@
 pub(crate) mod backup;
 pub(crate) mod credential_revision;
 mod dao;
+pub(crate) use dao::providers::DuplicateOrder;
 pub(crate) use dao::relay_setup_operations;
+pub(crate) use dao::vendor_connection_operations;
 pub(crate) mod inspection;
 /// LoongPort 自己的迁移，与上游 cc-switch 的完全分离（各记各的版本号）。
 pub(crate) mod loongport_schema;

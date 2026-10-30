@@ -53,6 +53,203 @@ pub(crate) fn lock_selection_at(store: &Path) -> Result<SelectionLock, AppError>
     Ok(SelectionLock { _guard: guard })
 }
 
+/// Selection-bound private source lease; no protection/session lock is acquired here.
+/// The caller already holds its storage guard. This owns the ORIGINAL selector
+/// lock until scope exit, not a second native lock or a credential authority.
+#[derive(Clone, Copy)]
+enum SourceControlPolicy {
+    OutsideSource,
+    InPlaceContent,
+}
+pub(crate) struct SelectedSourceGuard {
+    policy: SourceControlPolicy,
+    replacement_directories: Vec<PathBuf>,
+    snapshot: SelectionSnapshot,
+    source_identity: Option<DirectoryIdentity>,
+    device_identity: Option<DirectoryIdentity>,
+    control_identity: Option<DirectoryIdentity>,
+    lock_identity: Option<DirectoryIdentity>,
+    _lock: SelectionLock,
+}
+impl SelectedSourceGuard {
+    pub(crate) fn source_data_root(&self) -> &Path {
+        self.snapshot.source_data_root()
+    }
+    /// Validate concrete directories that this in-place operation may replace/remove.
+    pub(crate) fn verify_replacement_directories(
+        &self,
+        directories: &[&Path],
+    ) -> Result<(), AppError> {
+        self.verify_unchanged()?;
+        validate_control_replacements(
+            self.snapshot.store.parent().ok_or_else(invalid)?,
+            directories,
+        )
+    }
+
+    pub(crate) fn verify_unchanged(&self) -> Result<(), AppError> {
+        let parent = source_control_parent(&self.snapshot, self.policy)?;
+        validate_control_replacements(
+            parent,
+            &self
+                .replacement_directories
+                .iter()
+                .map(PathBuf::as_path)
+                .collect::<Vec<_>>(),
+        )?;
+        verify_snapshot(&self.snapshot)?;
+        if directory_identity(&self.snapshot.root)? != self.source_identity
+            || directory_identity(&self.snapshot.device_root)? != self.device_identity
+            || directory_identity(parent)? != self.control_identity
+            || directory_identity(&parent.join("app_paths.selection.lock"))? != self.lock_identity
+        {
+            return Err(conflict());
+        }
+        Ok(())
+    }
+}
+/// Read-only admission shares original conversion's control-plane containment rule.
+/// Unusual custom roots containing that plane are unsupported, never relocated.
+fn selected_source_control_parent(expected: &SelectionSnapshot) -> Result<&Path, AppError> {
+    let parent = expected.store.parent().ok_or_else(invalid)?;
+    validate_directory(parent)?;
+    validate_directory(&expected.root)?;
+    validate_existing_ancestors(&expected.device_root)?;
+    for preserved in [&expected.root, &expected.device_root] {
+        if within_by_identity(parent, preserved)?
+            || within_by_identity(&parent.join("isolated-configs"), preserved)?
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(parent)
+}
+pub(crate) fn lock_selected_source_at(
+    expected: &SelectionSnapshot,
+) -> Result<SelectedSourceGuard, AppError> {
+    lock_bound_source_at(expected, SourceControlPolicy::OutsideSource, &[], None)
+}
+fn source_control_parent(
+    expected: &SelectionSnapshot,
+    policy: SourceControlPolicy,
+) -> Result<&Path, AppError> {
+    match policy {
+        SourceControlPolicy::OutsideSource => selected_source_control_parent(expected),
+        SourceControlPolicy::InPlaceContent => {
+            let parent = expected.store.parent().ok_or_else(invalid)?;
+            validate_directory(parent)?;
+            validate_directory(&expected.root)?;
+            validate_existing_ancestors(&expected.device_root)?;
+            Ok(parent)
+        }
+    }
+}
+fn lock_bound_source_at(
+    expected: &SelectionSnapshot,
+    policy: SourceControlPolicy,
+    replacement_directories: &[&Path],
+    permit: Option<&crate::secrets::transition::ContentSelectionPermit<'_>>,
+) -> Result<SelectedSourceGuard, AppError> {
+    let parent = source_control_parent(expected, policy)?;
+    validate_control_replacements(parent, replacement_directories)?;
+    verify_snapshot(expected)?;
+    let source_identity = directory_identity(&expected.root)?;
+    let device_identity = directory_identity(&expected.device_root)?;
+    let control_identity = directory_identity(parent)?;
+    let lock = if let Some(permit) = permit {
+        permit.verify_selection(expected)?;
+        SelectionLock {
+            _guard: crate::zcode_file_lock::FileLock::acquire_recoverable(
+                &parent.join("app_paths.selection"),
+                std::time::Duration::from_millis(200),
+            )?,
+        }
+    } else {
+        lock_selection_at(&expected.store)?
+    };
+    let lock_identity = directory_identity(&parent.join("app_paths.selection.lock"))?;
+    if lock_identity.is_none() {
+        return Err(conflict());
+    }
+    let guard = SelectedSourceGuard {
+        policy,
+        replacement_directories: replacement_directories
+            .iter()
+            .map(|p| p.to_path_buf())
+            .collect(),
+        snapshot: expected.clone(),
+        source_identity,
+        device_identity,
+        control_identity,
+        lock_identity,
+        _lock: lock,
+    };
+    guard.verify_unchanged()?;
+    if let Some(permit) = permit {
+        permit.verify_selection(expected)?;
+    }
+    Ok(guard)
+}
+
+/// Same-storage content writes do not relocate or inventory the control plane.
+/// Reuse original private control-directory initialization and selector lock;
+/// never relax the outside-source policy of the native/conversion constructor.
+/// Caller must hold its original session guard, then retain this guard to completion.
+// Non-recovering path fixture; production content must supply its closed owner permit.
+#[cfg(test)]
+pub(crate) fn lock_content_source_at(
+    expected: &SelectionSnapshot,
+    replacement_directories: &[&Path],
+) -> Result<SelectedSourceGuard, AppError> {
+    let parent = expected.store.parent().ok_or_else(invalid)?;
+    validate_existing_ancestors(parent)?;
+    validate_directory(&expected.root)?;
+    validate_existing_ancestors(&expected.device_root)?;
+    verify_snapshot(expected)?;
+    validate_control_replacements(parent, replacement_directories)?;
+    create_private_directories(parent)?;
+    lock_bound_source_at(
+        expected,
+        SourceControlPolicy::InPlaceContent,
+        replacement_directories,
+        None,
+    )
+}
+
+/// Only the original content owner's closed, fully checked admission may reclaim
+/// a known dead lock. Ordinary/native constructors remain non-recovering.
+pub(crate) fn lock_admitted_content_source_at(
+    expected: &SelectionSnapshot,
+    replacement_directories: &[&Path],
+    permit: &crate::secrets::transition::ContentSelectionPermit<'_>,
+) -> Result<SelectedSourceGuard, AppError> {
+    permit.verify_selection(expected)?;
+    let parent = expected.store.parent().ok_or_else(invalid)?;
+    validate_existing_ancestors(parent)?;
+    validate_directory(&expected.root)?;
+    validate_existing_ancestors(&expected.device_root)?;
+    verify_snapshot(expected)?;
+    validate_control_replacements(parent, replacement_directories)?;
+    create_private_directories(parent)?;
+    lock_bound_source_at(
+        expected,
+        SourceControlPolicy::InPlaceContent,
+        replacement_directories,
+        Some(permit),
+    )
+}
+
+fn validate_control_replacements(parent: &Path, directories: &[&Path]) -> Result<(), AppError> {
+    for directory in directories {
+        validate_absolute(directory)?;
+        validate_existing_ancestors(directory)?;
+        if within_by_identity(parent, directory)? {
+            return Err(conflict());
+        }
+    }
+    Ok(())
+}
+
 /// Recover only an original-owner-authorized, already selected v2 cleanup.
 /// Ordinary preparation and legacy setters never invoke this operation.
 pub(crate) fn recover_selection_lock_at(
@@ -1059,6 +1256,9 @@ fn prepare_candidate_at(
     let lock = lock_selection_at(store)?;
     verify_snapshot(expected)?;
     validate_container_history(expected, &container)?;
+    // Recheck original owner authority under the same selector lock retained by
+    // PendingScope, before creating any container/candidate or durable marker.
+    permit.verify_selection(expected)?;
     if !container.exists() {
         crate::config_file_io::ensure_private_directory(&container)?;
     }

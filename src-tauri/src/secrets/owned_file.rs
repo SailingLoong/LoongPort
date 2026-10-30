@@ -42,7 +42,13 @@ pub(crate) const BUNDLE_EXPORT_FILE: &str = "zcode_bundle_exports.json";
 pub(crate) const WORKBUDDY_FILE: &str = "workbuddy_accounts.json";
 pub(crate) const MINIMAX_CODE_FILE: &str = "minimax_code_accounts.json";
 pub(crate) const TRAE_FILE: &str = "trae_accounts.json";
-const ENCRYPTED_FILES: [&str; 3] = [WORKBUDDY_FILE, MINIMAX_CODE_FILE, TRAE_FILE];
+pub(crate) const WORKBUDDY_NATIVE_JOURNAL_FILE: &str = "workbuddy_native_transaction.json";
+const ENCRYPTED_FILES: [&str; 4] = [
+    WORKBUDDY_FILE,
+    MINIMAX_CODE_FILE,
+    TRAE_FILE,
+    WORKBUDDY_NATIVE_JOURNAL_FILE,
+];
 const ZCODE_FILES: [&str; 6] = [
     PROFILE_FILE,
     JOURNAL_FILE,

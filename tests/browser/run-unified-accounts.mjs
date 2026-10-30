@@ -1,3 +1,4 @@
+import { checkNativeSafety } from "./native-safety.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -5,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { assertScreenshotSource } from "./screenshot-source.mjs";
 import {
   platformAccountFilterName,
+  overviewAccountDetailsName,
+  nativeWorkspaceAccountName,
   nativeAccountKeyboardSteps,
   nativeAccountOverviewCounts,
 } from "./unified-account-locators.mjs";
@@ -170,7 +173,7 @@ try {
           });
           await main
             .getByRole("button", {
-              name: "查看 Synthetic account B",
+              name: overviewAccountDetailsName(t, "Synthetic account B"),
               exact: true,
             })
             .waitFor();
@@ -179,6 +182,36 @@ try {
             0,
             "All must show summaries without visible native workspaces",
           );
+          const overviewRow = main.getByRole("article", {
+            name: "Synthetic account B",
+            exact: true,
+          });
+          assert.equal(
+            await overviewRow
+              .getByRole("button", {
+                name: overviewAccountDetailsName(t, "Synthetic account B"),
+                exact: true,
+              })
+              .count(),
+            1,
+            "The independent Details entry belongs to the exact account row",
+          );
+          assert.equal(
+            await overviewRow.locator("button button").count(),
+            0,
+            "Row controls must not nest buttons",
+          );
+          assert.equal(
+            await overviewRow
+              .getByRole("button", {
+                name: t("accountsOverview.switch"),
+                exact: true,
+              })
+              .isDisabled(),
+            true,
+            "Unavailable client switching must stay disabled",
+          );
+
           await page.waitForFunction(() => window.unifiedLayout.settled());
           await page.evaluate(() => document.fonts.ready);
           await page.screenshot({
@@ -190,7 +223,7 @@ try {
           });
           await main
             .getByRole("button", {
-              name: "查看 Synthetic account B",
+              name: overviewAccountDetailsName(t, "Synthetic account B"),
               exact: true,
             })
             .click();
@@ -200,7 +233,7 @@ try {
           assert.equal(
             await main
               .getByRole("button", {
-                name: "查看 Synthetic account B",
+                name: nativeWorkspaceAccountName("Synthetic account B"),
                 exact: true,
               })
               .getAttribute("aria-pressed"),
@@ -593,8 +626,11 @@ try {
               .getByRole("button", {
                 name:
                   provider === "minimaxCode"
-                    ? "查看 Synthetic account A"
-                    : "查看 Synthetic WorkBuddy account",
+                    ? overviewAccountDetailsName(t, "Synthetic account A")
+                    : overviewAccountDetailsName(
+                        t,
+                        "Synthetic WorkBuddy account",
+                      ),
                 exact: true,
               })
               .click();
@@ -684,8 +720,8 @@ try {
             "true",
           );
           for (const name of [
-            "查看 Synthetic account A",
-            "查看 Synthetic WorkBuddy account",
+            overviewAccountDetailsName(t, "Synthetic account A"),
+            overviewAccountDetailsName(t, "Synthetic WorkBuddy account"),
           ])
             await main.getByRole("button", { name, exact: true }).waitFor();
           assert.equal(
@@ -695,8 +731,8 @@ try {
             nativeAccountOverviewCounts.details,
           );
           for (const name of [
-            "查看 Synthetic account A",
-            "查看 Synthetic account B",
+            overviewAccountDetailsName(t, "Synthetic account A"),
+            overviewAccountDetailsName(t, "Synthetic account B"),
           ])
             assert.equal(
               await main.getByRole("button", { name, exact: true }).count(),
@@ -776,6 +812,17 @@ try {
       ),
     );
     const labels = translations.qoderApplicationEntry;
+    const t = (key) =>
+      key.split(".").reduce((value, part) => value[part], translations);
+    if (!qoderOnly) {
+      results.push(
+        await checkNativeSafety({ browser, variant, t, output, source }),
+      );
+      await writeFile(
+        path.join(output, "results.json"),
+        JSON.stringify(results, null, 2),
+      );
+    }
     for (const entry of ["qoder-services", "qoder-add"]) {
       for (const state of ["bound", "unknown", "error"]) {
         const context = await browser.newContext({

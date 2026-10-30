@@ -187,3 +187,73 @@ pub(crate) async fn set_workbuddy_inference_consent(
     crate::workbuddy::inference::set_inference_consent(state.db.secret_session(), &id, enabled)
         .await
 }
+
+/// Explicit observation only: never captures a reusable native snapshot or writes state.
+#[tauri::command]
+pub(crate) async fn preview_workbuddy_native_capture(
+) -> Result<crate::workbuddy::native_preview::Preview, crate::workbuddy::native_preview::PreviewError>
+{
+    tauri::async_runtime::spawn_blocking(crate::workbuddy::native_preview::preview_current)
+        .await
+        .map_err(|_| crate::workbuddy::native_preview::PreviewError::UnreadableSource)?
+}
+
+#[tauri::command]
+pub(crate) async fn capture_workbuddy_native_account(
+    state: State<'_, AppState>,
+    input: crate::workbuddy::native_capture::Input,
+) -> Result<crate::workbuddy::native_capture::Saved, crate::workbuddy::native_capture::Failure> {
+    crate::workbuddy::native_capture::capture(state.db.clone(), input).await
+}
+
+#[tauri::command]
+pub(crate) async fn list_workbuddy_native_captures(
+    state: State<'_, AppState>,
+) -> Result<
+    crate::workbuddy::native_capture::CurrentCaptures,
+    crate::workbuddy::native_capture::Failure,
+> {
+    crate::workbuddy::native_capture::list(state.db.secret_session()).await
+}
+
+#[tauri::command]
+pub(crate) async fn activate_workbuddy_native_account(
+    state: State<'_, AppState>,
+    target: crate::workbuddy::native_activation::SelectionKey,
+) -> Result<
+    crate::workbuddy::native_activation::Outcome,
+    crate::workbuddy::native_activation::Failure,
+> {
+    crate::workbuddy::native_activation::activate(state.db.clone(), target).await
+}
+
+#[tauri::command]
+pub(crate) async fn activate_workbuddy_native_with_restart(
+    state: State<'_, AppState>,
+    target: crate::workbuddy::native_activation::SelectionKey,
+) -> Result<
+    crate::workbuddy::native_activation::SwitchReport,
+    crate::workbuddy::native_activation::SwitchError,
+> {
+    crate::workbuddy::native_activation::activate_with_restart(state.db.clone(), target).await
+}
+
+#[tauri::command]
+pub(crate) async fn recover_workbuddy_native_switch(
+    state: State<'_, AppState>,
+) -> Result<
+    crate::workbuddy::native_activation::Outcome,
+    crate::workbuddy::native_activation::Failure,
+> {
+    crate::workbuddy::native_activation::recover(state.db.clone()).await
+}
+
+#[tauri::command]
+pub(crate) async fn inspect_workbuddy_native_recovery(
+    state: State<'_, AppState>,
+) -> Result<
+    crate::workbuddy::native_activation::RecoveryState,
+    crate::workbuddy::native_activation::Failure,
+> {
+    crate::workbuddy::native_activation::recovery_state(state.db.secret_session()).await
+}

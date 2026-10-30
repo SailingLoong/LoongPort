@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, expect, it, vi } from "vitest";
@@ -16,6 +17,10 @@ const mocks = vi.hoisted(() => ({
   complete: vi.fn(),
   vendorSwitch: vi.fn(),
   apply: vi.fn(),
+  catalogPreview: vi.fn(),
+  records: new Map<string, any>(),
+  outcomes: new Map<string, any>(),
+  backendRevision: "written",
 }));
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
@@ -70,6 +75,79 @@ vi.mock("@/lib/api/vendor", () => ({
           : []),
       ],
     }),
+    queryConnection: async (_app: string, id: string | null) =>
+      id === null
+        ? { status: "none" }
+        : (mocks.outcomes.get(id) ?? { status: "unknown", operationId: id }),
+    prepareConnection: async (input: any) => {
+      const record = {
+        ...input,
+        providerId:
+          input.rowId === 9 ? "vendor-generated-provider" : input.plan,
+        receiptRevision: 1,
+        status: "prepared",
+        operationState: "prepared",
+        completedConfigurationRevision: null,
+      };
+      mocks.records.set(input.operationId, record);
+      return record;
+    },
+    switchPreparedConnection: async (input: any) => {
+      const decision = mocks.records.get(input.operationId)?.catalogDecision;
+      const result = decision
+        ? { status: "switched", warnings: [] }
+        : input.rowId === 7
+          ? await mocks.switch(
+              input.plan,
+              input.app,
+              input.quitChatgpt ?? undefined,
+            )
+          : await mocks.vendorSwitch(
+              input.rowId,
+              input.plan,
+              input.app,
+              input.quitChatgpt ?? undefined,
+            );
+      if (result?.status === "switched") {
+        mocks.outcomes.set(input.operationId, {
+          ...mocks.records.get(input.operationId),
+          status: "completed",
+          operationState: "completed",
+          completedConfigurationRevision:
+            input.rowId === 9 ? "vendor-written" : mocks.backendRevision,
+        });
+      }
+      return result;
+    },
+    previewConnectionReview: async (input: any) => ({
+      ...input,
+      status: "reviewRequired",
+      receiptRevision: 1,
+      observedRevision: "observed",
+    }),
+    reviewConnection: async (input: any) => ({
+      ...mocks.records.get(input.operationId),
+      status: "failedBeforeWrite",
+      operationState: "failedBeforeWrite",
+      receiptRevision: 2,
+    }),
+    previewConnectionCatalog: mocks.catalogPreview,
+    previewNewConnectionIntent: async (input: any) => ({
+      ...input,
+      status: "newIntentReviewRequired",
+      receiptRevision: 1,
+      originalRowId: input.targetRowId,
+      originalPlan: input.targetPlan,
+      targetProviderId:
+        input.targetRowId === 9
+          ? "vendor-generated-provider"
+          : input.targetPlan,
+      reviewToken: "a".repeat(64),
+    }),
+    confirmNewConnectionIntent: async (input: any) => ({
+      status: "newIntentPermitted",
+      app: input.app,
+    }),
     switch: (rowId: number, id: string, app: string, quit?: boolean) =>
       rowId === 7
         ? mocks.switch(id, app, quit)
@@ -109,7 +187,18 @@ async function selectBoth() {
     target: { value: "codex" },
   });
 }
+function appRow(name: string) {
+  const row = screen.getByRole("combobox", { name }).parentElement;
+  if (!row) throw new Error(`Missing configuration row for ${name}`);
+  return within(row);
+}
+
 beforeEach(() => {
+  mocks.records.clear();
+  mocks.outcomes.clear();
+  mocks.catalogPreview.mockReset();
+  mocks.apply.mockReset();
+  mocks.backendRevision = "written";
   mocks.switch
     .mockReset()
     .mockResolvedValue({ status: "switched", warnings: [] });
@@ -122,7 +211,7 @@ beforeEach(() => {
     .mockResolvedValue({ status: "switched", warnings: [] });
 });
 
-it("shows partial success and retries B without applying still-matching A again", async () => {
+it("rechecks the successful app and requires explicit reapply for an unknown result", async () => {
   mocks.switch.mockImplementation(async (_id, app) => {
     if (
       app === "codex" &&
@@ -134,16 +223,56 @@ it("shows partial success and retries B without applying still-matching A again"
   });
   const { onDone } = mount();
   await selectBoth();
+  const shareData = await screen.findByRole("checkbox");
+  fireEvent.click(shareData);
+  expect(shareData).not.toBeChecked();
   fireEvent.click(
     screen.getByRole("button", { name: "loongport.onboarding.finish" }),
   );
   await screen.findByText("B unavailable");
   expect(
-    screen.getByText("loongport.onboarding.results.success"),
+    appRow("Claude Code").getByText("loongport.onboarding.results.success"),
+  ).toBeInTheDocument();
+  expect(
+    appRow("Codex").getByText("loongport.onboarding.results.unverified"),
   ).toBeInTheDocument();
   expect(screen.getByRole("combobox", { name: "Codex" })).toBeDisabled();
   fireEvent.click(
     screen.getByRole("button", { name: "loongport.onboarding.continueSetup" }),
+  );
+  await waitFor(() => expect(mocks.state).toHaveBeenCalledTimes(2));
+  expect(mocks.switch.mock.calls.map(([, app]) => app)).toEqual([
+    "claude",
+    "codex",
+  ]);
+  expect(mocks.complete).not.toHaveBeenCalled();
+  expect(onDone).not.toHaveBeenCalled();
+  expect(
+    appRow("Claude Code").getByText("loongport.onboarding.results.success"),
+  ).toBeInTheDocument();
+  expect(
+    appRow("Codex").getByText("loongport.onboarding.results.unverified"),
+  ).toBeInTheDocument();
+  await waitFor(() =>
+    expect(
+      appRow("Codex").getByRole("button", {
+        name: "loongport.onboarding.reapply",
+      }),
+    ).toBeEnabled(),
+  );
+  fireEvent.click(
+    appRow("Codex").getByRole("button", {
+      name: "loongport.onboarding.reapply",
+    }),
+  );
+  expect(mocks.complete).not.toHaveBeenCalled();
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "applications.vendorRecovery.confirm",
+    }),
+  );
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
   );
   await waitFor(() => expect(onDone).toHaveBeenCalledOnce());
   expect(mocks.switch.mock.calls.map(([, app]) => app)).toEqual([
@@ -151,10 +280,16 @@ it("shows partial success and retries B without applying still-matching A again"
     "codex",
     "codex",
   ]);
-  expect(mocks.state.mock.calls.map(([app]) => app)).toContain("claude");
+  expect(mocks.state.mock.calls.map(([app]) => app)).toEqual([
+    "claude",
+    "claude",
+    "claude",
+    "codex",
+  ]);
+  expect(mocks.complete).toHaveBeenCalledExactlyOnceWith(false);
 });
 
-it("requires explicit permission before reapplying a successful item changed externally", async () => {
+it("requires separate explicit permission for a changed success and an unknown result", async () => {
   mocks.switch
     .mockResolvedValueOnce({ status: "switched", warnings: [] })
     .mockRejectedValueOnce(new Error("B unavailable"));
@@ -167,19 +302,72 @@ it("requires explicit permission before reapplying a successful item changed ext
   mocks.state.mockImplementation(async (app: string) =>
     snapshot(app, "external"),
   );
+  mocks.backendRevision = "external";
   fireEvent.click(
     screen.getByRole("button", { name: "loongport.onboarding.continueSetup" }),
   );
   await screen.findByText("loongport.onboarding.results.changed");
+  expect(
+    appRow("Claude Code").getByText("loongport.onboarding.results.changed"),
+  ).toBeInTheDocument();
+  expect(
+    appRow("Codex").getByText("loongport.onboarding.results.unverified"),
+  ).toBeInTheDocument();
   expect(mocks.switch).toHaveBeenCalledTimes(2);
   expect(mocks.complete).not.toHaveBeenCalled();
   fireEvent.click(
-    screen.getByRole("button", { name: "loongport.onboarding.reapply" }),
+    appRow("Claude Code").getByRole("button", {
+      name: "loongport.onboarding.reapply",
+    }),
   );
+  expect(mocks.complete).not.toHaveBeenCalled();
   fireEvent.click(
-    screen.getByRole("button", { name: "loongport.onboarding.continueSetup" }),
+    await screen.findByRole("button", {
+      name: "applications.vendorRecovery.confirm",
+    }),
+  );
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", {
+        name: "loongport.onboarding.continueSetup",
+      }),
+    ).toBeEnabled(),
+  );
+  expect(mocks.switch.mock.calls.map(([, app]) => app)).toEqual([
+    "claude",
+    "codex",
+    "claude",
+  ]);
+  expect(mocks.complete).not.toHaveBeenCalled();
+  expect(onDone).not.toHaveBeenCalled();
+  expect(
+    appRow("Codex").getByText("loongport.onboarding.results.unverified"),
+  ).toBeInTheDocument();
+  fireEvent.click(
+    appRow("Codex").getByRole("button", {
+      name: "loongport.onboarding.reapply",
+    }),
+  );
+  expect(mocks.complete).not.toHaveBeenCalled();
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "applications.vendorRecovery.confirm",
+    }),
+  );
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
   );
   await waitFor(() => expect(onDone).toHaveBeenCalledOnce());
+  expect(mocks.switch.mock.calls.map(([, app]) => app)).toEqual([
+    "claude",
+    "codex",
+    "claude",
+    "codex",
+  ]);
+  expect(mocks.complete).toHaveBeenCalledExactlyOnceWith(true);
 });
 
 it("does not write or complete if a successful item's authoritative state cannot be read", async () => {
@@ -223,6 +411,7 @@ it("keeps a cancelled item separate from earlier success", async () => {
     .mockResolvedValueOnce({
       status: "confirmationRequired",
       targetName: "Codex target",
+      quitRequired: true,
     });
   mount();
   await selectBoth();
@@ -262,7 +451,7 @@ it("prevents same-tick duplicate application and stops before B when navigation 
   expect(onDone).not.toHaveBeenCalled();
 });
 
-it("requires explicit reapplication when a completed switch cannot be verified", async () => {
+it("recovers a completed receipt after a failed current-state read without replaying the write", async () => {
   mocks.state.mockRejectedValueOnce(new Error("Post-switch read failed"));
   const { onDone } = mount();
   await selectBoth();
@@ -270,20 +459,20 @@ it("requires explicit reapplication when a completed switch cannot be verified",
     screen.getByRole("button", { name: "loongport.onboarding.finish" }),
   );
   await screen.findByText("Post-switch read failed");
-  expect(mocks.switch).toHaveBeenCalledTimes(1);
-  fireEvent.click(
-    screen.getByRole("button", { name: "loongport.onboarding.continueSetup" }),
-  );
-  expect(mocks.switch).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(mocks.switch).toHaveBeenCalledTimes(2));
   expect(mocks.complete).not.toHaveBeenCalled();
-  fireEvent.click(
-    screen.getByRole("button", { name: "loongport.onboarding.reapply" }),
-  );
+  expect(onDone).not.toHaveBeenCalled();
+  // A durable completion receipt plus a fresh authoritative read recovers A.
+  // It must not require repeating a known-completed write, nor stall independent B.
   fireEvent.click(
     screen.getByRole("button", { name: "loongport.onboarding.continueSetup" }),
   );
   await waitFor(() => expect(onDone).toHaveBeenCalledOnce());
-  expect(mocks.switch).toHaveBeenCalledTimes(3);
+  expect(mocks.switch.mock.calls.map(([, app]) => app)).toEqual([
+    "claude",
+    "codex",
+  ]);
+  expect(mocks.complete).toHaveBeenCalledExactlyOnceWith(true);
 });
 
 it("verifies a vendor plan using its account and selection identity rather than its generated provider ID", async () => {
@@ -341,7 +530,7 @@ it("previews catalog management before final onboarding apply and never marks pr
         }
       : { status: "switched", warnings: [] },
   );
-  mocks.apply
+  mocks.catalogPreview
     .mockReset()
     .mockResolvedValueOnce({
       status: "confirmationRequired",
@@ -373,28 +562,23 @@ it("previews catalog management before final onboarding apply and never marks pr
   );
   await screen.findByText("/managed/models.json");
   const catalogDecision = { choice: "manage", revision: "catalog-v1" };
-  expect(mocks.apply).toHaveBeenNthCalledWith(
-    1,
-    "codex",
-    {
-      selection: { providerId: "codex" },
-      catalogDecision,
-      catalogPreviewOnly: true,
-    },
-    undefined,
-  );
+  expect(mocks.catalogPreview).toHaveBeenCalledExactlyOnceWith({
+    app: "codex",
+    operationId: expect.any(String),
+    catalogDecision,
+    quitChatgpt: null,
+  });
+  expect(mocks.apply).not.toHaveBeenCalled();
   expect(mocks.complete).not.toHaveBeenCalled();
   expect(onDone).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "applications.apply" }));
   await waitFor(() => expect(onDone).toHaveBeenCalledOnce());
-  expect(mocks.apply).toHaveBeenNthCalledWith(
-    2,
-    "codex",
-    {
-      selection: { providerId: "codex" },
-      catalogDecision,
-      catalogPreviewOnly: false,
-    },
-    false,
+  const prepared = [...mocks.records.values()].filter(
+    (record) => record.app === "codex",
   );
+  expect(prepared).toHaveLength(2);
+  expect(prepared[0].catalogDecision).toBeNull();
+  expect(prepared[1].catalogDecision).toEqual(catalogDecision);
+  expect(prepared[1].operationId).not.toBe(prepared[0].operationId);
+  expect(mocks.apply).not.toHaveBeenCalled();
 });
