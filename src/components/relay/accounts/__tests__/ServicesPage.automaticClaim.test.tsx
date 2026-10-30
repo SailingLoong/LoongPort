@@ -70,7 +70,7 @@ beforeEach(() => {
   i18n.addResourceBundle(
     "zh",
     "translation",
-    { claimSettings: zh.claimSettings },
+    { claimSettings: zh.claimSettings, accountsOverview: zh.accountsOverview },
     true,
     true,
   );
@@ -148,7 +148,10 @@ it("freezes the explicit scope, prevents duplicate writes, and reports partial f
       within(section).getByText(/Synthetic b.*设置结果未确认/),
     ).toBeVisible(),
   );
-  const failedCard = screen.getByRole("button", { name: "查看 Synthetic b" });
+  await user.click(screen.getByRole("checkbox", { name: "隐藏已耗尽" }));
+  const failedCard = screen
+    .getByRole("button", { name: "查看 Synthetic b" })
+    .closest("article")!;
   expect(within(failedCard).getByText(/设置结果未确认/)).toBeVisible();
   expect(
     within(failedCard).queryByText("自动领取未开启"),

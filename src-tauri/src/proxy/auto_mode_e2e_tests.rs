@@ -602,12 +602,16 @@ async fn failing_tier_falls_forward_without_automatic_switchback() {
 
     fx.cheap.set_status(402).await;
 
-    // 两条请求：每条先探测在用档位（500 → 熔断计失败），请求内落到贵档位
+    // Fatal 402 opens the long cooldown; later requests keep the applied forward route.
     let marker = response_text(send_message(fx.port, "sess-e2e-failover-0001").await).await;
     assert_eq!(marker, "served-by-expensive");
     let marker = response_text(send_message(fx.port, "sess-e2e-failover-0001").await).await;
     assert_eq!(marker, "served-by-expensive");
-    assert_eq!(fx.cheap.hits(), 2, "每条请求只应探测故障档位一次");
+    assert_eq!(
+        fx.cheap.hits(),
+        1,
+        "fatal cooldown suppresses another current-tier attempt"
+    );
     assert_eq!(fx.expensive.hits(), 2);
 
     // Model the successful fallback persistence normally performed with AppHandle.
@@ -615,7 +619,7 @@ async fn failing_tier_falls_forward_without_automatic_switchback() {
     fx.cheap.set_status(200).await;
     let marker = response_text(send_message(fx.port, "sess-e2e-failover-0001").await).await;
     assert_eq!(marker, "served-by-expensive");
-    assert_eq!(fx.cheap.hits(), 2, "recovery must not switch back");
+    assert_eq!(fx.cheap.hits(), 1, "recovery must not switch back");
     assert_eq!(fx.expensive.hits(), 3);
     fx.expensive.set_status(500).await;
     assert!(!send_message(fx.port, "sess-e2e-failover-0002")
@@ -624,8 +628,8 @@ async fn failing_tier_falls_forward_without_automatic_switchback() {
         .is_success());
     assert_eq!(
         fx.cheap.hits(),
-        2,
-        "the last priority cannot retry an earlier tier"
+        1,
+        "the earlier fatal-open tier must not be retried"
     );
     fx.server.stop().await.expect("stop server");
 }

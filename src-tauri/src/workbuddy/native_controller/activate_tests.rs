@@ -345,6 +345,82 @@ async fn concurrent_explicit_activations_never_publish_conflicting_images() {
 }
 
 #[tokio::test]
+async fn concurrent_different_targets_do_not_apply_a_stale_preimage() {
+    let f = Fixture::new().await;
+    let binding = f.binding();
+    let c = f.controller(&binding);
+    let marker = f.client.join("workbuddy-desktop.info.logged-out");
+    let old_marker = std::fs::read(&marker).unwrap();
+    std::fs::remove_file(&marker).unwrap();
+    let a = Observation::read(&f.auth(), &f.context).unwrap();
+    let key_a = c
+        .catalog
+        .save(&a, None, "Synthetic A")
+        .await
+        .unwrap()
+        .selection_key()
+        .unwrap();
+    std::fs::write(&marker, old_marker).unwrap();
+    let key_b = f.key();
+    let mut source_a = f.port();
+    let mut source_b = f.port();
+    let mut io_a = Files;
+    let mut io_b = Files;
+    let held = crate::services::sync_protocol::sync_mutex().lock().await;
+    let mut first = Box::pin(activate_once(&c, &key_a, &mut source_a, &mut io_a));
+    let mut second = Box::pin(activate_once(&c, &key_b, &mut source_b, &mut io_b));
+    assert!(futures::poll!(&mut first).is_pending());
+    assert!(futures::poll!(&mut second).is_pending());
+    drop(held);
+    let (a, b) = tokio::join!(first, second);
+    assert_eq!(
+        usize::from(a == Ok(Outcome::Applied)) + usize::from(b == Ok(Outcome::Applied)),
+        1
+    );
+    assert!(a.is_err() || b.is_err());
+    let uid = serde_json::from_slice::<Value>(&std::fs::read(f.auth()).unwrap()).unwrap()
+        ["account"]["uid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(uid, if a == Ok(Outcome::Applied) { "A" } else { "B" });
+}
+
+#[tokio::test]
+async fn sequential_explicit_same_target_requests_are_separate_local_transactions() {
+    struct CountWrites(usize);
+    impl FileIo for CountWrites {
+        fn read(&mut self, path: &Path) -> Result<Option<Zeroizing<Vec<u8>>>, Failure> {
+            Files.read(path)
+        }
+        fn write(&mut self, path: &Path, bytes: &[u8]) -> Result<(), Failure> {
+            self.0 += 1;
+            Files.write(path, bytes)
+        }
+        fn remove(&mut self, path: &Path) -> Result<(), Failure> {
+            Files.remove(path)
+        }
+    }
+    let f = Fixture::new().await;
+    let binding = f.binding();
+    let controller = f.controller(&binding);
+    let mut source = f.port();
+    let mut io = CountWrites(0);
+    assert_eq!(
+        activate_once(&controller, &f.key(), &mut source, &mut io).await,
+        Ok(Outcome::Applied)
+    );
+    assert_eq!(io.0, 1);
+    let after_first = std::fs::read(f.auth()).unwrap();
+    assert_eq!(
+        activate_once(&controller, &f.key(), &mut source, &mut io).await,
+        Ok(Outcome::Applied)
+    );
+    assert_eq!(io.0, 2);
+    assert_eq!(std::fs::read(f.auth()).unwrap(), after_first);
+}
+
+#[tokio::test]
 async fn recovery_status_is_redacted_and_does_not_claim_a_request_finished() {
     let f = Fixture::new().await;
     let binding = f.binding();
@@ -536,8 +612,8 @@ async fn queued_recovery_does_not_bind_to_a_later_pending_journal() {
 }
 
 #[tokio::test]
-async fn queued_activation_refuses_changed_vault_epoch_or_selector() {
-    for kind in ["vault", "epoch", "selector"] {
+async fn queued_activation_refuses_changed_vault_epoch_selector_or_row_lifetime() {
+    for kind in ["vault", "epoch", "selector", "generation", "incarnation"] {
         let f = Fixture::new().await;
         let session = f.session.clone();
         let worker_session = session.clone();
@@ -590,7 +666,19 @@ async fn queued_activation_refuses_changed_vault_epoch_or_selector() {
                 )
             }
             "epoch" => session.invalidate_database_leases(),
-            _ => std::fs::write(control, b"invalid selector").unwrap(),
+            "selector" => std::fs::write(control, b"invalid selector").unwrap(),
+            _ => {
+                let binding = store::binding(&session).unwrap();
+                let mut rows =
+                    serde_json::to_value(store::load(&session, &binding).unwrap()).unwrap();
+                if kind == "generation" {
+                    rows[0]["generation"] = json!(f.receipt.generation + 1);
+                } else {
+                    rows[0]["account"]["native"]["incarnation"] =
+                        json!("33333333-3333-4333-8333-333333333333");
+                }
+                store::save(&session, &binding, serde_json::from_value(rows).unwrap()).unwrap();
+            }
         }
         release.send(()).unwrap();
         assert!(

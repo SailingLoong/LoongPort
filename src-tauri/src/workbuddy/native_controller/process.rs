@@ -139,6 +139,13 @@ impl<S, P> ProcessBound<S, P> {
             processes,
         }
     }
+    #[cfg(any(
+        test,
+        all(target_os = "macos", target_arch = "aarch64", feature = "gui")
+    ))]
+    pub(super) fn source_mut(&mut self) -> &mut S {
+        &mut self.source
+    }
 }
 impl<S, P: Processes> ProcessBound<S, P> {
     fn verify_processes(&mut self) -> Result<(), Failure> {

@@ -359,7 +359,11 @@ it("preserves an entered native manager through All, failed reads and confirmed 
   expect(
     screen.getByRole("button", { name: "查看 Saved account" }),
   ).toBeInTheDocument();
-  expect(screen.getByRole("status")).toHaveTextContent("读取失败");
+  expect(
+    within(
+      screen.getByRole("region", { name: "WorkBuddy · 账号总览" }),
+    ).getByRole("status"),
+  ).toHaveTextContent("读取失败");
   await user.click(screen.getByRole("tab", { name: "WorkBuddy" }));
   await user.click(screen.getByRole("button", { name: "查看 Saved account" }));
   expect(
@@ -703,7 +707,7 @@ it("marks the retained OpenCode summary unknown when its existing service invent
   ).not.toBeInTheDocument();
 });
 
-it("renders the serialized WorkBuddy producer facts through IPC, inventory, query and the real account card", async () => {
+it("renders the serialized WorkBuddy producer facts through IPC, inventory, query and the real account row", async () => {
   // The producer generated these snapshots at the two recorded clocks; do not rewrite their dates.
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(1800000000000);
@@ -728,7 +732,9 @@ it("renders the serialized WorkBuddy producer facts through IPC, inventory, quer
       );
   try {
     const card = within(
-      await screen.findByRole("button", { name: "查看 Synthetic account" }),
+      (
+        await screen.findByRole("button", { name: "查看 Synthetic account" })
+      ).closest("article")!,
     );
     expect(card.getByText(/本地确认时间.*\+20 积分/)).toBeVisible();
     expect(card.getByText(/剩余 30 积分/)).toBeVisible();
@@ -789,7 +795,9 @@ it("keeps the serialized unknown WorkBuddy producer snapshot unknown on the real
   );
   try {
     const card = within(
-      await screen.findByRole("button", { name: "查看 Synthetic account" }),
+      (
+        await screen.findByRole("button", { name: "查看 Synthetic account" })
+      ).closest("article")!,
     );
     expect(card.getByText("暂无可核实成功领取记录")).toBeVisible();
     expect(card.getByText("到期时间未提供")).toBeVisible();

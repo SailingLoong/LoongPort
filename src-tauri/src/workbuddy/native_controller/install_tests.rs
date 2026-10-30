@@ -80,7 +80,7 @@ impl InstalledFixture {
         }
         Self { f, bundle, home }
     }
-    fn origin(&self) -> Result<Origin, Failure> {
+    fn discover(&self) -> Result<Origin, Failure> {
         // No home discovery, credential reads or client execution in this fixture.
         open_at(
             &self.bundle,
@@ -89,6 +89,11 @@ impl InstalledFixture {
             Domain::WorkBuddy,
             ARTIFACTS,
         )
+    }
+    fn origin(&self) -> Result<Origin, Failure> {
+        let mut origin = self.discover()?;
+        origin.begin_operation()?;
+        Ok(origin)
     }
     async fn bind_target(&mut self, source: &Origin) {
         let original = std::fs::read(self.f.auth()).unwrap();
@@ -131,18 +136,52 @@ impl Processes for Quiet {
 }
 
 #[tokio::test]
+async fn discovery_pins_without_reading_build_until_operation_admission() {
+    use super::super::install::take_content_reads;
+    let f = InstalledFixture::new().await;
+    take_content_reads();
+    let origin = f.discover().unwrap();
+    assert!(
+        take_content_reads().is_empty(),
+        "discovery must not hash content"
+    );
+    let mut source = f.controlled(origin);
+    assert_eq!(source.verify_stopped(), Err(Failure::SourceChanged));
+    assert!(take_content_reads().is_empty());
+    source.begin_operation().unwrap();
+    let reads = take_content_reads();
+    for artifact in ARTIFACTS {
+        assert_eq!(reads[&f.bundle.join(artifact.path)], 2 * artifact.size);
+    }
+}
+
+#[tokio::test]
+async fn capture_admission_rejects_changed_build_before_reading_auth_realm() {
+    let f = InstalledFixture::new().await;
+    let origin = f.discover().unwrap();
+    mutate_install(&f.bundle, "same-length");
+    let mut source = f.controlled(origin);
+    let mut read_called = false;
+    let result = super::super::install::admit_capture(&mut source, |path| {
+        read_called = true;
+        let _synthetic = std::fs::read(path).unwrap();
+        Ok(Domain::WorkBuddy)
+    });
+    assert_eq!(result, Err(Failure::SourceChanged));
+    assert!(!read_called, "auth realm read before source admission");
+}
+
+#[tokio::test]
 async fn each_operation_keeps_content_rechecks_within_explicit_budget() {
     use super::super::install::take_content_reads;
     let mut f = InstalledFixture::new().await;
     take_content_reads();
-    let origin = f.origin().unwrap();
+    let origin = f.discover().unwrap();
     f.bind_target(&origin).await;
     let binding = f.f.binding();
     let c = f.f.controller(&binding);
     let selected = c.select(&f.f.key()).await.unwrap();
     let mut source = f.controlled(origin);
-    // Match the installed factory's verification before the controller starts.
-    source.verify_stopped().unwrap();
     let plan = c.prepare(&selected, &mut source, &mut Files).await.unwrap();
     let prepare = take_content_reads();
     for _ in 0..3 {
@@ -158,7 +197,7 @@ async fn each_operation_keeps_content_rechecks_within_explicit_budget() {
     let recover = take_content_reads();
     println!("actual content bytes prepare={prepare:?} apply={apply:?} recover={recover:?}");
     for (operation, reads, passes) in [
-        ("prepare", prepare, 12),
+        ("prepare", prepare, 8),
         ("apply", apply, 12),
         ("recover", recover, 6),
         ("three extra checkpoints", extra, 6),
@@ -177,7 +216,7 @@ async fn each_operation_keeps_content_rechecks_within_explicit_budget() {
 }
 
 #[tokio::test]
-async fn content_change_during_the_only_hash_refuses_before_an_origin_is_returned() {
+async fn content_change_during_admission_refuses_before_admitted_origin_is_returned() {
     let f = InstalledFixture::new().await;
     let original = std::fs::read(f.f.auth()).unwrap();
     let changed = f.bundle.join(ARTIFACTS[1].path);

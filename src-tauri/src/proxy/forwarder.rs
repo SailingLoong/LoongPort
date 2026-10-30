@@ -237,6 +237,7 @@ impl Drop for ActiveConnectionGuard {
 struct GroupMemberModel(String);
 
 pub struct RequestForwarder {
+    legacy_multi_candidate: bool,
     group_route: Option<super::provider_router::GroupRouteSnapshot>,
     /// Same request snapshot used to select the original candidate chain.
     automatic_failover: bool,
@@ -492,6 +493,7 @@ impl RequestForwarder {
         let max_attempts = (max_retries as usize).saturating_add(1);
         Self {
             group_route: None,
+            legacy_multi_candidate: false,
             automatic_failover,
             diagnostic_id,
             request_identity: None,
@@ -581,6 +583,11 @@ impl RequestForwarder {
             binding.check_route(&service, app, providers)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn with_legacy_multi_candidate(mut self, multi: bool) -> Self {
+        self.legacy_multi_candidate = multi;
+        self
     }
 
     pub(crate) fn with_group_route(
@@ -1086,6 +1093,23 @@ impl RequestForwarder {
                 error,
                 provider: Some(provider.clone()),
             })?;
+            // Current-provider bypass remains available for manual, single,
+            // and transient cases. In an automatic legacy multi-candidate
+            // chain, a committed fatal Open on either owner must be skipped.
+            if self.automatic_failover
+                && self.group_route.is_none()
+                && self.legacy_multi_candidate
+                && provider.id == self.current_provider_id_at_start
+            {
+                let (owner_app, owner_id) = self.route_owner(app_type_str, &provider.id);
+                if self
+                    .router
+                    .fatal_current_open(owner_app, owner_id, provider)
+                    .await
+                {
+                    continue;
+                }
+            }
             // Preserve this candidate's explicit intent even when admission or
             // configuration fails before final request preparation.
             free_only |= super::free_models::configured(&provider.settings_config);
@@ -1222,6 +1246,12 @@ impl RequestForwarder {
                 } else {
                     let wait = self.router.acquire_account_capacity(provider);
                     tokio::pin!(wait);
+                    #[cfg(test)]
+                    if let Some(signal) =
+                        attempt_extensions.get::<capacity_consumer_tests::QueueReached>()
+                    {
+                        signal.0.notify_one();
+                    }
                     loop {
                         self.check_capacity_authorization(
                             app_type_str,
@@ -1254,6 +1284,27 @@ impl RequestForwarder {
                 error,
                 provider: Some(provider.clone()),
             })?;
+            // This is the fatal admission point after capacity waiting and
+            // before taking a tier HalfOpen permit. A local permit drops on
+            // either rejection or cancellation while the gate is awaited.
+            if self.automatic_failover && self.group_route.is_none() && self.legacy_multi_candidate
+            {
+                #[cfg(test)]
+                if let Some(signal) =
+                    attempt_extensions.get::<capacity_consumer_tests::GateReached>()
+                {
+                    signal.0.notify_one();
+                }
+                let (owner_app, owner_id) = self.route_owner(app_type_str, &provider.id);
+                if self
+                    .router
+                    .fatal_current_open(owner_app, owner_id, provider)
+                    .await
+                {
+                    drop(permit);
+                    continue;
+                }
+            }
             capacity.hold(permit).map_err(|error| ForwardError {
                 error,
                 provider: Some(provider.clone()),
@@ -4622,8 +4673,8 @@ fn extract_error_message(error: &ProxyError) -> Option<String> {
 /// 凭证/计费级的上游错误：换供应商重试是对的，但这家供应商短期不会自愈
 /// （凭证不会被刷新、余额不会自己回来），熔断要用致命长冷却。
 ///
-/// 只覆盖 401/402/403。429 里的「余额不足」变体需要解析响应体才能区分，
-/// 先按瞬态处理（欠费站点最终会以 402/403 显形）。只在 Retryable 分类内部
+/// 429 仅对结构化 insufficient_quota 使用长冷却；普通限流和未知响应保留瞬态处理。
+/// 只在 Retryable 分类内部
 /// 进一步分级 —— NonRetryable 的 4xx 根本不进健康度。
 ///
 /// 403 例外：newapi 家族会把**站点侧**故障包成 403（2026-08-17 api-top.com
@@ -4641,6 +4692,15 @@ fn is_fatal_upstream_error(error: &ProxyError) -> bool {
         ProxyError::UpstreamError {
             status: 401 | 402, ..
         } => true,
+        ProxyError::UpstreamError { status: 429, body } => body
+            .as_deref()
+            .and_then(|body| serde_json::from_str::<Value>(body).ok())
+            .and_then(|value| value.get("error").and_then(Value::as_object).cloned())
+            .is_some_and(|error| {
+                ["type", "code"].iter().any(|field| {
+                    error.get(*field).and_then(Value::as_str) == Some("insufficient_quota")
+                })
+            }),
         _ => false,
     }
 }
@@ -6117,6 +6177,7 @@ mod tests {
 
         RequestForwarder {
             group_route: None,
+            legacy_multi_candidate: false,
             automatic_failover: false,
             diagnostic_id: ProxyDiagnosticId::new(),
             request_identity: None,
@@ -6518,6 +6579,27 @@ mod tests {
         assert!(!is_explicit_upstream_denial(&ProxyError::AuthError(
             "permission_denied".into()
         )));
+    }
+
+    #[test]
+    fn fatal_429_requires_structured_quota_category() {
+        for (body, expected) in [
+            (r#"{"error":{"type":"insufficient_quota"}}"#, true),
+            (r#"{"error":{"code":"insufficient_quota"}}"#, true),
+            (r#"{"error":{"type":"rate_limit_error"}}"#, false),
+            (r#"{"error":{"message":"insufficient_quota"}}"#, false),
+            (r#"{"other":{"type":"insufficient_quota"}}"#, false),
+            ("not json", false),
+        ] {
+            assert_eq!(
+                is_fatal_upstream_error(&ProxyError::UpstreamError {
+                    status: 429,
+                    body: Some(body.into()),
+                }),
+                expected,
+                "{body}"
+            );
+        }
     }
 
     #[test]

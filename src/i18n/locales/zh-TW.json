@@ -1,7 +1,26 @@
 {
   "accountsOverview": {
     "switch": "切換",
-    "switchUnavailable": "目前尚無可驗證的用戶端切換能力"
+    "switchUnavailable": "目前尚無可驗證的用戶端切換能力",
+    "hideExhausted": "隱藏已耗盡",
+    "sort": "排序",
+    "moveLeft": "左移",
+    "moveRight": "右移",
+    "moveUp": "上移",
+    "moveDown": "下移",
+    "appSort": "App 排序",
+    "details": "詳細資料",
+    "collapse": "摺疊 {{name}}",
+    "expand": "展開 {{name}}",
+    "accountSort": "帳號排序",
+    "expiryAsc": "到期時間",
+    "balanceDesc": "剩餘額度",
+    "nameAsc": "名稱",
+    "hiddenCount": "已隱藏 {{count}} 個已耗盡帳號",
+    "sessionOnly": "偏好僅在本次工作階段生效，未能儲存。",
+    "viewAccount": "檢視 {{name}}",
+    "drag": "拖曳 {{name}} 排序",
+    "dragInstructions": "拖曳調整顯示順序。鍵盤或觸控可使用排序選單。"
   },
   "qoderApplicationEntry": {
     "defaultNavigationNamed": "前往 {{app}} 查看與設定",

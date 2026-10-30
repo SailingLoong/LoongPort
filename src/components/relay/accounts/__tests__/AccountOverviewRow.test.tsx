@@ -1,6 +1,25 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
-import { AccountOverviewCard } from "../AccountOverviewCard";
+import { AccountOverviewRow } from "../AccountOverviewRow";
+import { projectAccountOverviewRow } from "../accountOverviewProjection";
+import { useTranslation } from "react-i18next";
+function ProjectedRow({
+  account,
+  unavailable = false,
+}: {
+  account: PlatformAccountSummary;
+  unavailable?: boolean;
+  onOpen?: () => void;
+}) {
+  const { t, i18n } = useTranslation();
+  const row = projectAccountOverviewRow(account, {
+    t,
+    locale: i18n.resolvedLanguage || i18n.language,
+    nowMs: Date.now(),
+    freshness: unavailable ? "stale" : "fresh",
+  });
+  return <AccountOverviewRow row={row} onOpenDetails={() => {}} />;
+}
 import type { PlatformAccountSummary } from "../useAccountPlatformPresence";
 
 function setup(
@@ -17,13 +36,13 @@ function setup(
     ...options,
   } as PlatformAccountSummary;
   render(
-    <AccountOverviewCard
+    <ProjectedRow
       account={account}
       onOpen={() => {}}
       unavailable={unavailable}
     />,
   );
-  return within(screen.getByRole("button", { name: `查看 ${account.label}` }));
+  return within(screen.getByRole("article", { name: account.label }));
 }
 
 it("keeps sparse legacy WorkBuddy snapshots unknown instead of crashing", () => {
@@ -265,29 +284,6 @@ it.each([
   },
 );
 
-it("stops displaying a future batch when its expiry passes without claiming or refreshing", () => {
-  vi.useFakeTimers();
-  try {
-    const card = setup({
-      kind: "workbuddy",
-      value: {
-        creditExpiryStatus: "known",
-        nextKnownCreditExpiry: {
-          expiresAtMs: Date.now() + 1000,
-          remaining: 42,
-          unit: "points",
-        },
-      },
-    });
-    expect(card.getByText(/剩余 42 积分/)).toBeVisible();
-    act(() => vi.advanceTimersByTime(1001));
-    expect(card.getByText("到期数据待更新")).toBeVisible();
-    expect(card.queryByText(/剩余 42/)).not.toBeInTheDocument();
-  } finally {
-    vi.useRealTimers();
-  }
-});
-
 it("hides cached facts when the owner read is unavailable", () => {
   const card = setup(
     {
@@ -364,56 +360,13 @@ it.each([
     } as unknown as PlatformAccountSummary;
     render(
       <I18nextProvider i18n={i18next}>
-        <AccountOverviewCard account={account} onOpen={() => {}} />
+        <ProjectedRow account={account} onOpen={() => {}} />
       </I18nextProvider>,
     );
     for (const text of [lastLabel, expiryLabel, noSuccess, noExpiry])
       expect(screen.getByText(text)).toBeVisible();
   },
 );
-
-it("cancels the old expiry display timer when the account changes", () => {
-  vi.useFakeTimers();
-  try {
-    const account = {
-      id: "old",
-      label: "Old",
-      source: "workbuddy",
-      platform: "workbuddy",
-      snapshot: {
-        kind: "workbuddy",
-        value: {
-          creditExpiryStatus: "known",
-          nextKnownCreditExpiry: {
-            expiresAtMs: Date.now() + 1000,
-            remaining: 42,
-            unit: "points",
-          },
-        },
-      },
-    } as unknown as PlatformAccountSummary;
-    const { rerender } = render(
-      <AccountOverviewCard account={account} onOpen={() => {}} />,
-    );
-    expect(screen.getByText(/剩余 42 积分/)).toBeVisible();
-    const replacement = {
-      ...account,
-      id: "new",
-      label: "New",
-      snapshot: {
-        kind: "workbuddy",
-        value: { creditExpiryStatus: "unavailable" },
-      },
-    } as unknown as PlatformAccountSummary;
-    rerender(<AccountOverviewCard account={replacement} onOpen={() => {}} />);
-    expect(vi.getTimerCount()).toBe(0);
-    act(() => vi.advanceTimersByTime(1001));
-    expect(screen.getByText("到期时间未提供")).toBeVisible();
-    expect(screen.queryByText(/剩余 42/)).not.toBeInTheDocument();
-  } finally {
-    vi.useRealTimers();
-  }
-});
 
 it("localizes the confirmed WorkBuddy credit unit without changing unknown units", () => {
   const card = setup({
@@ -502,7 +455,7 @@ it.each([
   } as unknown as PlatformAccountSummary;
   render(
     <I18nextProvider i18n={i18next}>
-      <AccountOverviewCard account={account} onOpen={() => {}} />
+      <ProjectedRow account={account} onOpen={() => {}} />
     </I18nextProvider>,
   );
   expect(
@@ -510,4 +463,46 @@ it.each([
   ).toBeVisible();
   expect(screen.getByText(new RegExp(`120 ${unit}`))).toBeVisible();
   expect(screen.queryByText(/workbuddy:credits/)).not.toBeInTheDocument();
+});
+
+it("keeps row details independent from the disabled switch and non-interactive row container", () => {
+  const onOpenDetails = vi.fn();
+  const row = {
+    rowKey: "exact-row",
+    groupId: "workbuddy",
+    accountId: "id",
+    name: "Exact row",
+    facts: [],
+    lastSuccess: "Unknown",
+    nextExpiry: "Unknown",
+    earliestKnownExpiryMs: null,
+    balance: null,
+    availability: "unknown",
+    claimIssue: null,
+    detailTarget: { platform: "workbuddy", id: "id" },
+    switchAction: {
+      enabled: false,
+      label: "Switch",
+      reason: "Verified client capability unavailable",
+    },
+  } as const;
+  render(
+    <AccountOverviewRow
+      row={{ ...row, facts: [] }}
+      onOpenDetails={onOpenDetails}
+    />,
+  );
+  const article = screen.getByRole("article", { name: "Exact row" });
+  const details = within(article).getByRole("button", {
+    name: "查看 Exact row",
+  });
+  const switchButton = within(article).getByRole("button", { name: "Switch" });
+  expect(article.tagName).toBe("ARTICLE");
+  expect(article.querySelector("button button")).toBeNull();
+  fireEvent.click(article);
+  fireEvent.click(switchButton);
+  expect(onOpenDetails).not.toHaveBeenCalled();
+  fireEvent.click(details);
+  fireEvent.click(details);
+  expect(onOpenDetails.mock.calls).toEqual([["exact-row"], ["exact-row"]]);
 });

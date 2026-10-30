@@ -3,10 +3,19 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, expect, it, vi } from "vitest";
 import { ServicesPage } from "../ServicesPage";
-import { useState } from "react";
+import i18n from "i18next";
+import zh from "@/i18n/locales/zh.json";
+import { useEffect, useState } from "react";
+import { ACCOUNT_OVERVIEW_PREFERENCES_KEY } from "../accountOverviewPreferences";
 import { PreservedView } from "@/components/ui/PreservedView";
 
-const mocks = vi.hoisted(() => ({ refresh: vi.fn(), reload: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  refresh: vi.fn(),
+  reload: vi.fn(),
+  stopped: vi.fn(),
+  extra: [] as any[],
+  authorization: Promise.resolve(),
+}));
 vi.mock("../useServiceAccounts", () => ({
   useServiceAccounts: () => ({ accounts: [], reload: mocks.reload }),
   configuredApps: () => [],
@@ -21,6 +30,7 @@ vi.mock("../useAccountPlatformPresence", () => ({
       unavailable: [],
       connections: [],
       accounts: [
+        ...mocks.extra,
         {
           source: "workbuddy",
           platform: "workbuddy",
@@ -64,13 +74,41 @@ vi.mock("../useAccountPlatformPresence", () => ({
   }),
 }));
 vi.mock("@/components/settings/AuthCenterPanel", () => ({
-  AuthCenterPanel: () => <div>Original account manager</div>,
+  AuthCenterPanel: () => {
+    const [draft, setDraft] = useState("");
+    const [status, setStatus] = useState("Waiting for synthetic authorization");
+    useEffect(() => {
+      let observing = true;
+      void mocks.authorization.then(() => {
+        if (observing) setStatus("Synthetic authorization finished");
+      });
+      return () => {
+        observing = false;
+        mocks.stopped();
+      };
+    }, []);
+    return (
+      <div>
+        Original account manager
+        <input
+          aria-label="Authorization draft"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+        />
+        <span>{status}</span>
+      </div>
+    );
+  },
 }));
 vi.mock("../ServiceSourceList", () => ({ ServiceSourceList: () => null }));
 vi.mock("@/hooks/useTauriEvent", () => ({ useTauriEvent: vi.fn() }));
 
 beforeEach(() => {
   vi.clearAllMocks();
+  i18n.addResourceBundle("zh", "translation", zh, true, true);
+  localStorage.removeItem(ACCOUNT_OVERVIEW_PREFERENCES_KEY);
+  mocks.extra = [];
+  mocks.authorization = Promise.resolve();
   mocks.refresh.mockResolvedValue(undefined);
   mocks.reload.mockResolvedValue(undefined);
 });
@@ -125,7 +163,9 @@ it("filters summaries repeatedly without opening an account manager", async () =
 
 it("shows four facts without converting a successful claim into inference or balance", () => {
   setup();
-  const card = screen.getByRole("button", { name: "查看 Example account" });
+  const card = screen
+    .getByRole("button", { name: "查看 Example account" })
+    .closest("article")!;
   for (const label of ["授权", "额度 / 积分", "自动领取", "推理消费"])
     expect(within(card).getByText(label)).toBeVisible();
   expect(within(card).getByText("未验证")).toBeVisible();
@@ -227,4 +267,133 @@ it("restores focus after opening add from an account manager", async () => {
     screen.getByRole("button", { name: "Return from manager add" }),
   );
   expect(trigger).toHaveFocus();
+});
+
+const appOrder = () =>
+  within(screen.getByRole("tablist", { name: "平台账号筛选" }))
+    .getAllByRole("tab")
+    .map((tab) => tab.getAttribute("aria-label"));
+it("shares App order between the real tab menu and group menu without changing selection", async () => {
+  const { user } = setup();
+  await user.click(screen.getByRole("button", { name: "App 排序" }));
+  await user.click(screen.getByRole("menuitem", { name: "WorkBuddy：左移" }));
+  expect(appOrder()).toEqual(["全部账号", "WorkBuddy", "MiniMax Code 国内版"]);
+  expect(
+    screen
+      .getAllByRole("region", { name: /账号总览/ })
+      .map((group) => group.getAttribute("aria-label")),
+  ).toEqual(["WorkBuddy · 账号总览", "MiniMax Code 国内版 · 账号总览"]);
+  await user.click(screen.getByRole("button", { name: "WorkBuddy 排序" }));
+  await user.click(screen.getByRole("menuitem", { name: "WorkBuddy：下移" }));
+  expect(appOrder()).toEqual(["全部账号", "MiniMax Code 国内版", "WorkBuddy"]);
+  expect(screen.getByRole("tab", { name: "全部账号" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  expect(
+    screen.queryByText("Original account manager"),
+  ).not.toBeInTheDocument();
+  expect(mocks.refresh).not.toHaveBeenCalled();
+});
+it("defaults to hiding only confirmed exhausted rows and exposes independent row actions", async () => {
+  mocks.extra = [0, null].map((balance, i) => ({
+    source: "workbuddy",
+    platform: "workbuddy",
+    id: `extra${i}`,
+    label: i ? "Unknown balance" : "Exhausted balance",
+    snapshot: {
+      kind: "workbuddy",
+      value: { credits: { totalRemaining: balance } },
+    },
+  }));
+  const { user } = setup();
+  expect(screen.getByRole("checkbox", { name: "隐藏已耗尽" })).toBeChecked();
+  expect(
+    screen.queryByRole("button", { name: "查看 Exhausted balance" }),
+  ).not.toBeInTheDocument();
+  const details = screen.getByRole("button", { name: "查看 Unknown balance" });
+  const row = details.closest("article")!;
+  expect(row).not.toBeNull();
+  expect(details.parentElement?.closest("button")).toBeNull();
+  expect(within(row).getByRole("button", { name: "切换" })).toBeDisabled();
+  expect(within(row).getByText("当前尚无可验证的客户端切换能力")).toBeVisible();
+  await user.click(screen.getByRole("checkbox", { name: "隐藏已耗尽" }));
+  expect(
+    screen.getByRole("button", { name: "查看 Exhausted balance" }),
+  ).toBeVisible();
+});
+it("keeps the original manager and its pending authorization alive through collapse and filtering", async () => {
+  let complete!: () => void;
+  mocks.authorization = new Promise<void>((resolve) => {
+    complete = resolve;
+  });
+  const { user } = setup();
+  await user.click(
+    screen.getByRole("button", { name: "查看 Example account" }),
+  );
+  await user.type(
+    screen.getByRole("textbox", { name: "Authorization draft" }),
+    "Retained draft",
+  );
+  await user.click(screen.getByRole("button", { name: "返回账号" }));
+  await user.click(screen.getByRole("button", { name: "折叠 WorkBuddy" }));
+  await user.click(screen.getByRole("tab", { name: "MiniMax Code 国内版" }));
+  await user.click(screen.getByRole("tab", { name: "全部账号" }));
+  expect(mocks.stopped).not.toHaveBeenCalled();
+  await act(async () => complete());
+  await user.click(screen.getByRole("button", { name: "展开 WorkBuddy" }));
+  await user.click(
+    screen.getByRole("button", { name: "查看 Example account" }),
+  );
+  expect(
+    screen.getByRole("textbox", { name: "Authorization draft" }),
+  ).toHaveValue("Retained draft");
+  expect(screen.getByText("Synthetic authorization finished")).toBeVisible();
+  expect(mocks.stopped).not.toHaveBeenCalled();
+});
+
+it("keeps ordinary tab arrow keys as navigation instead of display-order changes", async () => {
+  const { user } = setup();
+  const before = appOrder();
+  const all = screen.getByRole("tab", { name: "全部账号" });
+  all.focus();
+  await user.keyboard("{ArrowRight}");
+  expect(
+    screen.getByRole("tab", { name: "MiniMax Code 国内版" }),
+  ).toHaveAttribute("aria-selected", "true");
+  expect(appOrder()).toEqual(before);
+  expect(localStorage.getItem(ACCOUNT_OVERVIEW_PREFERENCES_KEY)).toBeNull();
+  expect(
+    screen.queryByText("Original account manager"),
+  ).not.toBeInTheDocument();
+});
+
+it("keeps both order surfaces usable for this session when persistence fails", async () => {
+  const { user } = setup();
+  const failure = vi
+    .spyOn(Storage.prototype, "setItem")
+    .mockImplementation(() => {
+      throw new Error("synthetic quota failure");
+    });
+  try {
+    await user.click(screen.getByRole("button", { name: "App 排序" }));
+    await user.click(screen.getByRole("menuitem", { name: "WorkBuddy：左移" }));
+    expect(appOrder()).toEqual([
+      "全部账号",
+      "WorkBuddy",
+      "MiniMax Code 国内版",
+    ]);
+    expect(screen.getByText("偏好仅在本次会话生效，未能保存。")).toBeVisible();
+    expect(failure).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "WorkBuddy 排序" }));
+    await user.click(screen.getByRole("menuitem", { name: "WorkBuddy：下移" }));
+    expect(appOrder()).toEqual([
+      "全部账号",
+      "MiniMax Code 国内版",
+      "WorkBuddy",
+    ]);
+    expect(failure).toHaveBeenCalledTimes(2);
+  } finally {
+    failure.mockRestore();
+  }
 });

@@ -1,7 +1,26 @@
 {
   "accountsOverview": {
     "switch": "Switch",
-    "switchUnavailable": "Verified client switching is not available yet."
+    "switchUnavailable": "Verified client switching is not available yet.",
+    "hideExhausted": "Hide exhausted",
+    "sort": "Sort",
+    "moveLeft": "Move left",
+    "moveRight": "Move right",
+    "moveUp": "Move up",
+    "moveDown": "Move down",
+    "appSort": "App sort",
+    "details": "Details",
+    "collapse": "Collapse {{name}}",
+    "expand": "Expand {{name}}",
+    "accountSort": "Account sort",
+    "expiryAsc": "Earliest expiry",
+    "balanceDesc": "Remaining balance",
+    "nameAsc": "Name",
+    "hiddenCount": "{{count}} exhausted accounts hidden",
+    "sessionOnly": "Preferences apply to this session; saving failed.",
+    "viewAccount": "View {{name}}",
+    "drag": "Drag {{name}} to reorder",
+    "dragInstructions": "Drag to change display order. Use the Sort menu with a keyboard or touch."
   },
   "qoderApplicationEntry": {
     "defaultNavigationNamed": "View and configure in {{app}}",

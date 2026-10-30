@@ -105,6 +105,8 @@ pub(crate) enum MemberDispatchProof {
 pub(crate) struct RouteSelection {
     pub providers: Vec<Provider>,
     pub group: Option<GroupRouteSnapshot>,
+    // Legacy candidates eligible before breaker-health filtering.
+    pub legacy_multi_candidate: bool,
 }
 
 /// 供应商路由器
@@ -593,6 +595,7 @@ impl ProviderRouter {
         tx.commit()?;
         Ok(Some(RouteSelection {
             providers: selected,
+            legacy_multi_candidate: false,
             group: Some(GroupRouteSnapshot {
                 target_key: group_id,
                 automatic,
@@ -659,9 +662,12 @@ impl ProviderRouter {
             selection.providers = providers;
             return Ok(selection);
         }
+        let (providers, legacy_multi_candidate) =
+            self.select_legacy_providers_with_mode(app, enabled).await?;
         Ok(RouteSelection {
-            providers: self.select_legacy_providers_with_mode(app, enabled).await?,
+            providers,
             group: None,
+            legacy_multi_candidate,
         })
     }
 
@@ -681,7 +687,7 @@ impl ProviderRouter {
         &self,
         app_type: &str,
         enabled: bool,
-    ) -> Result<Vec<Provider>, AppError> {
+    ) -> Result<(Vec<Provider>, bool), AppError> {
         use super::application_routing;
         let chain = application_routing::chain_providers(&self.db, app_type)?;
         let current_id = application_routing::current_provider_id_checked(&self.db, app_type)?;
@@ -700,7 +706,7 @@ impl ProviderRouter {
         {
             result.push(current.clone());
             if !enabled || !provider_supports_failover(app_type, current) {
-                return Ok(result);
+                return Ok((result, false));
             }
         } else if !enabled {
             return Err(AppError::NoProvidersConfigured);
@@ -708,21 +714,56 @@ impl ProviderRouter {
         // 候选 = 当前档（健康时钉住首位，保护会话与提示词缓存）+ **从链头全量扫**：
         // 重新路由一律从用户排的第一名开始往后找，只有屏蔽/熔断等真实错误才跳过
         // ——位置本身不是跳过理由（2026-09-19 用户定调，废除「当前档之前不参与」）。
+        let mut eligible_count = result.len();
         for provider in chain.into_iter() {
             if Some(provider.id.as_str()) == current_id.as_deref() {
                 continue; // 已钉在候选首位，不重复入列
             }
             if application_routing::fallback_exclusion_with(&self.db, app_type, &provider, &blocked)
                 .is_none()
-                && self.tier_and_account_available(app_type, &provider).await
             {
-                result.push(provider);
+                eligible_count += 1;
+                if self.tier_and_account_available(app_type, &provider).await {
+                    result.push(provider);
+                }
             }
         }
         if result.is_empty() {
             return Err(AppError::NoProvidersConfigured);
         }
-        Ok(result)
+        Ok((result, eligible_count > 1))
+    }
+
+    /// Check only already-existing owner breakers; do not create a permit or
+    /// alter the original HalfOpen recovery path.
+    pub(crate) async fn fatal_current_open(
+        &self,
+        app_type: &str,
+        owner_id: &str,
+        provider: &Provider,
+    ) -> bool {
+        debug_assert_eq!(owner_id, provider.id);
+        let tier_key = format!("{app_type}:{owner_id}");
+        let tier = self.circuit_breakers.read().await.get(&tier_key).cloned();
+        if let Some(breaker) = tier {
+            if breaker.fatal_open_unexpired().await {
+                return true;
+            }
+        }
+        if let Some(account_key) = account_circuit_key(app_type, provider) {
+            let account = self
+                .circuit_breakers
+                .read()
+                .await
+                .get(&account_key)
+                .cloned();
+            if let Some(breaker) = account {
+                if breaker.fatal_open_unexpired().await {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// 档位与其所属账号的熔断器是否都可用（选路阶段判断，不占探测名额）。
@@ -1011,6 +1052,11 @@ impl ProviderRouter {
     }
 
     /// 获取或创建熔断器
+    #[cfg(test)]
+    pub(super) async fn test_breaker(&self, key: &str) -> Arc<CircuitBreaker> {
+        self.get_or_create_circuit_breaker(key).await
+    }
+
     async fn get_or_create_circuit_breaker(&self, key: &str) -> Arc<CircuitBreaker> {
         // 先尝试读锁获取
         {

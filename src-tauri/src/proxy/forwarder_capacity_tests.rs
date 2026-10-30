@@ -961,3 +961,339 @@ async fn capacity_consumer_review_middle_busy_must_not_keep_a_failed_current() {
         );
     }
 }
+
+// Opt-in test marker: emitted just before the existing capacity wait.
+#[derive(Clone)]
+pub(super) struct QueueReached(pub Arc<tokio::sync::Notify>);
+
+#[derive(Clone)]
+pub(super) struct GateReached(pub Arc<tokio::sync::Notify>);
+
+async fn expect_shared_fatal_while_queued_skips_candidate(noncurrent: bool) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
+
+    #[derive(Clone)]
+    struct Race {
+        hits: Upstream,
+        count: Arc<AtomicUsize>,
+        first_arrived: Arc<Notify>,
+        finish_first: Arc<Notify>,
+        second_arrived: Arc<Notify>,
+        finish_second: Arc<Notify>,
+    }
+    let upstream = Upstream(Arc::new(Mutex::new(Vec::new())));
+    let race = Race {
+        hits: upstream.clone(),
+        count: Arc::new(AtomicUsize::new(0)),
+        first_arrived: Arc::new(Notify::new()),
+        finish_first: Arc::new(Notify::new()),
+        second_arrived: Arc::new(Notify::new()),
+        finish_second: Arc::new(Notify::new()),
+    };
+    let app = axum::Router::new().fallback(
+        |State(s): State<Race>, uri: Uri, Json(body): Json<Value>| async move {
+            s.hits.0.lock().unwrap().push((uri.to_string(), body));
+            if s.count.fetch_add(1, Ordering::SeqCst) == 0 {
+                s.first_arrived.notify_one();
+                s.finish_first.notified().await;
+                (axum::http::StatusCode::PAYMENT_REQUIRED, Json(json!({"error":{"type":"insufficient_quota","message":"synthetic"}}))).into_response()
+            } else {
+                s.second_arrived.notify_one();
+                s.finish_second.notified().await;
+                Json(json!({"id":"synthetic-response","type":"message","role":"assistant","model":"synthetic-model","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}})).into_response()
+            }
+        }).with_state(race.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let mut f = Fixture::build(upstream, format!("http://{address}"), Some(task)).await;
+    f.providers[1].meta.as_mut().unwrap().loongport_account_id = Some(1);
+    f.db.save_provider("claude", &f.providers[1]).unwrap();
+    f.forwarder.legacy_multi_candidate = true;
+    let snapshot = f
+        .forwarder
+        .router
+        .select_providers_with_mode("claude", true)
+        .await
+        .unwrap();
+    assert!(snapshot.iter().any(|p| p.id == "capacity-a"));
+    assert!(snapshot.iter().any(|p| p.id == "capacity-b"));
+    let a = f.providers[0].clone();
+    let b = f.providers[1].clone();
+    let mut c = b.clone();
+    c.id = "capacity-c".into();
+    c.name = "capacity-c".into();
+    c.meta.as_mut().unwrap().loongport_account_id = Some(2);
+    c.settings_config["env"]["ANTHROPIC_BASE_URL"] = json!(format!("http://{address}/capacity-c"));
+    f.db.save_provider("claude", &c).unwrap();
+    let held_c = f
+        .forwarder
+        .router
+        .acquire_account_capacity(&c)
+        .await
+        .unwrap();
+    let second_candidates = if noncurrent {
+        vec![b.clone(), a.clone(), c.clone()]
+    } else {
+        vec![a.clone(), b.clone(), c.clone()]
+    };
+    let queue = Arc::new(Notify::new());
+    let mut ext = Extensions::new();
+    ext.insert(QueueReached(queue.clone()));
+    let first = f.send(vec![a.clone()], Extensions::new());
+    let observer = async {
+        tokio::time::timeout(Duration::from_secs(2), race.first_arrived.notified())
+            .await
+            .unwrap();
+        let mut second = Box::pin(f.send(second_candidates, ext));
+        tokio::select! {
+            _ = queue.notified() => {},
+            result = &mut second => panic!("second completed before queue: {}", result.is_ok()),
+            _ = tokio::time::sleep(Duration::from_secs(2)) => panic!("queue not reached"),
+        }
+        assert_eq!(race.count.load(Ordering::SeqCst), 1);
+        race.finish_first.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !f
+                .forwarder
+                .router
+                .fatal_current_open("claude", &b.id, &b)
+                .await
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first request must commit fatal");
+        drop(held_c);
+        tokio::select! {
+            _ = race.second_arrived.notified() => {},
+            result = &mut second => panic!("second stopped before fallback transport: {}", result.is_ok()),
+            _ = tokio::time::sleep(Duration::from_secs(2)) => panic!("fallback transport not reached"),
+        }
+        assert_eq!(
+            f.hits()[1].0,
+            "/capacity-c/v1/messages",
+            "a candidate sharing the committed fatal owner must not send"
+        );
+        race.finish_second.notify_one();
+        second
+            .await
+            .unwrap_or_else(|_| panic!("second request failed"))
+    };
+    let (first_result, second_result) = tokio::join!(first, observer);
+    assert!(first_result.is_err());
+    assert_eq!(second_result.provider.id, "capacity-c");
+    assert_eq!(f.hits().len(), 2);
+    assert!(
+        matches!(
+            f.forwarder.router.try_acquire_account_capacity(&b).unwrap(),
+            super::super::account_capacity::CapacityAdmission::Acquired(Some(_))
+        ),
+        "the skipped shared-account candidate must release its capacity"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn red_snapshot_noncurrent_shared_fatal_while_queued_skips_to_fallback() {
+    expect_shared_fatal_while_queued_skips_candidate(true).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn red_snapshot_current_shared_fatal_while_queued_skips_to_fallback() {
+    expect_shared_fatal_while_queued_skips_candidate(false).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn characterize_snapshot_permitted_inflight_request_completes_after_fatal() {
+    use tokio::sync::Notify;
+    #[derive(Clone)]
+    struct Inflight {
+        hits: Upstream,
+        arrived: Arc<Notify>,
+        finish: Arc<Notify>,
+    }
+    let upstream = Upstream(Arc::new(Mutex::new(Vec::new())));
+    let state = Inflight {
+        hits: upstream.clone(),
+        arrived: Arc::new(Notify::new()),
+        finish: Arc::new(Notify::new()),
+    };
+    let app = axum::Router::new().fallback(|State(s): State<Inflight>, uri: Uri, Json(body): Json<Value>| async move {
+        s.hits.0.lock().unwrap().push((uri.to_string(), body));
+        s.arrived.notify_one();
+        s.finish.notified().await;
+        Json(json!({"id":"synthetic-response","type":"message","role":"assistant","model":"synthetic-model","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}))
+    }).with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let mut f = Fixture::build(upstream, format!("http://{address}"), Some(task)).await;
+    f.providers[1].meta.as_mut().unwrap().loongport_account_id = Some(1);
+    f.db.save_provider("claude", &f.providers[1]).unwrap();
+    f.forwarder.legacy_multi_candidate = true;
+    let a = f.providers[0].clone();
+    let b = f.providers[1].clone();
+    let request = f.send(vec![b.clone(), a.clone()], Extensions::new());
+    let observer = async {
+        tokio::time::timeout(Duration::from_secs(2), state.arrived.notified())
+            .await
+            .unwrap();
+        // Model the completion callback of another previously permitted request.
+        f.forwarder
+            .router
+            .record_fatal_result(&a.id, "claude", false, Some("synthetic 402".into()))
+            .await
+            .unwrap();
+        assert!(
+            f.forwarder
+                .router
+                .fatal_current_open("claude", &b.id, &b)
+                .await
+        );
+        state.finish.notify_one();
+    };
+    let (result, ()) = tokio::join!(request, observer);
+    let result = result.unwrap_or_else(|_| panic!("already-sent request failed"));
+    assert_eq!(result.provider.id, "capacity-b");
+    assert_eq!(f.hits().len(), 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn send_gate_cancellation_while_waiting_for_breaker_releases_capacity() {
+    use super::super::account_capacity::CapacityAdmission;
+    let mut f = Fixture::without_transport().await;
+    f.forwarder.legacy_multi_candidate = true;
+    let b = f.providers[1].clone();
+    let breaker = f.forwarder.router.test_breaker("claude:capacity-b").await;
+    let locked = breaker.test_lock_transition().await;
+    let marker = Arc::new(tokio::sync::Notify::new());
+    let mut extensions = Extensions::new();
+    extensions.insert(GateReached(marker.clone()));
+    let mut request = Box::pin(f.send(vec![b.clone(), f.providers[0].clone()], extensions));
+    tokio::select! {
+        _ = marker.notified() => {},
+        result = &mut request => panic!("request completed before the gate: {}", result.is_ok()),
+        _ = tokio::time::sleep(Duration::from_secs(2)) => panic!("gate was not reached"),
+    }
+    assert!(matches!(
+        f.forwarder.router.try_acquire_account_capacity(&b).unwrap(),
+        CapacityAdmission::Busy
+    ));
+    assert!(
+        futures::poll!(&mut request).is_pending(),
+        "request must be waiting on the real transition lock"
+    );
+    drop(request);
+    assert!(matches!(
+        f.forwarder.router.try_acquire_account_capacity(&b).unwrap(),
+        CapacityAdmission::Acquired(Some(_))
+    ));
+    drop(locked);
+    assert_no_attempts(&f);
+}
+
+#[tokio::test]
+#[serial]
+async fn send_gate_all_fatal_queued_candidates_release_capacity() {
+    use super::super::account_capacity::CapacityAdmission;
+    let mut f = Fixture::without_transport().await;
+    f.forwarder.legacy_multi_candidate = true;
+    let a = f.providers[0].clone();
+    let b = f.providers[1].clone();
+    let held_a = f
+        .forwarder
+        .router
+        .acquire_account_capacity(&a)
+        .await
+        .unwrap();
+    let held_b = f
+        .forwarder
+        .router
+        .acquire_account_capacity(&b)
+        .await
+        .unwrap();
+    let marker = Arc::new(tokio::sync::Notify::new());
+    let mut extensions = Extensions::new();
+    extensions.insert(QueueReached(marker.clone()));
+    let mut request = Box::pin(f.send(vec![b.clone(), a.clone()], extensions));
+    tokio::select! {
+        _ = marker.notified() => {},
+        result = &mut request => panic!("request completed before queue: {}", result.is_ok()),
+        _ = tokio::time::sleep(Duration::from_secs(2)) => panic!("queue was not reached"),
+    }
+    f.forwarder
+        .router
+        .record_fatal_result(&a.id, "claude", false, Some("synthetic".into()))
+        .await
+        .unwrap();
+    f.forwarder
+        .router
+        .record_fatal_result(&b.id, "claude", false, Some("synthetic".into()))
+        .await
+        .unwrap();
+    drop(held_a);
+    drop(held_b);
+    let result = tokio::time::timeout(Duration::from_secs(2), request)
+        .await
+        .expect("all-fatal request must terminate");
+    assert!(result.is_err());
+    for p in [&a, &b] {
+        assert!(matches!(
+            f.forwarder.router.try_acquire_account_capacity(p).unwrap(),
+            CapacityAdmission::Acquired(Some(_))
+        ));
+    }
+    assert!(f.hits().is_empty());
+}
+
+#[tokio::test]
+#[serial]
+async fn send_gate_group_route_preserves_existing_account_admission() {
+    use super::super::provider_router::{GroupMemberSnapshot, GroupRouteSnapshot};
+    let mut f = Fixture::new().await;
+    f.providers[1].meta.as_mut().unwrap().loongport_account_id = Some(1);
+    f.db.save_provider("claude", &f.providers[1]).unwrap();
+    let a = f.providers[0].clone();
+    let b = f.providers[1].clone();
+    f.forwarder.legacy_multi_candidate = true;
+    f.forwarder.group_route = Some(GroupRouteSnapshot {
+        target_key: "synthetic-group".into(),
+        automatic: true,
+        revision: 1,
+        members: [&b, &a]
+            .into_iter()
+            .map(|p| GroupMemberSnapshot {
+                provider_id: p.id.clone(),
+                model: "synthetic-model".into(),
+                proof: None,
+            })
+            .collect(),
+    });
+    f.forwarder
+        .router
+        .record_fatal_result(&a.id, "claude", false, Some("synthetic".into()))
+        .await
+        .unwrap();
+    assert!(
+        f.forwarder
+            .router
+            .fatal_current_open("claude", &b.id, &b)
+            .await
+    );
+    let result = f
+        .send(vec![b, a], Extensions::new())
+        .await
+        .unwrap_or_else(|_| panic!("existing group admission should allow the sibling tier"));
+    assert_eq!(result.provider.id, "capacity-b");
+    assert_eq!(f.hits().len(), 1);
+}

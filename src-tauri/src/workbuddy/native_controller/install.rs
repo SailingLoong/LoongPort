@@ -1,6 +1,6 @@
 //! Exact public build membership and local user/install scope, never native-key
 //! validation or a globally unique machine identity. No client is executed.
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
 use super::process;
 use super::{ControlledSource, Failure, NativeContext};
 use crate::workbuddy::model::Domain;
@@ -237,7 +237,6 @@ pub(super) struct Origin {
     root_pin: File,
     artifacts: Vec<PinnedArtifact>,
     revisions: Vec<std::fs::Metadata>,
-    first_operation: bool,
     context: NativeContext,
 }
 impl Origin {
@@ -270,7 +269,7 @@ impl Origin {
             hash.update(artifact.sha256.as_bytes());
             pins.push(PinnedArtifact::open(bundle, artifact)?);
         }
-        let mut origin = Self {
+        let origin = Self {
             bundle: bundle.into(),
             root,
             uid,
@@ -278,7 +277,6 @@ impl Origin {
             root_pin,
             artifacts: pins,
             revisions: Vec::new(),
-            first_operation: true,
             context: NativeContext {
                 product: "workbuddy".into(),
                 region: "cn".into(),
@@ -286,9 +284,8 @@ impl Origin {
                 source: hex::encode(hash.finalize()),
             },
         };
-        // This complete read belongs to the first operation. Later operations
-        // explicitly refresh once; no checkpoint may refresh its own baseline.
-        origin.verify_with(&mut |_| {})?;
+        // Discovery holds physical handles but does not admit a build.
+        origin.verify_local()?;
         Ok(origin)
     }
     fn verify_local(&self) -> Result<(), Failure> {
@@ -362,11 +359,7 @@ impl Origin {
 }
 impl ControlledSource for Origin {
     fn begin_operation(&mut self) -> Result<(), Failure> {
-        if std::mem::take(&mut self.first_operation) {
-            self.verify_unchanged()
-        } else {
-            self.verify_with(&mut |_| {})
-        }
+        self.verify_with(&mut |_| {})
     }
     fn root(&self) -> &Path {
         &self.root
@@ -382,7 +375,6 @@ impl ControlledSource for Origin {
     }
     fn invalidate(&mut self) {
         self.revisions.clear();
-        self.first_operation = false;
     }
     fn verify_unchanged(&mut self) -> Result<(), Failure> {
         self.verify_metadata()?;
@@ -422,23 +414,37 @@ pub(super) fn open(bundle: &Path, realm: Domain) -> Result<Source, Failure> {
         .map_err(|_| Failure::SourceChanged)?;
     let origin = Origin::at(bundle, &home, uid, realm, ARTIFACTS)?;
     let scope = process::Scope::at(bundle, &bundle.join("Contents/MacOS/Electron"))?;
-    let mut source = process::ProcessBound::new(origin, scope, process::MacProcesses);
-    source.verify_stopped()?;
-    Ok(source)
+    Ok(process::ProcessBound::new(
+        origin,
+        scope,
+        process::MacProcesses,
+    ))
+}
+
+#[cfg(any(
+    test,
+    all(target_os = "macos", target_arch = "aarch64", feature = "gui")
+))]
+pub(super) fn admit_capture<P: process::Processes>(
+    source: &mut process::ProcessBound<Origin, P>,
+    read_realm: impl FnOnce(&Path) -> Result<Domain, Failure>,
+) -> Result<(), Failure> {
+    source.begin_operation()?;
+    let realm = read_realm(&source.root().join("workbuddy-desktop.info"))?;
+    source.source_mut().context.realm = realm.host().into();
+    Ok(())
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "gui"))]
 pub(super) fn open_capture(bundle: &Path) -> Result<Source, Failure> {
     let (uid, home) = crate::zcode_accounts::native_context::native_user_home()
         .map_err(|_| Failure::SourceChanged)?;
-    let mut origin = Origin::at(bundle, &home, uid, Domain::WorkBuddy, ARTIFACTS)?;
-    let realm = crate::workbuddy::native_source::Observation::realm_at(
-        &origin.root.join("workbuddy-desktop.info"),
-    )?;
-    origin.context.realm = realm.host().into();
-    origin.verify_unchanged()?;
+    let origin = Origin::at(bundle, &home, uid, Domain::WorkBuddy, ARTIFACTS)?;
     let scope = process::Scope::at(bundle, &bundle.join("Contents/MacOS/Electron"))?;
     let mut source = process::ProcessBound::new(origin, scope, process::MacProcesses);
-    source.verify_stopped()?;
+    admit_capture(
+        &mut source,
+        crate::workbuddy::native_source::Observation::realm_at,
+    )?;
     Ok(source)
 }

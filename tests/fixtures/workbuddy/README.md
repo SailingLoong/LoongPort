@@ -22,5 +22,5 @@ producer or use a real account.
 
 The integration tests keep these source dates unchanged and control only their
 presentation clock. They exercise the original IPC adapter, account inventory
-projection, QueryClient and mounted ServicesPage/AccountOverviewCard, including
+projection, QueryClient and mounted ServicesPage/AccountOverviewRow, including
 refresh from the known view to the stale view.

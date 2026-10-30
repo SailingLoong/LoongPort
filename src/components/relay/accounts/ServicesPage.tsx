@@ -1,22 +1,16 @@
 import { SERVICES_CONTENT_CLASS_NAME } from "@/components/shell/layout";
 import { DialogVisibility } from "@/components/ui/dialog";
-import { useAccountPlatformPresence } from "./useAccountPlatformPresence";
+import { useAccountsOverviewViewModel } from "./useAccountsOverviewViewModel";
+import { AccountOverviewGroup } from "./AccountOverviewGroup";
+import { AccountOrderSurface } from "./AccountOrderSurface";
 import { QoderAccountPanel } from "./QoderAccountPanel";
 import {
   AccountApplicationNavigation,
   AccountWorkspace,
   AccountWorkspaceTarget,
 } from "./AccountWorkspace";
-import {
-  AccountPlatformTabs,
-  AccountPlatformLogo,
-} from "./AccountPlatformTabs";
-import {
-  automaticClaimKey,
-  automaticPolicyStamp,
-} from "./automaticClaimSettings";
+import { AccountPlatformTabs } from "./AccountPlatformTabs";
 import { AutomaticClaimControls } from "./AutomaticClaimControls";
-import { AccountOverviewCard } from "./AccountOverviewCard";
 import { usePreservedViewActive } from "@/components/ui/PreservedView";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
@@ -42,6 +36,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { cn } from "@/lib/utils";
 import {
   Select,
@@ -129,67 +124,40 @@ export function ServicesPage(props: ServicesPageProps) {
   >(props.platform);
   const [blocked, setBlocked] = useState(false);
   const [section, setSection] = useState("platform");
-  const [filter, setFilter] = useState<AccountPlatform | undefined>();
-  const [refreshing, setRefreshing] = useState(false);
   const [claimBusy, setClaimBusy] = useState(false);
   const [claimUnconfirmed, setClaimUnconfirmed] = useState<
     Record<string, string>
   >({});
-  const [entered, setEntered] = useState<AccountPlatform[]>([]);
   const [targets, setTargets] = useState<
     Partial<Record<AccountPlatform, { id: string; request: number }>>
   >({});
+  const overview = useAccountsOverviewViewModel({
+    activeManager: props.onOpenPlatform ? props.platform : localPlatform,
+    accountRoute: props.account,
+    blocked: blocked || claimBusy,
+    automaticUnconfirmed: claimUnconfirmed,
+    onOpenDetails: (target) => openSummary(target.platform, target.id),
+  });
   const {
-    accounts: serviceAccounts,
-    error: serviceAccountsError,
-    reload,
-  } = useServiceAccounts();
-  const routedOpenCode =
-    props.account?.kind === "vendor" &&
-    serviceAccounts.some(
-      (row) =>
-        row.kind === "vendor" &&
-        row.id === props.account?.id &&
-        row.row.vendorId === "opencode",
-    );
-  const active =
-    (props.onOpenPlatform ? props.platform : localPlatform) ??
-    (routedOpenCode ? "opencode" : undefined);
+    presence,
+    activeManager: active,
+    selectedFilter: filter,
+    refreshing,
+    refresh,
+    unavailablePlatforms: unavailable,
+    scopeAccounts: visibleAccounts,
+    managerIds: displayed,
+  } = overview;
+  const available = overview.orderedGroups.map((group) => group.id);
+  const qoderEdition = overview.orderedGroups.find(
+    (group) => group.id === "qoder",
+  )?.edition;
+  const visibleCount = overview.counts.scope;
   const select = (platform: AccountPlatform | undefined) => {
     if (blocked) return;
     if (props.onOpenPlatform) props.onOpenPlatform(platform);
     else setLocalPlatform(platform);
   };
-  useEffect(() => {
-    if (active)
-      setEntered((previous) =>
-        previous.includes(active) ? previous : [...previous, active],
-      );
-  }, [active]);
-  const presence = useAccountPlatformPresence();
-  const present = new Set(presence.data?.platforms ?? []);
-  const unavailable = new Set(presence.data?.unavailable ?? []);
-  if (serviceAccountsError) unavailable.add("opencode");
-  if (
-    serviceAccounts.some(
-      (account) =>
-        account.kind === "vendor" && account.row.vendorId === "opencode",
-    )
-  )
-    present.add("opencode");
-  const available = accountPlatforms
-    .filter((item) => present.has(item.id))
-    .map((item) => item.id);
-  const filterMissing =
-    filter !== undefined &&
-    !presence.isPending &&
-    !unavailable.has(filter) &&
-    !available.includes(filter);
-  useEffect(() => {
-    if (filterMissing) setFilter(undefined);
-  }, [filterMissing]);
-  // Only visited managers stay mounted; switching views must not cancel authorization.
-  const displayed = [...new Set([...entered, ...(active ? [active] : [])])];
   const openSummary = (platform: AccountPlatform, id: string) => {
     if (blocked) return;
     setTargets((previous) => ({
@@ -197,55 +165,6 @@ export function ServicesPage(props: ServicesPageProps) {
       [platform]: { id, request: (previous[platform]?.request ?? 0) + 1 },
     }));
     select(platform);
-  };
-  const overviewAccounts = (presence.data?.accounts ?? []).filter(
-    (row) =>
-      row.source !== "workbuddy-inference" ||
-      !presence.data?.accounts?.some(
-        (other) => other.source === "workbuddy" && other.id === row.id,
-      ),
-  );
-  const visiblePlatforms = filter
-    ? available.filter((id) => id === filter)
-    : available;
-  const qoderRegions = [
-    ...new Set(
-      overviewAccounts
-        .filter((row) => row.platform === "qoder")
-        .map((row) => row.identity),
-    ),
-  ];
-  const qoderEdition =
-    qoderRegions.length === 1
-      ? qoderRegions[0] === "CN"
-        ? "CN"
-        : qoderRegions[0] === "Global"
-          ? "INTL"
-          : undefined
-      : undefined;
-  const allPlatformAccounts = [
-    ...overviewAccounts,
-    ...serviceAccounts
-      .filter((row) => row.kind === "vendor" && row.row.vendorId === "opencode")
-      .map((row) => ({
-        source: "vendor",
-        platform: "opencode" as const,
-        id: String(row.id),
-        label: row.row.accountLabel || accountName(row),
-      })),
-  ];
-  const visibleAccounts = allPlatformAccounts.filter(
-    (row) => !filter || row.platform === filter,
-  );
-  const visibleCount = visibleAccounts.length;
-  const refresh = async () => {
-    if (refreshing || blocked) return;
-    setRefreshing(true);
-    try {
-      await Promise.all([presence.refetch(), reload()]);
-    } finally {
-      setRefreshing(false);
-    }
   };
   useEffect(() => {
     if (active) setSection("platform");
@@ -309,10 +228,12 @@ export function ServicesPage(props: ServicesPageProps) {
             active={filter}
             editions={{ qoder: qoderEdition }}
             platforms={available}
+            orderItems={overview.orderItems}
+            onReorder={overview.reorderGroup}
             disabled={blocked || claimBusy}
             onSelect={(value) => {
               if (blocked) return;
-              setFilter(value);
+              overview.setFilter(value);
               select(undefined);
             }}
           />
@@ -379,6 +300,24 @@ export function ServicesPage(props: ServicesPageProps) {
               </Button>
             </div>
           </header>
+          <label className="flex items-center gap-2 text-sm">
+            <Checkbox
+              checked={overview.preferences.hideExhausted}
+              disabled={blocked || claimBusy}
+              onCheckedChange={overview.setHideExhausted}
+            />
+            {t("accountsOverview.hideExhausted")}
+          </label>
+          {overview.preferencePersistence === "sessionOnly" && (
+            <p role="status" className="text-xs text-muted-foreground">
+              {t("accountsOverview.sessionOnly")}
+            </p>
+          )}
+          {overview.refreshReadFailed && (
+            <p role="alert" className="text-sm text-muted-foreground">
+              {t("loongport.accounts.partialPlatformRead")}
+            </p>
+          )}
           <AutomaticClaimControls
             accounts={visibleAccounts}
             scope={
@@ -407,7 +346,7 @@ export function ServicesPage(props: ServicesPageProps) {
               setClaimUnconfirmed((previous) => ({ ...previous, ...issues }))
             }
           />
-          {presence.isPending && (
+          {overview.loading && (
             <p role="status" className="text-sm text-muted-foreground">
               {t("loongport.accounts.loadingPlatforms", {
                 defaultValue: "正在读取平台账号…",
@@ -422,99 +361,35 @@ export function ServicesPage(props: ServicesPageProps) {
               })}
             </p>
           )}
-          {!presence.isPending && !available.length && !unavailable.size && (
+          {!overview.loading && !available.length && !unavailable.size && (
             <p className="text-sm text-muted-foreground">
               {t("loongport.accounts.emptyPlatforms", {
                 defaultValue: "尚无已导入的平台账号，添加账号后将在这里显示。",
               })}
             </p>
           )}
-          {!active &&
-            visiblePlatforms.map((platform) => {
-              const definition = accountPlatforms.find(
-                (item) => item.id === platform,
-              )!;
-              const summaries = overviewAccounts.filter(
-                (row) => row.platform === platform,
-              );
-              const groupEdition =
-                "edition" in definition
-                  ? definition.edition === "国际版"
-                    ? "INTL"
-                    : "CN"
-                  : platform === "qoder"
-                    ? qoderEdition
-                    : undefined;
-              const vendors =
-                platform === "opencode"
-                  ? serviceAccounts.filter(
-                      (row) =>
-                        row.kind === "vendor" &&
-                        row.row.vendorId === "opencode",
-                    )
-                  : [];
-              return (
-                <section
-                  key={platform}
-                  aria-label={`${accountPlatformLabel(definition)} · ${t("loongport.accounts.overview", { defaultValue: "账号总览" })}`}
-                  className="space-y-3"
-                >
-                  <header className="flex items-center gap-2 pt-1">
-                    <AccountPlatformLogo platform={definition} />
-                    <h3 className="text-sm font-semibold">{definition.name}</h3>
-                    {groupEdition && (
-                      <span className="rounded bg-muted px-1 text-[10px] text-muted-foreground">
-                        {groupEdition}
-                      </span>
-                    )}
-                    <span className="text-sm text-muted-foreground">
-                      {summaries.length + vendors.length}
-                    </span>
-                  </header>
-                  {unavailable.has(platform) && (
-                    <p role="status" className="text-xs text-muted-foreground">
-                      {t("loongport.accounts.staleSummary", {
-                        defaultValue:
-                          "读取失败，显示上次读取的账号摘要；当前状态未知。",
-                      })}
-                    </p>
-                  )}
-                  <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-2">
-                    {summaries.map((row) => (
-                      <AccountOverviewCard
-                        key={`${row.source}:${row.app ?? ""}:${row.id}`}
-                        account={row}
-                        automaticUnconfirmed={
-                          claimUnconfirmed[automaticClaimKey(row)] ===
-                          automaticPolicyStamp(row)
-                        }
-                        unavailable={unavailable.has(platform)}
-                        disabled={blocked || claimBusy}
-                        onOpen={() =>
-                          openSummary(
-                            platform,
-                            row.app ? `${row.app}:${row.id}` : row.id,
-                          )
-                        }
-                      />
-                    ))}
-                    {vendors.map((row) => (
-                      <AccountOverviewCard
-                        key={row.id}
-                        account={{
-                          source: "vendor",
-                          platform,
-                          id: String(row.id),
-                          label: row.row.accountLabel || accountName(row),
-                        }}
-                        disabled={blocked || claimBusy}
-                        onOpen={() => openSummary(platform, String(row.id))}
-                      />
-                    ))}
-                  </div>
-                </section>
-              );
-            })}
+          {!active && (
+            <AccountOrderSurface
+              items={overview.orderItems}
+              onReorder={overview.reorderGroup}
+              disabled={blocked || claimBusy}
+            >
+              {overview.orderedGroups.map((group) => (
+                <AccountOverviewGroup
+                  key={group.id}
+                  group={group}
+                  orderItem={overview.orderItems.find(
+                    (item) => item.id === group.id,
+                  )!}
+                  disabled={blocked || claimBusy}
+                  onReorder={overview.reorderGroup}
+                  onToggle={() => overview.toggleCollapsed(group.id)}
+                  onSort={(sort) => overview.setGroupSort(group.id, sort)}
+                  onOpenDetails={overview.openDetails}
+                />
+              ))}
+            </AccountOrderSurface>
+          )}
           {displayed.map((platform) => (
             <div
               key={platform}
