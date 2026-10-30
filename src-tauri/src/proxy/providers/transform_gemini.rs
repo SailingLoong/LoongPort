@@ -684,14 +684,18 @@ fn convert_message_content_to_parts(
                 // Re-attach the thought_signature that Gemini originally
                 // associated with this functionCall.  The Anthropic format
                 // strips it from the tool_use block, but Gemini requires it
-                // on every functionCall in a multi-turn tool-use exchange.
-                // Without replaying the stored signature the upstream may
-                // reject with "missing a `thought_signature`".
-                if let Some(sig) = thought_signature_by_id.get(id) {
-                    function_call["thoughtSignature"] = json!(sig);
+                // on every functionCall part in a multi-turn tool-use
+                // exchange.  Per the Gemini wire protocol, `thoughtSignature`
+                // is a Part-level sibling of `functionCall` (it does NOT live
+                // inside the `functionCall` object); nesting it there causes
+                // the upstream to reject with `Unknown name "thoughtSignature"
+                // at 'contents[X].parts[Y].function_call'`.
+                let thought_signature = thought_signature_by_id.get(id).cloned();
+                let mut part = json!({ "functionCall": function_call });
+                if let Some(sig) = thought_signature {
+                    part["thoughtSignature"] = json!(sig);
                 }
-
-                parts.push(json!({ "functionCall": function_call }));
+                parts.push(part);
             }
             "tool_result" => {
                 let tool_use_id = block
@@ -1990,6 +1994,56 @@ mod tests {
             result["contents"][2]["parts"][0]["functionCall"]["name"],
             "tool_2"
         );
+    }
+
+    #[test]
+    fn anthropic_to_gemini_rebuilt_function_call_keeps_signature_on_part() {
+        // 上游 #6690：影子轮次存了签名但没有可回放的 parts，助手消息从 tool_use
+        // 块重建——重建路径里签名必须挂成 Part 级兄弟字段，塞进 functionCall
+        // 会被 Gemini 以 Unknown name thoughtSignature 拒收
+        let store = GeminiShadowStore::with_limits(8, 4);
+        store.record_assistant_turn(
+            "provider-a",
+            "session-1",
+            json!({}),
+            vec![GeminiToolCallMeta::new(
+                Some("call_1"),
+                "get_weather",
+                json!({ "city": "Tokyo" }),
+                Some("sig-xyz"),
+            )],
+        );
+
+        let input = json!({
+            "messages": [
+                { "role": "user", "content": "weather?" },
+                {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "tool_use", "id": "call_1", "name": "get_weather", "input": { "city": "Tokyo" } }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "tool_result", "tool_use_id": "call_1", "content": "Sunny" }
+                    ]
+                }
+            ]
+        });
+
+        let result = anthropic_to_gemini_with_shadow(
+            input,
+            Some(&store),
+            Some("provider-a"),
+            Some("session-1"),
+        )
+        .unwrap();
+
+        let part = &result["contents"][1]["parts"][0];
+        assert_eq!(part["functionCall"]["name"], "get_weather");
+        assert_eq!(part["thoughtSignature"], "sig-xyz");
+        assert!(part["functionCall"].get("thoughtSignature").is_none());
     }
 
     #[test]
