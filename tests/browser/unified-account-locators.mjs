@@ -12,3 +12,13 @@ export function nativeAccountKeyboardSteps(t) {
 }
 
 export const nativeAccountOverviewCounts = { details: 0, accountButtons: 1 };
+
+/** The overview uses a localized, independent Details button inside its account row. */
+export function overviewAccountDetailsName(t, name) {
+  return t("accountsOverview.viewAccount").replaceAll("{{name}}", name);
+}
+
+/** Existing native workspace selection remains a separate, currently Chinese label. */
+export function nativeWorkspaceAccountName(name) {
+  return `查看 ${name}`;
+}

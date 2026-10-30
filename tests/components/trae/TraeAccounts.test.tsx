@@ -30,10 +30,16 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: mocks.open }));
-vi.mock("react-i18next", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("react-i18next")>()),
-  useTranslation: () => ({ t: (key: string) => key }),
-}));
+vi.mock("react-i18next", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-i18next")>();
+  return {
+    ...actual,
+    useTranslation: () => ({
+      ...actual.useTranslation(),
+      t: (key: string) => key,
+    }),
+  };
+});
 
 const storagePath = "/synthetic/official-trae/storage.json";
 const productPath = "/synthetic/official-trae/product.json";

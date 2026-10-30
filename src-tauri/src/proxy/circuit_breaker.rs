@@ -7,8 +7,11 @@ use super::types::AppProxyConfig;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+#[cfg(not(test))]
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
+#[cfg(test)]
+use tokio::time::Instant;
 
 /// 熔断器状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -629,7 +632,7 @@ mod tests {
         assert!(!breaker.fatal_open_unexpired().await);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn fatal_gate_distinguishes_transient_open_and_expiry() {
         let breaker = CircuitBreaker::new(CircuitBreakerConfig {
             failure_threshold: 1,
@@ -645,7 +648,7 @@ mod tests {
         );
         breaker.record_fatal_failure(false).await;
         assert!(breaker.fatal_open_unexpired().await);
-        *breaker.last_opened_at.write().await = Some(Instant::now() - Duration::from_secs(1801));
+        tokio::time::advance(Duration::from_secs(1801)).await;
         assert!(
             !breaker.fatal_open_unexpired().await,
             "expired fatal open allows original recovery"
@@ -658,7 +661,7 @@ mod tests {
         assert_eq!(breaker.get_state().await, CircuitState::Closed);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn fatal_open_expiry_uses_original_half_open_permit() {
         let breaker = CircuitBreaker::new(CircuitBreakerConfig {
             success_threshold: 2,
@@ -666,7 +669,7 @@ mod tests {
         });
         breaker.record_fatal_failure(false).await;
         assert!(!breaker.is_available().await);
-        *breaker.last_opened_at.write().await = Some(Instant::now() - Duration::from_secs(1801));
+        tokio::time::advance(Duration::from_secs(1801)).await;
         assert!(breaker.is_available().await);
         let first = breaker.allow_request().await;
         assert!(first.allowed && first.used_half_open_permit);
