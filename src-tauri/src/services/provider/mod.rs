@@ -5490,7 +5490,14 @@ impl ProviderService {
             None
         };
         crate::mode::operation::admit_metadata_write(&state.proxy_service, &app_type)?;
-        Self::add_locked(state, app_type, provider, add_to_live, mark_user_edited)
+        Self::add_locked(
+            state,
+            app_type,
+            provider,
+            add_to_live,
+            mark_user_edited,
+            None,
+        )
     }
 
     /// Caller has already admitted the write and owns the applicable app lock.
@@ -5500,6 +5507,7 @@ impl ProviderService {
         provider: Provider,
         add_to_live: bool,
         mark_user_edited: bool,
+        duplicate_order: Option<&crate::database::DuplicateOrder>,
     ) -> Result<bool, AppError> {
         // The explicit account entry joins the existing application chain. It
         // never assigns the direct pointer, merges credential-bearing snippets,
@@ -5522,12 +5530,24 @@ impl ProviderService {
                     "managedAccount.providerAlreadyExists".into(),
                 ));
             }
-            Self::save_added_provider(state, &app_type, &provider, mark_user_edited)?;
+            Self::save_added_provider(
+                state,
+                &app_type,
+                &provider,
+                mark_user_edited,
+                duplicate_order,
+            )?;
             return Ok(true);
         }
 
         if app_type == AppType::Pi {
-            return pi::add(state, provider, add_to_live, mark_user_edited);
+            return pi::add(
+                state,
+                provider,
+                add_to_live,
+                mark_user_edited,
+                duplicate_order,
+            );
         }
 
         let mut provider = provider;
@@ -5550,7 +5570,13 @@ impl ProviderService {
             // the same switch lock until that row is committed so a waiting switch
             // cannot observe a partially saved binding.
             if effective_current.is_some() {
-                Self::save_added_provider(state, &app_type, &provider, mark_user_edited)?;
+                Self::save_added_provider(
+                    state,
+                    &app_type,
+                    &provider,
+                    mark_user_edited,
+                    duplicate_order,
+                )?;
                 return Ok(true);
             }
 
@@ -5572,7 +5598,13 @@ impl ProviderService {
                     &provider,
                     preflighted_provider.as_ref(),
                 )?;
-                Self::save_added_provider(state, &app_type, &provider, mark_user_edited)?;
+                Self::save_added_provider(
+                    state,
+                    &app_type,
+                    &provider,
+                    mark_user_edited,
+                    duplicate_order,
+                )?;
                 provider_saved = true;
                 state
                     .db
@@ -5596,7 +5628,13 @@ impl ProviderService {
         }
 
         // Save to database
-        Self::save_added_provider(state, &app_type, &provider, mark_user_edited)?;
+        Self::save_added_provider(
+            state,
+            &app_type,
+            &provider,
+            mark_user_edited,
+            duplicate_order,
+        )?;
 
         // Additive mode apps (OpenCode, OpenClaw): optionally write to live config.
         if app_type.is_additive_mode() {
@@ -5634,8 +5672,13 @@ impl ProviderService {
         app: &AppType,
         provider: &Provider,
         mark: bool,
+        duplicate_order: Option<&crate::database::DuplicateOrder>,
     ) -> Result<(), AppError> {
-        if mark {
+        if let Some(order) = duplicate_order {
+            state
+                .db
+                .save_duplicate_provider(app.as_str(), provider, mark, order)
+        } else if mark {
             state.db.save_manual_provider(app.as_str(), provider)
         } else {
             state.db.save_provider(app.as_str(), provider)
@@ -5650,6 +5693,23 @@ impl ProviderService {
         app_type: AppType,
         source_id: &str,
     ) -> Result<Provider, AppError> {
+        Self::duplicate_with_maintenance(state, app_type, source_id, false)
+    }
+
+    pub(crate) fn duplicate_manual(
+        state: &AppState,
+        app_type: AppType,
+        source_id: &str,
+    ) -> Result<Provider, AppError> {
+        Self::duplicate_with_maintenance(state, app_type, source_id, true)
+    }
+
+    fn duplicate_with_maintenance(
+        state: &AppState,
+        app_type: AppType,
+        source_id: &str,
+        mark_user_edited: bool,
+    ) -> Result<Provider, AppError> {
         // Independent apps retain their own owners (Pi's add acquires its lock).
         let _guard = if app_type.supports_local_proxy()
             || crate::vendor::provision::VENDOR_APPS.contains(&app_type)
@@ -5661,7 +5721,7 @@ impl ProviderService {
             None
         };
         crate::mode::operation::admit_metadata_write(&state.proxy_service, &app_type)?;
-        let mut providers = state.db.get_all_providers(app_type.as_str())?;
+        let providers = state.db.get_all_providers(app_type.as_str())?;
         let source = providers.get(source_id).cloned().ok_or_else(|| {
             AppError::Message(format!(
                 "Provider '{}' does not exist in app '{}'",
@@ -5669,6 +5729,14 @@ impl ProviderService {
                 app_type.as_str()
             ))
         })?;
+        let order = crate::database::DuplicateOrder {
+            source_id: source_id.into(),
+            source_digest: crate::Database::provider_update_digest(&source)?,
+            rows: providers
+                .iter()
+                .map(|(id, provider)| (id.clone(), provider.sort_index))
+                .collect(),
+        };
 
         let mut duplicate = Provider::with_id(
             Self::duplicate_id(&app_type, &source, &providers)?,
@@ -5685,21 +5753,21 @@ impl ProviderService {
         duplicate.in_failover_queue = false;
 
         if let Some(source_sort_index) = source.sort_index {
-            let duplicate_sort_index = source_sort_index + 1;
+            let duplicate_sort_index = source_sort_index
+                .checked_add(1)
+                .ok_or_else(|| AppError::Config("provider.duplicate_changed".into()))?;
             duplicate.sort_index = Some(duplicate_sort_index);
-            for provider in providers.values_mut().filter(|provider| {
-                provider.id != source_id
-                    && provider
-                        .sort_index
-                        .is_some_and(|index| index >= duplicate_sort_index)
-            }) {
-                provider.sort_index = provider.sort_index.map(|index| index + 1);
-                state.db.save_provider(app_type.as_str(), provider)?;
-            }
         }
 
         let add_to_live = !app_type.is_additive_mode();
-        Self::add_locked(state, app_type, duplicate.clone(), add_to_live, false)?;
+        Self::add_locked(
+            state,
+            app_type,
+            duplicate.clone(),
+            add_to_live,
+            mark_user_edited,
+            Some(&order),
+        )?;
         Ok(duplicate)
     }
 

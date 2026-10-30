@@ -344,25 +344,7 @@ pub struct ApplicationRoutingChange {
     pub catalog_preview_only: bool,
 }
 
-/// Short-lived compatibility review. Its revision is a CAS image, not a
-/// persistent completion receipt or permission to enter the native writer.
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct LegacyRoutingReview {
-    pub draft_digest: String,
-    pub revision: String,
-}
-
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
-#[serde(tag = "protocol", rename_all = "camelCase", deny_unknown_fields)]
-pub enum PreparedRoutingRequest {
-    Native {
-        request: crate::mode::state::SaveRequest,
-    },
-    Legacy {
-        review: LegacyRoutingReview,
-    },
-}
+pub use crate::services::routing_request::{LegacyRoutingReview, PreparedRoutingRequest};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

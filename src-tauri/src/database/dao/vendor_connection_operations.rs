@@ -31,7 +31,7 @@ pub(crate) struct Receipt {
     #[serde(default)]
     pub completed_configuration_revision: Option<String>,
     pub catalog_decision: Option<crate::services::provider::codex_direct::CatalogDecision>,
-    pub prepared_request: Option<crate::services::application_selection::PreparedRoutingRequest>,
+    pub prepared_request: Option<crate::services::routing_request::PreparedRoutingRequest>,
     pub state: String,
     pub receipt_revision: u64,
 }

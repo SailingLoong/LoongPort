@@ -26,6 +26,7 @@
 pub(crate) mod backup;
 pub(crate) mod credential_revision;
 mod dao;
+pub(crate) use dao::providers::DuplicateOrder;
 pub(crate) use dao::relay_setup_operations;
 pub(crate) use dao::vendor_connection_operations;
 pub(crate) mod inspection;

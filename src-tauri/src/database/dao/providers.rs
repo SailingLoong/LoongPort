@@ -22,10 +22,17 @@ mod setup_prepare_tests;
 #[derive(Clone, Copy)]
 enum ProviderSaveIntent<'a> {
     Maintain,
+    Duplicate(&'a DuplicateOrder),
     PrepareNewLocal {
         rate_multiplier: Option<f64>,
         authority: Option<&'a crate::relay::setup_journal::PreparationAuthority>,
     },
+}
+
+pub(crate) struct DuplicateOrder {
+    pub source_id: String,
+    pub source_digest: String,
+    pub rows: Vec<(String, Option<usize>)>,
 }
 
 /// Delete one row in a caller-owned inventory mutation. The final inventory
@@ -492,6 +499,31 @@ impl Database {
         )
     }
 
+    pub(crate) fn save_duplicate_provider(
+        &self,
+        app_type: &str,
+        provider: &Provider,
+        mark_user_edited: bool,
+        order: &DuplicateOrder,
+    ) -> Result<(), AppError> {
+        let vault = self.secrets.read()?;
+        self.save_provider_with_vault_owned(
+            app_type,
+            provider,
+            (
+                None,
+                mark_user_edited,
+                false,
+                None,
+                ProviderSaveIntent::Duplicate(order),
+            ),
+            self.secrets.as_ref(),
+            &vault,
+            None,
+        )
+        .map(|_| ())
+    }
+
     /// Insert a selected configuration through the original vault-aware writer.
     /// Existing rows are never rewritten, including when another writer inserted
     /// after discovery. No current selection or routing-chain membership changes.
@@ -661,6 +693,7 @@ impl Database {
         let behavior = if qoder_operation.is_some()
             || credential_write.is_some()
             || matches!(intent, ProviderSaveIntent::PrepareNewLocal { .. })
+            || matches!(intent, ProviderSaveIntent::Duplicate(_))
         {
             rusqlite::TransactionBehavior::Immediate
         } else {
@@ -673,7 +706,7 @@ impl Database {
         use crate::services::provider::qoder_daily::{self, PersistOutcome};
         let setup_authority = match intent {
             ProviderSaveIntent::PrepareNewLocal { authority, .. } => authority,
-            ProviderSaveIntent::Maintain => None,
+            ProviderSaveIntent::Maintain | ProviderSaveIntent::Duplicate(_) => None,
         };
         let setup_receipt = setup_authority
             .map(|authority| {
@@ -698,6 +731,49 @@ impl Database {
             crate::database::credential_revision::original_provider_uses_revisions(&tx)?;
         let current =
             Self::get_all_providers_on_connection(&tx, vault, app_type)?.shift_remove(&provider.id);
+        if let ProviderSaveIntent::Duplicate(order) = intent {
+            if current.is_some() {
+                return Err(AppError::Config("provider.duplicate_changed".into()));
+            }
+            let rows = Self::get_all_providers_on_connection(&tx, vault, app_type)?;
+            if rows.len() != order.rows.len()
+                || order
+                    .rows
+                    .iter()
+                    .any(|(id, sort)| rows.get(id).is_none_or(|row| row.sort_index != *sort))
+            {
+                return Err(AppError::Config("provider.duplicate_changed".into()));
+            }
+            let source = rows
+                .get(&order.source_id)
+                .ok_or_else(|| AppError::Config("provider.duplicate_changed".into()))?;
+            if Self::provider_update_digest(source)? != order.source_digest {
+                return Err(AppError::Config("provider.duplicate_changed".into()));
+            }
+            if let Some(source_index) = source.sort_index {
+                let insertion = source_index
+                    .checked_add(1)
+                    .ok_or_else(|| AppError::Config("provider.duplicate_changed".into()))?;
+                if provider.sort_index != Some(insertion) {
+                    return Err(AppError::Config("provider.duplicate_changed".into()));
+                }
+                for (id, sort) in &order.rows {
+                    if id != &order.source_id && sort.is_some_and(|value| value >= insertion) {
+                        let before = sort.unwrap();
+                        let after = before
+                            .checked_add(1)
+                            .ok_or_else(|| AppError::Config("provider.duplicate_changed".into()))?;
+                        let before = i64::try_from(before)
+                            .map_err(|_| AppError::Config("provider.duplicate_changed".into()))?;
+                        let after = i64::try_from(after)
+                            .map_err(|_| AppError::Config("provider.duplicate_changed".into()))?;
+                        if tx.execute("UPDATE providers SET sort_index=?1 WHERE app_type=?2 AND id=?3 AND sort_index=?4", params![after, app_type, id, before])? != 1 {
+                            return Err(AppError::Config("provider.duplicate_changed".into()));
+                        }
+                    }
+                }
+            }
+        }
         if matches!(intent, ProviderSaveIntent::PrepareNewLocal { .. }) && current.is_some() {
             // Never rewrite a concurrent winner. Recorded setup also checks its
             // identity and commits the Existing fact under this same transaction.
@@ -1010,7 +1086,12 @@ impl Database {
         // 链成员资格：新档位（插入分支）自动进链垫底——上游新增默认排在最后生效。
         // 只挂创建、不挂更新：被用户应用出链的档位刷新后不能爬回链里。
         // 追加失败只警告不阻断——主写入已成功，链是辅助状态（与 record_attempt 同款尽力而为）。
-        if !is_update && matches!(intent, ProviderSaveIntent::Maintain) {
+        if !is_update
+            && matches!(
+                intent,
+                ProviderSaveIntent::Maintain | ProviderSaveIntent::Duplicate(_)
+            )
+        {
             if let Err(e) = crate::proxy::application_routing::note_provider_created(
                 self,
                 app_type,

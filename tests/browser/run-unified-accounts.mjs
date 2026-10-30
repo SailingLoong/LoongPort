@@ -1,3 +1,4 @@
+import { checkNativeSafety } from "./native-safety.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -811,6 +812,17 @@ try {
       ),
     );
     const labels = translations.qoderApplicationEntry;
+    const t = (key) =>
+      key.split(".").reduce((value, part) => value[part], translations);
+    if (!qoderOnly) {
+      results.push(
+        await checkNativeSafety({ browser, variant, t, output, source }),
+      );
+      await writeFile(
+        path.join(output, "results.json"),
+        JSON.stringify(results, null, 2),
+      );
+    }
     for (const entry of ["qoder-services", "qoder-add"]) {
       for (const state of ["bound", "unknown", "error"]) {
         const context = await browser.newContext({

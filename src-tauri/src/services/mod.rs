@@ -22,6 +22,7 @@ pub mod model_pricing;
 pub mod models_dev;
 pub mod omo;
 pub(crate) mod openrouter_source;
+pub(crate) mod routing_request;
 pub mod service_sources;
 pub mod vendor_source_binding;
 pub use crate::database::order_profiles;

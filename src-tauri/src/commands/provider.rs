@@ -223,10 +223,7 @@ fn duplicate_provider_internal(
     source_id: &str,
 ) -> Result<bool, AppError> {
     crate::relay::reject_if_managed(source_id)?;
-    let duplicate = ProviderService::duplicate(state, app_type.clone(), source_id)?;
-    state
-        .db
-        .set_user_edited(app_type.as_str(), &duplicate.id, true)?;
+    ProviderService::duplicate_manual(state, app_type, source_id)?;
     Ok(true)
 }
 
@@ -949,6 +946,149 @@ mod managed_guard_tests {
         );
         ProviderService::add(&state, AppType::Codex, generic.clone(), false).unwrap();
         assert!(!state.db.get_user_edited("codex", &generic.id).unwrap());
+    }
+
+    #[test]
+    fn failed_duplicate_mark_preserves_original_rows_and_order() {
+        let state = empty_state();
+        let settings =
+            serde_json::json!({"auth": {"OPENAI_API_KEY": "synthetic-only"}, "config": ""});
+        let mut source =
+            Provider::with_id("source".into(), "source".into(), settings.clone(), None);
+        source.sort_index = Some(1);
+        let mut next = Provider::with_id("next".into(), "next".into(), settings, None);
+        next.sort_index = Some(2);
+        state.db.save_provider("codex", &source).unwrap();
+        state.db.save_provider("codex", &next).unwrap();
+        state.db.set_current_provider("codex", "source").unwrap();
+        state.db.conn.lock().unwrap().execute_batch(
+            "CREATE TRIGGER reject_duplicate_mark BEFORE UPDATE OF user_edited ON providers WHEN NEW.user_edited=1 BEGIN SELECT RAISE(FAIL,'synthetic duplicate mark failure'); END;"
+        ).unwrap();
+        assert!(duplicate_provider_internal(&state, AppType::Codex, "source").is_err());
+        let rows = state.db.get_all_providers("codex").unwrap();
+        assert_eq!(
+            (
+                rows.len(),
+                rows["source"].sort_index,
+                rows["next"].sort_index
+            ),
+            (2, Some(1), Some(2)),
+            "failed duplicate must leave neither a new row nor reordered originals"
+        );
+        state.db.conn.lock().unwrap().execute_batch(
+            "DROP TRIGGER reject_duplicate_mark; CREATE TRIGGER reject_duplicate_sort BEFORE UPDATE OF sort_index ON providers WHEN NEW.sort_index=3 BEGIN SELECT RAISE(FAIL,'synthetic sort failure'); END;"
+        ).unwrap();
+        assert!(duplicate_provider_internal(&state, AppType::Codex, "source").is_err());
+        let rows = state.db.get_all_providers("codex").unwrap();
+        assert_eq!((rows.len(), rows["next"].sort_index), (2, Some(2)));
+        state
+            .db
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_duplicate_sort")
+            .unwrap();
+        duplicate_provider_internal(&state, AppType::Codex, "source").unwrap();
+        let rows = state.db.get_all_providers("codex").unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows["next"].sort_index, Some(3));
+        let copied = rows
+            .values()
+            .find(|row| row.id != "source" && row.id != "next")
+            .unwrap();
+        assert_eq!(copied.sort_index, Some(2));
+        assert!(state.db.get_user_edited("codex", &copied.id).unwrap());
+    }
+
+    #[test]
+    fn duplicate_transaction_rejects_changed_source_or_order() {
+        let state = empty_state();
+        let settings = serde_json::json!({"auth":{"OPENAI_API_KEY":"synthetic-only"},"config":""});
+        let mut source =
+            Provider::with_id("source".into(), "source".into(), settings.clone(), None);
+        source.sort_index = Some(1);
+        let mut other = Provider::with_id("other".into(), "other".into(), settings.clone(), None);
+        other.sort_index = Some(2);
+        state.db.save_provider("codex", &source).unwrap();
+        state.db.save_provider("codex", &other).unwrap();
+        source = state
+            .db
+            .get_provider_by_id("source", "codex")
+            .unwrap()
+            .unwrap();
+        other = state
+            .db
+            .get_provider_by_id("other", "codex")
+            .unwrap()
+            .unwrap();
+        let snapshot = |source: &Provider, other: &Provider| crate::database::DuplicateOrder {
+            source_id: source.id.clone(),
+            source_digest: crate::Database::provider_update_digest(source).unwrap(),
+            rows: vec![
+                (source.id.clone(), source.sort_index),
+                (other.id.clone(), other.sort_index),
+            ],
+        };
+        let order = snapshot(&source, &other);
+        source.name = "changed after review".into();
+        state.db.save_provider("codex", &source).unwrap();
+        source = state
+            .db
+            .get_provider_by_id("source", "codex")
+            .unwrap()
+            .unwrap();
+        let mut copy = Provider::with_id("copy".into(), "copy".into(), settings, None);
+        copy.sort_index = Some(2);
+        assert!(state
+            .db
+            .save_duplicate_provider("codex", &copy, true, &order)
+            .is_err());
+        assert!(state
+            .db
+            .get_provider_by_id("copy", "codex")
+            .unwrap()
+            .is_none());
+        let order = snapshot(&source, &other);
+        other.sort_index = Some(4);
+        state.db.save_provider("codex", &other).unwrap();
+        assert!(state
+            .db
+            .save_duplicate_provider("codex", &copy, true, &order)
+            .is_err());
+        assert!(state
+            .db
+            .get_provider_by_id("copy", "codex")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            state
+                .db
+                .get_provider_by_id("other", "codex")
+                .unwrap()
+                .unwrap()
+                .sort_index,
+            Some(4)
+        );
+        other = state
+            .db
+            .get_provider_by_id("other", "codex")
+            .unwrap()
+            .unwrap();
+        let fresh = snapshot(&source, &other);
+        state
+            .db
+            .save_duplicate_provider("codex", &copy, true, &fresh)
+            .unwrap();
+        assert_eq!(
+            state
+                .db
+                .get_provider_by_id("other", "codex")
+                .unwrap()
+                .unwrap()
+                .sort_index,
+            Some(5)
+        );
+        assert!(state.db.get_user_edited("codex", "copy").unwrap());
     }
 
     #[test]
