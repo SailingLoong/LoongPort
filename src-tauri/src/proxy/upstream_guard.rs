@@ -11,6 +11,8 @@ pub(super) async fn reject_self_forwarding(
     listen_address: &str,
     listen_port: u16,
 ) -> Result<(), ProxyError> {
+    #[cfg(test)]
+    super::server::loopback_tests::guard_phase("guard_start");
     let Ok(url) = url::Url::parse(target) else {
         return Ok(());
     };
@@ -20,6 +22,8 @@ pub(super) async fn reject_self_forwarding(
     let Ok(listener) = listen_address.trim_matches(['[', ']']).parse::<IpAddr>() else {
         return Ok(());
     };
+    #[cfg(test)]
+    super::server::loopback_tests::guard_phase("guard_url_parsed");
     let targets_listener = match url.host() {
         Some(url::Host::Ipv4(ip)) => is_listener_address(ip.into(), listener),
         Some(url::Host::Ipv6(ip)) => is_listener_address(ip.into(), listener),
@@ -29,6 +33,8 @@ pub(super) async fn reject_self_forwarding(
         }
         None => false,
     };
+    #[cfg(test)]
+    super::server::loopback_tests::guard_phase("guard_decided");
     if targets_listener {
         // Do not include the URL: provider paths and queries can contain API keys.
         return Err(ProxyError::ConfigError(
@@ -54,9 +60,12 @@ where
     {
         return Ok(true);
     }
-    Ok(resolve_alias(lookup)
-        .await?
-        .any(|address| is_listener_address(address.ip(), listener)))
+    #[cfg(test)]
+    super::server::loopback_tests::guard_phase("dns_lookup_start");
+    let resolved = resolve_alias(lookup).await;
+    #[cfg(test)]
+    super::server::loopback_tests::guard_phase("dns_lookup_finished");
+    Ok(resolved?.any(|address| is_listener_address(address.ip(), listener)))
 }
 
 // Keep the resolver boundary shared with the deterministic slow-DNS regression.

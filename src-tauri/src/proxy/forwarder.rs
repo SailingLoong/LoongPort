@@ -2872,7 +2872,18 @@ impl RequestForwarder {
             let status = self.status.read().await;
             (status.address.clone(), status.port)
         };
-        super::upstream_guard::reject_self_forwarding(&url, &listen_address, listen_port).await?;
+        #[cfg(test)]
+        let guard_result = super::server::loopback_tests::traced_guard(
+            extensions
+                .get::<super::server::loopback_tests::PhaseTrace>()
+                .cloned(),
+            super::upstream_guard::reject_self_forwarding(&url, &listen_address, listen_port),
+        )
+        .await;
+        #[cfg(not(test))]
+        let guard_result =
+            super::upstream_guard::reject_self_forwarding(&url, &listen_address, listen_port).await;
+        guard_result?;
         let mut codex_anthropic_one_m = false;
 
         // 转换请求体（如果需要）

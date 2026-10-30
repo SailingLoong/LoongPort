@@ -38,6 +38,10 @@ pub(super) trait ControlledSource: sealed::Sealed {
         self.verify_stopped()
     }
     fn verify_stopped(&mut self) -> Result<(), Failure>;
+    fn verify_pins(&mut self) -> Result<(), Failure> {
+        self.verify_stopped()
+    }
+    fn invalidate(&mut self) {}
     /// Recheck the retained source revision/pins after process observation.
     /// No bulk reads here: expensive source work must precede that observation.
     fn verify_unchanged(&mut self) -> Result<(), Failure>;
@@ -91,10 +95,8 @@ fn verify_bound(
 }
 fn scope(source: &mut impl ControlledSource) -> Result<(PathBuf, NativeContext, Paths), Failure> {
     source.begin_operation()?;
-    source.verify_stopped()?;
     let root = source.root().to_path_buf();
     let context = source.context().clone();
-    verify_bound(source, &root, &context)?;
     let paths = Paths::at(&root)?;
     Ok((root, context, paths))
 }
@@ -311,7 +313,9 @@ impl Controller<'_> {
             return Err(Failure::SourceChanged);
         }
         source.begin_operation()?;
-        verify_bound(source, &plan.root, &plan.context)?;
+        if source.root() != plan.root || source.context() != &plan.context {
+            return Err(Failure::SourceChanged);
+        }
         let paths = Paths::at(&plan.root)?;
         native_owner::with_selected_owner(
             self.catalog.session,

@@ -1,4 +1,8 @@
 {
+  "accountsOverview": {
+    "switch": "切り替え",
+    "switchUnavailable": "クライアントの切り替え結果を検証する機能はまだ利用できません。"
+  },
   "qoderApplicationEntry": {
     "defaultNavigationNamed": "{{app}} で表示・設定",
     "defaultNavigation": "アプリで表示・設定",

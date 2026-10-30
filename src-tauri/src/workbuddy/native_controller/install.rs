@@ -21,6 +21,22 @@ type ReadHook = Box<dyn FnMut(&Path)>;
 std::thread_local! {
     static CONTENT_READS: std::cell::RefCell<std::collections::BTreeMap<PathBuf, u64>> = const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
     static CONTENT_HOOK: std::cell::RefCell<Option<ReadHook>> = const { std::cell::RefCell::new(None) };
+    static SIMULATE_EQUAL_TIMESTAMPS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+#[cfg(test)]
+pub(super) struct SimulatedTimestampCollision;
+#[cfg(test)]
+impl SimulatedTimestampCollision {
+    pub(super) fn new() -> Self {
+        SIMULATE_EQUAL_TIMESTAMPS.with(|v| v.set(true));
+        Self
+    }
+}
+#[cfg(test)]
+impl Drop for SimulatedTimestampCollision {
+    fn drop(&mut self) {
+        SIMULATE_EQUAL_TIMESTAMPS.with(|v| v.set(false));
+    }
 }
 #[cfg(test)]
 pub(super) fn take_content_reads() -> std::collections::BTreeMap<PathBuf, u64> {
@@ -112,12 +128,18 @@ struct PinnedArtifact {
     expected: &'static Artifact,
 }
 fn same_revision(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    #[cfg(test)]
+    let timestamps_equal = SIMULATE_EQUAL_TIMESTAMPS.with(|v| v.get())
+        || (a.mtime(), a.mtime_nsec(), a.ctime(), a.ctime_nsec())
+            == (b.mtime(), b.mtime_nsec(), b.ctime(), b.ctime_nsec());
+    #[cfg(not(test))]
+    let timestamps_equal = (a.mtime(), a.mtime_nsec(), a.ctime(), a.ctime_nsec())
+        == (b.mtime(), b.mtime_nsec(), b.ctime(), b.ctime_nsec());
     a.dev() == b.dev()
         && a.ino() == b.ino()
         && a.uid() == b.uid()
         && a.len() == b.len()
-        && (a.mtime(), a.mtime_nsec(), a.ctime(), a.ctime_nsec())
-            == (b.mtime(), b.mtime_nsec(), b.ctime(), b.ctime_nsec())
+        && timestamps_equal
 }
 impl PinnedArtifact {
     fn open(bundle: &Path, expected: &'static Artifact) -> Result<Self, Failure> {
@@ -314,12 +336,28 @@ impl Origin {
             revisions.push(artifact.verify()?);
             after_artifact(index);
         }
+        for (artifact, revision) in self.artifacts.iter().zip(&revisions) {
+            let verified = artifact.verify()?;
+            if !same_revision(&verified, revision) {
+                return Err(Failure::SourceChanged);
+            }
+        }
         self.revisions = revisions;
-        let checked = self.verify_unchanged();
+        let checked = self.verify_metadata();
         if checked.is_err() {
             self.revisions.clear();
         }
         checked
+    }
+    fn verify_metadata(&mut self) -> Result<(), Failure> {
+        self.verify_local()?;
+        if self.revisions.len() != self.artifacts.len() {
+            return Err(Failure::SourceChanged);
+        }
+        for (artifact, revision) in self.artifacts.iter().zip(&self.revisions) {
+            artifact.verify_revision(revision)?;
+        }
+        self.verify_local()
     }
 }
 impl ControlledSource for Origin {
@@ -339,15 +377,24 @@ impl ControlledSource for Origin {
     fn verify_stopped(&mut self) -> Result<(), Failure> {
         self.verify_unchanged()
     }
+    fn verify_pins(&mut self) -> Result<(), Failure> {
+        self.verify_metadata()
+    }
+    fn invalidate(&mut self) {
+        self.revisions.clear();
+        self.first_operation = false;
+    }
     fn verify_unchanged(&mut self) -> Result<(), Failure> {
-        self.verify_local()?;
-        if self.revisions.len() != self.artifacts.len() {
-            return Err(Failure::SourceChanged);
+        self.verify_metadata()?;
+        for _ in 0..2 {
+            for (artifact, revision) in self.artifacts.iter().zip(&self.revisions) {
+                let verified = artifact.verify()?;
+                if !same_revision(&verified, revision) {
+                    return Err(Failure::SourceChanged);
+                }
+            }
         }
-        for (artifact, revision) in self.artifacts.iter().zip(&self.revisions) {
-            artifact.verify_revision(revision)?;
-        }
-        self.verify_local()
+        self.verify_metadata()
     }
 }
 #[cfg(test)]

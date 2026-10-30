@@ -131,7 +131,7 @@ impl Processes for Quiet {
 }
 
 #[tokio::test]
-async fn each_operation_reads_each_build_artifact_once_despite_multiple_checkpoints() {
+async fn each_operation_keeps_content_rechecks_within_explicit_budget() {
     use super::super::install::take_content_reads;
     let mut f = InstalledFixture::new().await;
     take_content_reads();
@@ -141,11 +141,14 @@ async fn each_operation_reads_each_build_artifact_once_despite_multiple_checkpoi
     let c = f.f.controller(&binding);
     let selected = c.select(&f.f.key()).await.unwrap();
     let mut source = f.controlled(origin);
+    // Match the installed factory's verification before the controller starts.
+    source.verify_stopped().unwrap();
     let plan = c.prepare(&selected, &mut source, &mut Files).await.unwrap();
+    let prepare = take_content_reads();
     for _ in 0..3 {
         source.verify_stopped().unwrap();
     }
-    let prepare = take_content_reads();
+    let extra = take_content_reads();
     assert_eq!(
         c.apply(&plan, &mut source, &mut Files).await,
         Ok(Outcome::Applied)
@@ -153,14 +156,20 @@ async fn each_operation_reads_each_build_artifact_once_despite_multiple_checkpoi
     let apply = take_content_reads();
     c.recover(&mut source, &mut Files).await.unwrap();
     let recover = take_content_reads();
-    for (operation, reads) in [("prepare", prepare), ("apply", apply), ("recover", recover)] {
+    println!("actual content bytes prepare={prepare:?} apply={apply:?} recover={recover:?}");
+    for (operation, reads, passes) in [
+        ("prepare", prepare, 12),
+        ("apply", apply, 12),
+        ("recover", recover, 6),
+        ("three extra checkpoints", extra, 6),
+    ] {
         println!("actual artifact content bytes for {operation}: {reads:?}");
         assert_eq!(reads.len(), ARTIFACTS.len());
         for artifact in ARTIFACTS {
             assert_eq!(
                 reads[&f.bundle.join(artifact.path)],
-                artifact.size,
-                "{operation} reread {}",
+                artifact.size * passes,
+                "{operation} changed content-check budget for {}",
                 artifact.path
             );
         }
@@ -214,6 +223,7 @@ async fn installation_change_while_waiting_for_owner_never_refreshes_or_writes()
         take_content_reads();
         let origin = f.origin().unwrap();
         f.bind_target(&origin).await;
+        let _collision = super::super::install::SimulatedTimestampCollision::new();
         let binding = f.f.binding();
         let c = f.f.controller(&binding);
         let selected = c.select(&f.f.key()).await.unwrap();
@@ -240,7 +250,11 @@ async fn installation_change_while_waiting_for_owner_never_refreshes_or_writes()
             .exists());
         let reads = take_content_reads();
         for artifact in ARTIFACTS {
-            assert_eq!(reads[&f.bundle.join(artifact.path)], artifact.size);
+            let count = reads[&f.bundle.join(artifact.path)];
+            assert!(
+                (artifact.size * 4..=artifact.size * 5).contains(&count),
+                "unexpected queued-check read budget: {kind}"
+            );
         }
     }
 }
@@ -248,6 +262,39 @@ async fn installation_change_while_waiting_for_owner_never_refreshes_or_writes()
 struct MutateAfterProcessObservation {
     bundle: PathBuf,
     kind: &'static str,
+}
+struct FailSecondScan {
+    count: usize,
+    main: PathBuf,
+}
+impl super::super::process::sealed::Sealed for FailSecondScan {}
+impl Processes for FailSecondScan {
+    fn snapshot(&mut self) -> Result<Vec<Process>, Failure> {
+        self.count += 1;
+        if self.count == 2 {
+            Ok(vec![Process {
+                id: 101,
+                start_identity: [100, 1],
+                executable: self.main.clone(),
+            }])
+        } else {
+            Quiet.snapshot()
+        }
+    }
+}
+#[tokio::test]
+async fn failed_final_pid_check_invalidates_refreshed_baseline_until_new_operation() {
+    let f = InstalledFixture::new().await;
+    let origin = f.origin().unwrap();
+    let main = f.bundle.join("Contents/MacOS/Electron");
+    let mut source = ProcessBound::new(
+        origin,
+        Scope::at(&f.bundle, &main).unwrap(),
+        FailSecondScan { count: 0, main },
+    );
+    assert_eq!(source.begin_operation(), Err(Failure::SourceChanged));
+    assert_eq!(source.verify_unchanged(), Err(Failure::SourceChanged));
+    assert_eq!(source.begin_operation(), Ok(()));
 }
 impl super::super::process::sealed::Sealed for MutateAfterProcessObservation {}
 impl Processes for MutateAfterProcessObservation {
@@ -263,6 +310,7 @@ async fn change_after_final_process_observation_cannot_refresh_the_build_baselin
         let mut f = InstalledFixture::new().await;
         let origin = f.origin().unwrap();
         f.bind_target(&origin).await;
+        let _collision = super::super::install::SimulatedTimestampCollision::new();
         let binding = f.f.binding();
         let c = f.f.controller(&binding);
         let selected = c.select(&f.f.key()).await.unwrap();
@@ -320,6 +368,23 @@ async fn earlier_artifact_change_during_later_hashes_refuses_the_same_admission(
     change_earlier_source_while_later_artifacts_are_verified(false).await;
 }
 #[tokio::test]
+async fn earlier_artifact_changed_during_later_hash_with_colliding_revision_is_rejected() {
+    let f = InstalledFixture::new().await;
+    let mut origin = f.origin().unwrap();
+    let before = std::fs::read(f.f.auth()).unwrap();
+    let _collision = super::super::install::SimulatedTimestampCollision::new();
+    let result = verify_during(&mut origin, &mut |index| {
+        if index == 1 {
+            let path = f.bundle.join(ARTIFACTS[0].path);
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes[0] ^= 1;
+            std::fs::write(path, bytes).unwrap();
+        }
+    });
+    assert_eq!(result, Err(Failure::SourceChanged));
+    assert_eq!(std::fs::read(f.f.auth()).unwrap(), before);
+}
+#[tokio::test]
 async fn earlier_link_change_during_later_hashes_refuses_the_same_admission() {
     change_earlier_source_while_later_artifacts_are_verified(true).await;
 }
@@ -345,6 +410,23 @@ async fn installed_source_uses_the_official_shared_auth_root_instead_of_product_
     assert_eq!(
         std::fs::read(bait).unwrap(),
         b"unrelated product configuration sentinel"
+    );
+}
+#[tokio::test]
+async fn changed_artifact_is_rejected_even_when_revision_timestamps_collide() {
+    let f = InstalledFixture::new().await;
+    let mut origin = f.origin().unwrap();
+    let path = f.bundle.join(ARTIFACTS[1].path);
+    let before = std::fs::read(&path).unwrap();
+    let mut changed = before.clone();
+    changed[0] ^= 1;
+    std::fs::write(&path, &changed).unwrap();
+    assert_ne!(before, changed);
+    assert_eq!(before.len(), changed.len());
+    let _collision = super::super::install::SimulatedTimestampCollision::new();
+    assert!(
+        origin.verify_stopped().is_err(),
+        "changed bytes with equal reported revision were admitted"
     );
 }
 #[tokio::test]

@@ -57,7 +57,7 @@ fn schema(case: &str) {
     let conn = db.conn.lock().unwrap();
     assert_eq!(
         crate::database::loongport_schema::read_stored_version(&conn).unwrap(),
-        31
+        crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION
     );
     let upstream = Database::get_user_version(&conn).unwrap();
     validate_schema(&conn).unwrap();
@@ -104,7 +104,7 @@ fn schema(case: &str) {
         assert!(Database::create_tables_on_conn(&conn).is_err());
         assert_eq!(
             crate::database::loongport_schema::read_stored_version(&conn).unwrap(),
-            31
+            crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION
         );
         return;
     }
@@ -132,7 +132,7 @@ fn schema(case: &str) {
         let reopened = crate::database::storage::prepare(&path, &context).unwrap();
         assert_eq!(
             crate::database::loongport_schema::read_stored_version(&reopened).unwrap(),
-            31
+            crate::database::loongport_schema::LOONGPORT_SCHEMA_VERSION
         );
         assert!(valid(&provider_on(&reopened, "codex", &row.id).unwrap()));
         let after: String = reopened

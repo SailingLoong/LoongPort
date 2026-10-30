@@ -1,4 +1,8 @@
 {
+  "accountsOverview": {
+    "switch": "切换",
+    "switchUnavailable": "当前尚无可验证的客户端切换能力"
+  },
   "qoderApplicationEntry": {
     "defaultNavigationNamed": "到 {{app}} 中查看与配置",
     "defaultNavigation": "到应用中查看与配置",

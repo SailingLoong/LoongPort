@@ -1,4 +1,8 @@
 {
+  "accountsOverview": {
+    "switch": "Switch",
+    "switchUnavailable": "Verified client switching is not available yet."
+  },
   "qoderApplicationEntry": {
     "defaultNavigationNamed": "View and configure in {{app}}",
     "defaultNavigation": "View and configure in the application",
