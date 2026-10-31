@@ -1,3 +1,9 @@
+import {
+  AttachmentFixture,
+  attachment,
+  attachmentIPC,
+} from "./attachment-fixture";
+export { AttachmentFixture } from "./attachment-fixture";
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -159,6 +165,16 @@ const nativeAccounts: MiniMaxCodeAccount[] = ["A", "B"].map((id) => ({
 mockIPC(
   (command, payload) => {
     requestedCommands.push(command);
+    if (
+      scenario === "native-attachment" &&
+      [
+        "prepare_workbuddy_native_attachment",
+        "confirm_workbuddy_native_attachment",
+        "inspect_workbuddy_native_attachment",
+        "cancel_workbuddy_native_attachment",
+      ].includes(command)
+    )
+      return attachmentIPC(command, payload);
     switch (command) {
       case "relay_list_relays":
         return scenario === "empty" ? [] : [relay];
@@ -395,6 +411,7 @@ Object.assign(window, {
     rejectedCommands,
     requestedCommands,
     safetyEvidence,
+    attachment,
     checkout:
       typeof __UNIFIED_LAYOUT_CHECKOUT__ === "undefined"
         ? "unrecorded"
@@ -559,6 +576,12 @@ export function NativeSafetyFixture() {
 
 createRoot(document.getElementById("root")!).render(
   <QueryClientProvider client={client}>
-    {scenario === "native-safety" ? <NativeSafetyFixture /> : <Fixture />}
+    {scenario === "native-attachment" ? (
+      <AttachmentFixture />
+    ) : scenario === "native-safety" ? (
+      <NativeSafetyFixture />
+    ) : (
+      <Fixture />
+    )}
   </QueryClientProvider>,
 );

@@ -1,3 +1,4 @@
+import { checkNativeAttachment } from "./native-attachment.mjs";
 import { checkNativeSafety } from "./native-safety.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -817,6 +818,7 @@ try {
     if (!qoderOnly) {
       results.push(
         await checkNativeSafety({ browser, variant, t, output, source }),
+        await checkNativeAttachment({ browser, variant, t, output, source }),
       );
       await writeFile(
         path.join(output, "results.json"),

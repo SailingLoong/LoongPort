@@ -337,7 +337,7 @@ struct ClaudeUsageLog {
     latency_ms: u64,
     status_code: u16,
     is_streaming: bool,
-    local_input_tokens: u64,
+    local_input_tokens: super::local_tokens::DeferredLocalTokens,
 }
 
 fn prepare_claude_usage_log(
@@ -368,7 +368,7 @@ fn prepare_claude_usage_log(
         app_type: ctx.app_type_str,
         provider_id: ctx.provider.id.clone(),
         session_id: ctx.session_id.clone(),
-        local_input_tokens: ctx.local_input_tokens,
+        local_input_tokens: ctx.local_input_tokens.clone(),
         usage,
         latency_ms: ctx.latency_ms(),
         status_code,
@@ -502,7 +502,7 @@ async fn handle_claude_transform(
             // "claude" 会把 claude-desktop 的行错记到 claude 名下
             let app_type_str = ctx.app_type_str;
 
-            let local_input_tokens = ctx.local_input_tokens;
+            let local_input_tokens = ctx.local_input_tokens.clone();
             let caller = ctx.caller.clone();
             Some(SseUsageCollector::new(
                 start_time,
@@ -522,6 +522,7 @@ async fn handle_claude_transform(
                         let outbound_model = fallback_model.clone();
                         let caller = caller.clone();
 
+                        let local_input_tokens = local_input_tokens.clone();
                         tokio::spawn(async move {
                             log_usage(
                                 &state,
@@ -1343,7 +1344,7 @@ async fn handle_codex_responses_namespace_restore(
                     let provider_id = ctx.provider.id.clone();
                     let session_id = ctx.session_id.clone();
                     let latency_ms = ctx.latency_ms();
-                    let local_input_tokens = ctx.local_input_tokens;
+                    let local_input_tokens = ctx.local_input_tokens.clone();
                     let caller = ctx.caller.clone();
                     async move {
                         log_usage(
@@ -1434,7 +1435,7 @@ async fn handle_codex_chat_to_responses_transform(
             let start_time = ctx.attempt_started_at;
             let session_id = ctx.session_id.clone();
 
-            let local_input_tokens = ctx.local_input_tokens;
+            let local_input_tokens = ctx.local_input_tokens.clone();
             let caller = ctx.caller.clone();
             Some(SseUsageCollector::new(
                 start_time,
@@ -1465,6 +1466,7 @@ async fn handle_codex_chat_to_responses_transform(
                     let caller = caller.clone();
                     let session_id = session_id.clone();
 
+                    let local_input_tokens = local_input_tokens.clone();
                     tokio::spawn(async move {
                         log_usage(
                             &state,
@@ -1589,7 +1591,7 @@ async fn handle_codex_chat_to_responses_transform(
             let provider_id = ctx.provider.id.clone();
             let session_id = ctx.session_id.clone();
             let latency_ms = ctx.latency_ms();
-            let local_input_tokens = ctx.local_input_tokens;
+            let local_input_tokens = ctx.local_input_tokens.clone();
             let caller = ctx.caller.clone();
             async move {
                 log_usage(
@@ -1759,7 +1761,7 @@ async fn handle_codex_anthropic_to_responses_transform(
             let provider_id = ctx.provider.id.clone();
             let session_id = ctx.session_id.clone();
             let latency_ms = ctx.latency_ms();
-            let local_input_tokens = ctx.local_input_tokens;
+            let local_input_tokens = ctx.local_input_tokens.clone();
             let caller = ctx.caller.clone();
             async move {
                 log_usage(
@@ -1831,7 +1833,7 @@ fn build_codex_anthropic_sse_response(
         let start_time = ctx.attempt_started_at;
         let session_id = ctx.session_id.clone();
 
-        let local_input_tokens = ctx.local_input_tokens;
+        let local_input_tokens = ctx.local_input_tokens.clone();
         let caller = ctx.caller.clone();
         Some(SseUsageCollector::new(
             start_time,
@@ -1856,6 +1858,7 @@ fn build_codex_anthropic_sse_response(
                 let caller = caller.clone();
                 let session_id = session_id.clone();
 
+                let local_input_tokens = local_input_tokens.clone();
                 tokio::spawn(async move {
                     log_usage(
                         &state,
@@ -2971,13 +2974,15 @@ async fn log_usage(
     is_streaming: bool,
     status_code: u16,
     session_id: Option<String>,
-    local_input_tokens: u64,
+    local_input_tokens: super::local_tokens::DeferredLocalTokens,
 ) {
     use super::usage::logger::UsageLogger;
 
     if !usage_logging_enabled(state) {
         return;
     }
+
+    let local_input_tokens = local_input_tokens.resolve_for_usage().await;
 
     let logger = UsageLogger::new(&state.db).with_caller(caller.as_ref());
 
@@ -3879,7 +3884,7 @@ async fn handle_budgeted_native_response(
                     false,
                     status.as_u16(),
                     Some(ctx.session_id.clone()),
-                    evidence.input_tokens,
+                    super::local_tokens::DeferredLocalTokens::ready(evidence.input_tokens),
                 )
                 .await;
             } else {

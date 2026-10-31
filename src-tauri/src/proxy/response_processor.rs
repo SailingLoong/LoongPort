@@ -516,7 +516,7 @@ pub(crate) fn create_usage_collector(
     let state = state.clone();
     let provider_id = ctx.provider.id.clone();
     let request_model = ctx.request_model.clone();
-    let local_input_tokens = ctx.local_input_tokens;
+    let local_input_tokens = ctx.local_input_tokens.clone();
     let caller = ctx.caller.clone();
     // 流式事件缺失模型名时的归因兜底：映射后的出站模型（路由接管真值）优先，
     // 其次才是客户端请求别名
@@ -549,6 +549,7 @@ pub(crate) fn create_usage_collector(
                 let outbound_model = fallback_model.clone();
                 let caller = caller.clone();
 
+                let local_input_tokens = local_input_tokens.clone();
                 tokio::spawn(async move {
                     log_usage_internal(
                         &state,
@@ -578,6 +579,7 @@ pub(crate) fn create_usage_collector(
                 let outbound_model = fallback_model.clone();
                 let caller = caller.clone();
 
+                let local_input_tokens = local_input_tokens.clone();
                 tokio::spawn(async move {
                     log_usage_internal(
                         &state,
@@ -632,7 +634,7 @@ fn spawn_log_usage(
         .unwrap_or_else(|| ctx.request_model.clone());
     let latency_ms = ctx.latency_ms();
     let session_id = ctx.session_id.clone();
-    let local_input_tokens = ctx.local_input_tokens;
+    let local_input_tokens = ctx.local_input_tokens.clone();
     let caller = ctx.caller.clone();
 
     tokio::spawn(async move {
@@ -685,9 +687,11 @@ async fn log_usage_internal(
     is_streaming: bool,
     status_code: u16,
     session_id: Option<String>,
-    local_input_tokens: u64,
+    local_input_tokens: super::local_tokens::DeferredLocalTokens,
 ) {
     use super::usage::logger::UsageLogger;
+
+    let local_input_tokens = local_input_tokens.resolve_for_usage().await;
 
     let logger = UsageLogger::new(&state.db).with_caller(caller.as_ref());
     let (multiplier, pricing_model_source) =
@@ -1609,7 +1613,7 @@ mod tests {
             false,
             200,
             None,
-            0,
+            super::super::local_tokens::DeferredLocalTokens::ready(0),
         )
         .await;
 
@@ -1681,7 +1685,7 @@ mod tests {
             false,
             200,
             None,
-            0,
+            super::super::local_tokens::DeferredLocalTokens::ready(0),
         )
         .await;
 
@@ -1763,7 +1767,7 @@ mod tests {
             false,
             200,
             None,
-            0,
+            super::super::local_tokens::DeferredLocalTokens::ready(0),
         )
         .await;
 
