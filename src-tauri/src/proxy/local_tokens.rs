@@ -10,10 +10,59 @@
 //! 对齐——JSON 结构开销（键名、转义）在同 app 同模型下是常数偏移，不影响
 //! 比值稳定性判据；解析 messages 反而引入各家族格式分支。
 
-use std::sync::OnceLock;
+use futures::{
+    future::{BoxFuture, Shared},
+    FutureExt,
+};
+use std::sync::{Arc, OnceLock};
 
-/// o200k 分词器进程级单例：首次构造要加载 BPE 表（几十毫秒），
-/// 之后每次调用纯 CPU（百 KB 文本毫秒级），代理热路径可承受。
+type SampleResult = Result<u64, Arc<tokio::task::JoinError>>;
+
+/// Request-owned sampling: no tokenizer work until a usage consumer resolves it.
+/// Clones share one blocking job and its result, including a failed job. Dropping
+/// an unpolled sample releases its input; a started blocking job finishes normally.
+#[derive(Clone)]
+pub(crate) struct DeferredLocalTokens(Shared<BoxFuture<'static, SampleResult>>);
+
+impl DeferredLocalTokens {
+    pub(crate) fn new(body: &serde_json::Value) -> Self {
+        // Keep the original JSON, before model mapping or protocol transforms.
+        let body = body.clone();
+        Self::from_count(move || count_request_tokens(&body))
+    }
+
+    fn from_count(count: impl FnOnce() -> u64 + Send + 'static) -> Self {
+        Self(
+            async move { tokio::task::spawn_blocking(count).await.map_err(Arc::new) }
+                .boxed()
+                .shared(),
+        )
+    }
+
+    /// Already measured at a separate admission boundary (e.g. bounded native).
+    pub(crate) fn ready(count: u64) -> Self {
+        Self(futures::future::ready(Ok(count)).boxed().shared())
+    }
+
+    pub(crate) async fn resolve(&self) -> SampleResult {
+        self.0.clone().await
+    }
+
+    pub(crate) async fn resolve_for_usage(&self) -> u64 {
+        match self.resolve().await {
+            Ok(count) => count,
+            Err(error) => {
+                // Do not discard upstream usage when optional local sampling fails.
+                // Never format the panic payload: it could contain request content.
+                log::warn!("[crowd-tokens] local sampling unavailable (cancelled={}, panicked={}); recording unsampled usage", error.is_cancelled(), error.is_panic());
+                0 // Existing persisted convention: not sampled, NOT a measured zero.
+            }
+        }
+    }
+}
+
+/// o200k 分词器进程级单例：初始化及编码是 CPU 工作；请求日志通过延迟采样
+/// 在线程池解析，不让冷启动或特殊长文本阻塞代理运行时。
 /// 存 `Option`：初始化失败时固化「停用」，失败行返回 0（未采语义）。
 static TOKENIZER: OnceLock<Option<tiktoken_rs::CoreBPE>> = OnceLock::new();
 
@@ -34,6 +83,8 @@ fn tokenizer() -> Option<&'static tiktoken_rs::CoreBPE> {
 /// —— 0 语义即「未采」，桶 SQL 的配对条件以 `> 0` 收口，失败行天然出局，
 /// 不会以假数据参与对账。
 pub fn count_request_tokens(body: &serde_json::Value) -> u64 {
+    #[cfg(test)]
+    test_observation::record();
     let Some(bpe) = tokenizer() else {
         return 0;
     };
@@ -67,3 +118,39 @@ mod tests {
         assert_eq!(count_request_tokens(&body), count_request_tokens(&body));
     }
 }
+
+// Scoped to the current test thread; never installed in a production build.
+#[cfg(test)]
+pub(crate) mod test_observation {
+    std::thread_local! {
+        static CALLS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    }
+    pub(crate) struct CountScope;
+    impl CountScope {
+        pub(crate) fn start() -> Self {
+            CALLS.with(|calls| {
+                assert!(calls.replace(Some(0)).is_none());
+            });
+            Self
+        }
+        pub(crate) fn calls(&self) -> usize {
+            CALLS.with(|calls| calls.get().expect("active count observation"))
+        }
+    }
+    impl Drop for CountScope {
+        fn drop(&mut self) {
+            CALLS.with(|calls| calls.set(None));
+        }
+    }
+    pub(super) fn record() {
+        CALLS.with(|calls| {
+            if let Some(count) = calls.get() {
+                calls.set(Some(count + 1));
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+#[path = "deferred_local_tokens_sampling_tests.rs"]
+mod deferred_sampling_tests;
