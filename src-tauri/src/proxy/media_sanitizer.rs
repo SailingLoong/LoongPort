@@ -57,7 +57,8 @@ pub fn is_unsupported_image_error(error: &ProxyError) -> bool {
         return false;
     };
 
-    if !matches!(*status, 400 | 415 | 422 | 501) {
+    let is_standard_modality_status = matches!(*status, 400 | 415 | 422 | 501);
+    if !is_standard_modality_status && *status != 404 {
         return false;
     }
 
@@ -67,6 +68,12 @@ pub fn is_unsupported_image_error(error: &ProxyError) -> bool {
 
     let message = extract_error_text(body);
     let message = message.to_ascii_lowercase();
+
+    // OpenRouter 在某模型全部端点都拒收图片输入时以 404 报路由失败。保持窄匹配：
+    // 普通的缺路由错误不能触发改写请求体的重试。
+    if *status == 404 {
+        return message.contains("no endpoints found that support image input");
+    }
 
     // 自证性表述：这类短语本身就断言了"仅接受文本"，属于模态拒绝，无需再要求
     // 错误提到 image/media 等字样——火山方舟等网关的报错是
@@ -535,6 +542,30 @@ mod tests {
         let provider = provider(json!({}));
         let mut body = json!({
             "model": "deepseek-v4-pro",
+            "input": [{
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": "look" },
+                    { "type": "input_image", "image_url": "data:image/png;base64,abc" }
+                ]
+            }]
+        });
+
+        let count = replace_images_for_text_only_model(&mut body, &provider, true);
+
+        assert_eq!(count, 1);
+        assert_eq!(body["input"][0]["content"][1]["type"], "input_text");
+        assert_eq!(
+            body["input"][0]["content"][1]["text"],
+            UNSUPPORTED_IMAGE_MARKER
+        );
+    }
+
+    #[test]
+    fn openrouter_dated_deepseek_replaces_codex_input_image_before_send() {
+        let provider = provider(json!({}));
+        let mut body = json!({
+            "model": "deepseek/deepseek-v4-flash-0731",
             "input": [{
                 "role": "user",
                 "content": [
@@ -1167,6 +1198,32 @@ mod tests {
         };
 
         assert!(is_unsupported_image_error(&error));
+    }
+
+    #[test]
+    fn detects_openrouter_no_image_endpoint_404() {
+        let error = ProxyError::UpstreamError {
+            status: 404,
+            body: Some(
+                r#"{"error":{"message":"No endpoints found that support image input"}}"#
+                    .to_string(),
+            ),
+        };
+        assert!(is_unsupported_image_error(&error));
+    }
+
+    #[test]
+    fn ignores_unrelated_404_errors() {
+        for message in [
+            "Route not found",
+            "No endpoints found that support image generation",
+        ] {
+            let error = ProxyError::UpstreamError {
+                status: 404,
+                body: Some(json!({ "error": { "message": message } }).to_string()),
+            };
+            assert!(!is_unsupported_image_error(&error), "{message}");
+        }
     }
 
     #[test]
