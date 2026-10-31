@@ -52,3 +52,5 @@ mod native_controller;
 #[cfg(unix)]
 #[cfg_attr(not(test), allow(dead_code))]
 mod native_switch_lifecycle;
+
+pub(crate) mod native_attachment;

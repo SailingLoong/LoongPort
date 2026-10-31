@@ -26,6 +26,8 @@ pub struct AppState {
     pub purchase_sessions: Arc<PurchaseSessionCoordinator>,
     // 内部已使用细粒度锁（accounts/access_tokens/refresh_locks），所有方法均为
     // `&self`，无需外层 RwLock；避免持有粗粒度锁跨网络刷新导致的连锁阻塞。
+    #[cfg(feature = "gui")]
+    pub(crate) workbuddy_native_attachment: Arc<crate::workbuddy::native_attachment::State>,
     pub codex_oauth_manager: Arc<CodexOAuthManager>,
 }
 
@@ -52,6 +54,10 @@ impl AppState {
             browser_bridge: Arc::new(BrowserBridge::default()),
             purchase_sessions: Arc::new(PurchaseSessionCoordinator::default()),
             codex_oauth_manager,
+            #[cfg(feature = "gui")]
+            workbuddy_native_attachment: Arc::new(
+                crate::workbuddy::native_attachment::State::default(),
+            ),
         })
     }
 }

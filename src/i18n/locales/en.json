@@ -5243,6 +5243,36 @@
         "expired": "Inference authorization expired (authorize inference again)",
         "paused": "WorkBuddy model requests are paused; account management and domestic check-in remain available"
       }
+    },
+    "attachment": {
+      "title": "Attach local authentication",
+      "prepare": "Prepare read-only review",
+      "confirm": "Attach reviewed authentication",
+      "inspect": "Check this operation",
+      "close": "Close / stop waiting",
+      "show": "Show operation",
+      "preparing": "Preparing a read-only review…",
+      "ready": "Review the account and realm above before attaching.",
+      "applying": "Attachment is running. Closing only stops waiting; it does not roll back.",
+      "saved": "Local authentication attached.",
+      "unknown": "Outcome unknown. Query this operation; do not assume success or retry confirmation.",
+      "cancelled": "Preparation discarded.",
+      "unowned": "The current backend slot cannot be attributed to the lost preparation. No success or permission is inferred.",
+      "boundary": "Attachment preserves the API account. It does not prove valid login, client Current, or inference/credit consumption.",
+      "reason": {
+        "unsupportedPlatform": "Unsupported platform",
+        "unsafePath": "Unsafe local path",
+        "io": "Local I/O failed",
+        "journal": "Journal unavailable",
+        "sourceChanged": "Source changed; the reviewed capability is no longer valid",
+        "recoveryRequired": "Recovery required",
+        "requestConflict": "Operation conflicts with the current state",
+        "rolledBack": "Local transaction rolled back"
+      },
+      "reviewCurrent": "Review this current plan as a new operation",
+      "previousUnknown": "The earlier preparation outcome remains unknown. This receipt belongs only to the newly reviewed flow.",
+      "stopTracking": "Stop local tracking",
+      "stopTrackingHint": "The result remains unknown. This only forgets the local wait; it does not cancel the backend or prove failure. A new preparation is still checked by the backend."
     }
   },
   "startupUpgrade": {

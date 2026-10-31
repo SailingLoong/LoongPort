@@ -357,7 +357,112 @@ export interface WorkBuddyInferenceModel {
   id: string;
   name: string;
 }
+export interface WorkBuddyNativeAttachmentView {
+  flowId: string | null;
+  available: boolean;
+  state: "preparing" | "ready" | "applying" | "saved" | "unknown" | "cancelled";
+  account: { id: string; label: string; realm: string } | null;
+  saved: WorkBuddyNativeCaptureAccount | null;
+  reason: (typeof nativeCaptureFailures)[number] | "unsupportedPlatform" | null;
+  expiresInMs: number;
+}
+function attachmentView(
+  value: unknown,
+  flowId?: string | null,
+): WorkBuddyNativeAttachmentView {
+  const v = nativeRecord(value);
+  const invalid = () => {
+    throw new WorkBuddyNativeCaptureError("invalidResponse");
+  };
+  if (
+    (v.flowId !== null && (typeof v.flowId !== "string" || !v.flowId.trim())) ||
+    (flowId != null && v.flowId !== flowId) ||
+    typeof v.available !== "boolean" ||
+    ![
+      "preparing",
+      "ready",
+      "applying",
+      "saved",
+      "unknown",
+      "cancelled",
+    ].includes(v.state as string) ||
+    typeof v.expiresInMs !== "number" ||
+    !Number.isSafeInteger(v.expiresInMs) ||
+    v.expiresInMs < 0 ||
+    (v.reason !== null &&
+      v.reason !== "unsupportedPlatform" &&
+      !nativeCaptureFailures.includes(
+        v.reason as (typeof nativeCaptureFailures)[number],
+      ))
+  )
+    invalid();
+  let account: WorkBuddyNativeAttachmentView["account"] = null;
+  if (v.account !== null) {
+    const a = nativeRecord(v.account);
+    if (
+      typeof a.id !== "string" ||
+      !a.id.trim() ||
+      typeof a.label !== "string" ||
+      !["www.workbuddy.cn", "www.codebuddy.cn"].includes(a.realm as string)
+    )
+      invalid();
+    account = {
+      id: a.id as string,
+      label: a.label as string,
+      realm: a.realm as string,
+    };
+  }
+  const saved = v.saved === null ? null : nativeCaptureAccount(v.saved);
+  if (
+    ["ready", "applying", "saved"].includes(v.state as string) &&
+    (!v.flowId || !account || v.available !== true)
+  )
+    invalid();
+  if (v.state === "ready" && (v.expiresInMs === 0 || v.reason !== null))
+    invalid();
+  if ((v.state === "saved") !== (saved !== null)) invalid();
+  if (
+    saved &&
+    (!account ||
+      saved.selection.id !== account.id ||
+      saved.label !== account.label ||
+      saved.realm !== account.realm)
+  )
+    invalid();
+  return {
+    flowId: v.flowId as string | null,
+    available: v.available as boolean,
+    state: v.state as WorkBuddyNativeAttachmentView["state"],
+    account,
+    saved,
+    reason: v.reason as WorkBuddyNativeAttachmentView["reason"],
+    expiresInMs: v.expiresInMs as number,
+  };
+}
+function attachmentRequest(
+  command: string,
+  key: "id" | "flowId",
+  value: string | null,
+) {
+  if (
+    (value === null && command !== "inspect_workbuddy_native_attachment") ||
+    (value !== null && (typeof value !== "string" || !value.trim()))
+  )
+    return Promise.reject(new WorkBuddyNativeCaptureError("invalidInput"));
+  return nativeCaptureRequest(command, { [key]: value }, (v) =>
+    attachmentView(v, key === "flowId" ? value : undefined),
+  );
+}
+
 export const workbuddyApi = {
+  prepareNativeAttachment: (id: string) =>
+    attachmentRequest("prepare_workbuddy_native_attachment", "id", id),
+  confirmNativeAttachment: (flowId: string) =>
+    attachmentRequest("confirm_workbuddy_native_attachment", "flowId", flowId),
+  inspectNativeAttachment: (flowId: string | null) =>
+    attachmentRequest("inspect_workbuddy_native_attachment", "flowId", flowId),
+  cancelNativeAttachment: (flowId: string) =>
+    attachmentRequest("cancel_workbuddy_native_attachment", "flowId", flowId),
   // Untrusted IPC data is validated and redacted by the observation consumer.
   previewNative: () => invoke<unknown>("preview_workbuddy_native_capture"),
   setInferenceConsent: (id: string, enabled: boolean) =>
