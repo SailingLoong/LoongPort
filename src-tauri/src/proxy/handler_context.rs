@@ -105,7 +105,7 @@ pub struct RequestContext {
     /// 请求体的本地 token 计数（口径见 [`crate::proxy::local_tokens`]，0 = 未采）。
     /// crowd 计数对账的采集事实：与上游回显的 `usage.input_tokens` 在桶里配对，
     /// 判定在服务端。
-    pub local_input_tokens: u64,
+    pub(crate) local_input_tokens: super::local_tokens::DeferredLocalTokens,
     /// 整流器配置
     pub rectifier_config: RectifierConfig,
     /// 优化器配置
@@ -203,9 +203,9 @@ impl RequestContext {
             .unwrap_or("unknown")
             .to_string();
 
-        // 请求体本地 token 计数（crowd 对账事实，0 = 未采）。构造点手上
-        // 有完整 body，是整条链路里唯一无痛的 tokenize 挂点；落库点从这里取。
-        let local_input_tokens = crate::proxy::local_tokens::count_request_tokens(body);
+        // Retain the original input; optional sampling belongs to usage processing,
+        // not routing/authentication or the final-upstream safety check.
+        let local_input_tokens = super::local_tokens::DeferredLocalTokens::new(body);
 
         // 提取 Session ID
         let session_result = extract_session_id(headers, body, app_type_str);
@@ -517,3 +517,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "deferred_local_tokens_tests.rs"]
+mod deferred_local_tokens_tests;
