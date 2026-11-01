@@ -1115,6 +1115,13 @@ fn initialize_runtime(
         }
     }
 
+    // Linux 托盘需要把图标写入磁盘。WSL 的 XDG_RUNTIME_DIR 可能指向
+    // 不存在或不可写的目录，使用应用缓存目录避免因此中止启动。
+    #[cfg(target_os = "linux")]
+    {
+        tray_builder = tray_builder.temp_dir_path(app.path().app_cache_dir()?.join("tray-icon"));
+    }
+
     let _tray = tray_builder.build(app)?;
     crate::services::webdav_auto_sync::start_worker(app_state.db.clone(), app.clone());
     crate::services::s3_auto_sync::start_worker(app_state.db.clone(), app.clone());
