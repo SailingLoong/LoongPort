@@ -482,6 +482,16 @@ fn convert_messages_to_contents(
 
         if role == "assistant" {
             merge_tool_names_from_parts(&parts, &mut tool_name_by_id);
+        } else if let Some((function_responses, rest)) = split_function_response_parts(&parts) {
+            // Gemini（Vertex 尤甚）拒绝 functionResponse 后跟 text/media 的 user 轮
+            //（"Requests ending with a model turn are not supported"）。Claude Code
+            // 常在 tool_result 块后附加 text 块（如 system reminder），所以把
+            // functionResponse 单独成一条 user content、其余 parts 作下一条。
+            // 对每条消息都做（不只最后一条），转换出的历史跨轮字节稳定，prompt
+            // cache 才能命中。
+            contents.push(json!({ "role": gemini_role, "parts": function_responses }));
+            contents.push(json!({ "role": gemini_role, "parts": rest }));
+            continue;
         }
 
         contents.push(json!({
@@ -568,6 +578,44 @@ fn extract_assistant_tool_use_keys(content: Option<&Value>) -> (HashSet<String>,
 
 fn normalize_tool_name(name: &str) -> &str {
     name.rsplit(':').next().unwrap_or(name)
+}
+
+/// Splits a user turn that mixes `functionResponse` parts with other parts
+/// into (function responses, everything else), keeping the relative order
+/// within each group. Returns `None` when no split is needed.
+///
+/// 只在其余 parts 里有「独立文本」时才拆：Vertex 拒的是 functionResponse 后跟
+/// 文本的 user 轮。转换器自己产出的媒体附件组——标记文本紧跟其 inlineData——
+/// 是非多模态 functionResponse 路径的既定形状，整组豁免不拆。
+fn split_function_response_parts(parts: &[Value]) -> Option<(Vec<Value>, Vec<Value>)> {
+    let is_function_response = |part: &Value| part.get("functionResponse").is_some();
+    let has_function_response = parts.iter().any(is_function_response);
+    if !has_function_response || parts.iter().all(is_function_response) {
+        return None;
+    }
+    // 转换器产出的媒体组形状：[标记文本, inlineData, inlineData, ...]——
+    // 文本部件紧跟至少一个媒体部件。这类文本不算「独立文本」。
+    let is_media =
+        |part: &Value| part.get("inlineData").is_some() || part.get("inline_data").is_some();
+    let is_standalone_text = |index: usize| {
+        let part = &parts[index];
+        !is_function_response(part)
+            && part.get("text").is_some()
+            && !parts.get(index + 1).is_some_and(is_media)
+    };
+    if !parts
+        .iter()
+        .enumerate()
+        .any(|(index, _)| is_standalone_text(index))
+    {
+        return None;
+    }
+    Some(
+        parts
+            .iter()
+            .cloned()
+            .partition(|part| is_function_response(part)),
+    )
 }
 
 fn convert_message_content_to_parts(
@@ -1366,6 +1414,51 @@ mod tests {
         assert_eq!(
             result["toolConfig"]["functionCallingConfig"]["allowedFunctionNames"][0],
             "get_weather"
+        );
+    }
+
+    /// Regression for #8988: Vertex Gemini rejects a final user turn shaped
+    /// `[functionResponse, text]` with "Requests ending with a model turn".
+    #[test]
+    fn anthropic_to_gemini_splits_text_after_tool_results_into_next_user_turn() {
+        let input = json!({
+            "messages": [
+                { "role": "user", "content": "Check two cities" },
+                {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "tool_use", "id": "call_1", "name": "get_weather", "input": { "city": "Tokyo" } },
+                        { "type": "tool_use", "id": "call_2", "name": "get_weather", "input": { "city": "Paris" } }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "tool_result", "tool_use_id": "call_1", "content": "Sunny" },
+                        { "type": "tool_result", "tool_use_id": "call_2", "content": "Rain" },
+                        { "type": "text", "text": "<system-reminder>keep going</system-reminder>" }
+                    ]
+                }
+            ]
+        });
+
+        let result = anthropic_to_gemini(input).unwrap();
+        let contents = result["contents"].as_array().unwrap();
+
+        assert_eq!(contents.len(), 4);
+        assert_eq!(contents[0]["parts"][0]["text"], "Check two cities");
+        assert_eq!(contents[1]["role"], "model");
+
+        let responses = contents[2]["parts"].as_array().unwrap();
+        assert_eq!(contents[2]["role"], "user");
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["functionResponse"]["id"], "call_1");
+        assert_eq!(responses[1]["functionResponse"]["id"], "call_2");
+
+        assert_eq!(contents[3]["role"], "user");
+        assert_eq!(
+            contents[3]["parts"],
+            json!([{ "text": "<system-reminder>keep going</system-reminder>" }])
         );
     }
 
