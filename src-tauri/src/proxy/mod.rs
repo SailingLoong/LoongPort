@@ -19,6 +19,7 @@ pub(crate) mod failover_switch;
 mod forwarder;
 #[cfg(all(feature = "gui", feature = "test-hooks"))]
 pub(crate) use forwarder::verify_shared_final_model_override;
+#[cfg(any(feature = "gui", feature = "test-hooks"))]
 pub mod browser_guard;
 #[cfg(any(feature = "gui", feature = "test-hooks"))]
 mod free_models;
