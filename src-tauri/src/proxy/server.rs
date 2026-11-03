@@ -9,6 +9,7 @@
 //! a direct (non-proxied) CLI request.
 
 use super::{
+    browser_guard,
     failover_switch::FailoverSwitchManager,
     handlers,
     log_codes::srv as log_srv,
@@ -23,6 +24,7 @@ use super::{
 use crate::database::Database;
 use axum::{
     extract::DefaultBodyLimit,
+    middleware,
     routing::{any, get, post},
     Router,
 };
@@ -466,6 +468,11 @@ impl ProxyServer {
             .route("/gemini/v1/{*path}", any(handlers::handle_gemini))
             // 提高默认请求体大小限制（避免 413 Payload Too Large）
             .layer(DefaultBodyLimit::max(200 * 1024 * 1024))
+            // 拒绝网页发来的请求（最外层，读请求体之前）：见 browser_guard
+            .layer(middleware::from_fn_with_state(
+                self.state.clone(),
+                browser_guard::reject_browser_requests,
+            ))
             .with_state(self.state.clone())
     }
 
