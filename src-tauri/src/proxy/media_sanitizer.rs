@@ -1,6 +1,8 @@
 #[cfg(test)]
 use crate::model_capabilities::is_confirmed_text_only_model as confirmed_text_only_model;
-use crate::model_capabilities::{image_input_capability_from_settings, ImageInputCapability};
+use crate::model_capabilities::{
+    image_input_capability_from_settings, is_text_only_model_from_settings, ImageInputCapability,
+};
 use crate::provider::Provider;
 use crate::proxy::error::ProxyError;
 use crate::proxy::tool_media::{
@@ -9,6 +11,7 @@ use crate::proxy::tool_media::{
 use serde_json::{json, Value};
 
 pub const UNSUPPORTED_IMAGE_MARKER: &str = "[Unsupported Image]";
+const UNSUPPORTED_MEDIA_MARKER: &str = "[Unsupported Media]";
 
 /// Replace image blocks before sending when the routed model is text-only.
 ///
@@ -18,12 +21,22 @@ pub const UNSUPPORTED_IMAGE_MARKER: &str = "[Unsupported Image]";
 /// - the confirmed text-only registry is used for proactive replacement only
 ///   when `allow_heuristic` is true. This switch controls silent request-body
 ///   mutation, not the capability truth advertised by the Codex model catalog.
+///
+///   Additionally replace non-text media blocks before sending when the routed
+///   model is text-only. A text-only upstream (e.g. GLM-5.2, #6151) rejects any
+///   `messages.content[*].type` other than `text`, not just images — `file` and
+///   `input_audio` parts trip the same 400. The existing image strip runs
+///   unchanged first, then a narrow second pass removes `file`/`input_file`/
+///   `input_audio`/`document` blocks from user/assistant content only. Tool-role
+///   content, tool-output payloads, and the reactive retry are untouched.
 pub fn replace_images_for_text_only_model(
     body: &mut Value,
     provider: &Provider,
     allow_heuristic: bool,
 ) -> usize {
-    if !contains_image_blocks(body) {
+    let has_images = contains_image_blocks(body);
+    let has_non_image_media = contains_non_image_media_blocks(body);
+    if !has_images && !has_non_image_media {
         return 0;
     }
 
@@ -33,13 +46,24 @@ pub fn replace_images_for_text_only_model(
         .map(str::trim)
         .unwrap_or("");
 
-    if image_input_capability_from_settings(&provider.settings_config, model, allow_heuristic)
-        != ImageInputCapability::Unsupported
-    {
+    let replace_images = has_images
+        && image_input_capability_from_settings(&provider.settings_config, model, allow_heuristic)
+            == ImageInputCapability::Unsupported;
+    let strip_non_image_media = has_non_image_media
+        && is_text_only_model_from_settings(&provider.settings_config, model, allow_heuristic);
+    if !replace_images && !strip_non_image_media {
         return 0;
     }
 
-    replace_images_in_body(body)
+    let mut replaced = if replace_images {
+        replace_images_in_body(body)
+    } else {
+        0
+    };
+    if strip_non_image_media {
+        replaced += strip_non_image_media_blocks(body);
+    }
+    replaced
 }
 
 pub fn contains_image_blocks(body: &Value) -> bool {
@@ -79,10 +103,14 @@ pub fn is_unsupported_image_error(error: &ProxyError) -> bool {
     // 错误提到 image/media 等字样——火山方舟等网关的报错是
     // "Model only support text input"，全程不出现 image（issue #5025）。
     // 国产网关的英文常缺三单 s，因此带 s / 不带 s 两种形式都要列。
+    // GLM-5.2 文本端点对 messages.content[*].type 非 text 的字段校验错也
+    // 从不提 image/模态（#6151）；中文形如
+    // "content.type 参数非法，取值范围 ['text']"，本身就是仅文本断言。
     const TEXT_ONLY_SELF_EVIDENT_HINTS: &[&str] = &["only support text", "only supports text"];
     if TEXT_ONLY_SELF_EVIDENT_HINTS
         .iter()
         .any(|hint| message.contains(hint))
+        || (message.contains("content.type 参数非法") && message.contains("取值范围 ['text']"))
     {
         return true;
     }
@@ -405,11 +433,138 @@ fn is_image_block_type(block_type: Option<&str>) -> bool {
     matches!(block_type, Some("image" | "image_url" | "input_image"))
 }
 
+/// Content-part types beyond images that a text-only upstream rejects
+/// (`file`/`input_file`/`input_audio`/`document`). GLM-5.2 returns
+/// `messages.content.type 参数非法，取值范围 ['text']` for these (#6151).
+/// Covers Chat (`file`), Responses (`input_file`), and Anthropic (`document`).
+fn is_non_image_media_block_type(block_type: Option<&str>) -> bool {
+    matches!(
+        block_type,
+        Some("file" | "input_file" | "input_audio" | "document")
+    )
+}
+
+fn is_user_or_assistant_content(item: &Value) -> bool {
+    matches!(
+        item.get("role").and_then(Value::as_str),
+        Some("user" | "assistant")
+    )
+}
+
+/// Whether the body carries non-image media blocks in
+/// user/assistant content (messages or Responses input). Only non-tool
+/// messages are checked — tool-role content and tool-output payloads are
+/// handled by the existing image-scoped path and are not widened here.
+fn contains_non_image_media_blocks(body: &Value) -> bool {
+    body.get("messages")
+        .and_then(Value::as_array)
+        .is_some_and(|messages| {
+            messages.iter().any(|message| {
+                is_user_or_assistant_content(message)
+                    && message
+                        .get("content")
+                        .and_then(Value::as_array)
+                        .is_some_and(|blocks| {
+                            blocks.iter().any(|block| {
+                                is_non_image_media_block_type(
+                                    block.get("type").and_then(Value::as_str),
+                                )
+                            })
+                        })
+            })
+        })
+        || responses_input_has_non_image_media_blocks(body.get("input"))
+}
+
+fn responses_input_has_non_image_media_blocks(input: Option<&Value>) -> bool {
+    match input {
+        Some(Value::Array(items)) => items.iter().any(responses_input_item_has_non_image_media),
+        Some(item @ Value::Object(_)) => responses_input_item_has_non_image_media(item),
+        _ => false,
+    }
+}
+
+fn responses_input_item_has_non_image_media(item: &Value) -> bool {
+    is_user_or_assistant_content(item)
+        && item
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|blocks| {
+                blocks.iter().any(|block| {
+                    is_non_image_media_block_type(block.get("type").and_then(Value::as_str))
+                })
+            })
+}
+
+/// Replace non-image media blocks with a text marker in user/assistant messages
+/// and Responses input content. Runs as a second pass after the existing image
+/// strip. Tool-role messages and tool-output payloads are intentionally skipped
+/// — the reactive retry's image-scoped contract stays untouched.
+fn strip_non_image_media_blocks(body: &mut Value) -> usize {
+    let mut replaced = 0usize;
+
+    if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
+        for message in messages.iter_mut() {
+            if !is_user_or_assistant_content(message) {
+                continue;
+            }
+            if let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) {
+                for block in blocks.iter_mut() {
+                    if is_non_image_media_block_type(block.get("type").and_then(Value::as_str)) {
+                        replace_non_image_media_block_with_text_marker(block, "text");
+                        replaced += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    replaced += match body.get_mut("input") {
+        Some(Value::Array(items)) => items
+            .iter_mut()
+            .map(strip_non_image_media_from_responses_item)
+            .sum(),
+        Some(item @ Value::Object(_)) => strip_non_image_media_from_responses_item(item),
+        _ => 0,
+    };
+
+    replaced
+}
+
+fn strip_non_image_media_from_responses_item(item: &mut Value) -> usize {
+    if !is_user_or_assistant_content(item) {
+        return 0;
+    }
+    let text_type = if item.get("role").and_then(Value::as_str) == Some("assistant") {
+        "output_text"
+    } else {
+        "input_text"
+    };
+    let mut replaced = 0usize;
+    if let Some(blocks) = item.get_mut("content").and_then(Value::as_array_mut) {
+        for block in blocks.iter_mut() {
+            if is_non_image_media_block_type(block.get("type").and_then(Value::as_str)) {
+                replace_non_image_media_block_with_text_marker(block, text_type);
+                replaced += 1;
+            }
+        }
+    }
+    replaced
+}
+
 fn replace_image_block_with_text_marker(block: &mut Value, text_type: &str) {
+    replace_block_with_text_marker(block, text_type, UNSUPPORTED_IMAGE_MARKER);
+}
+
+fn replace_non_image_media_block_with_text_marker(block: &mut Value, text_type: &str) {
+    replace_block_with_text_marker(block, text_type, UNSUPPORTED_MEDIA_MARKER);
+}
+
+fn replace_block_with_text_marker(block: &mut Value, text_type: &str, marker: &str) {
     let cache_control = block.get("cache_control").cloned();
     *block = json!({
         "type": text_type,
-        "text": UNSUPPORTED_IMAGE_MARKER
+        "text": marker
     });
     if let (Some(cache_control), Some(object)) = (cache_control, block.as_object_mut()) {
         object.insert("cache_control".to_string(), cache_control);
@@ -583,6 +738,134 @@ mod tests {
             body["input"][0]["content"][1]["text"],
             UNSUPPORTED_IMAGE_MARKER
         );
+    }
+
+    #[test]
+    fn confirmed_text_only_models_replace_chat_file_part_before_send() {
+        // #6151: GLM-5.2（确认 text-only）拒绝 messages.content 里非 text 的
+        // 部件——file 块与图片一样要在发出前替换成文本标记
+        let provider = provider(json!({}));
+        let mut body = json!({
+            "model": "glm-5.2",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "summarize the attachment" },
+                    { "type": "file", "file": { "filename": "doc.pdf", "file_data": "data:application/pdf;base64,AAA" } }
+                ]
+            }]
+        });
+
+        let count = replace_images_for_text_only_model(&mut body, &provider, true);
+
+        assert_eq!(count, 1);
+        assert_eq!(body["messages"][0]["content"][1]["type"], "text");
+        assert_eq!(
+            body["messages"][0]["content"][1]["text"],
+            UNSUPPORTED_MEDIA_MARKER
+        );
+    }
+
+    #[test]
+    fn confirmed_text_only_models_replace_chat_input_audio_part() {
+        let provider = provider(json!({}));
+        let mut body = json!({
+            "model": "glm-5.2",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    { "type": "input_audio", "input_audio": { "data": "b64", "format": "mp3" } }
+                ]
+            }]
+        });
+
+        let count = replace_images_for_text_only_model(&mut body, &provider, true);
+
+        assert_eq!(count, 1);
+        assert_eq!(body["messages"][0]["content"][0]["type"], "text");
+        assert_eq!(
+            body["messages"][0]["content"][0]["text"],
+            UNSUPPORTED_MEDIA_MARKER
+        );
+    }
+
+    #[test]
+    fn confirmed_text_only_models_replace_responses_input_file_part() {
+        let provider = provider(json!({}));
+        let mut body = json!({
+            "model": "glm-5.2",
+            "input": [{
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": "read this" },
+                    { "type": "input_file", "file_id": "file-1", "filename": "doc.pdf" }
+                ]
+            }]
+        });
+
+        let count = replace_images_for_text_only_model(&mut body, &provider, true);
+
+        assert_eq!(count, 1);
+        assert_eq!(body["input"][0]["content"][1]["type"], "input_text");
+        assert_eq!(
+            body["input"][0]["content"][1]["text"],
+            UNSUPPORTED_MEDIA_MARKER
+        );
+    }
+
+    #[test]
+    fn tool_role_content_is_not_widened_to_non_image_media_strip() {
+        // tool 角色的内容走既有的图片专用路径，非图片媒体剥离不扩大到那里
+        let provider = provider(json!({}));
+        let mut body = json!({
+            "model": "glm-5.2",
+            "messages": [{
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": [
+                    { "type": "file", "file": { "filename": "out.pdf" } }
+                ]
+            }]
+        });
+
+        let count = replace_images_for_text_only_model(&mut body, &provider, true);
+
+        assert_eq!(count, 0);
+        assert_eq!(body["messages"][0]["content"][0]["type"], "file");
+    }
+
+    #[test]
+    fn image_capable_model_keeps_file_parts() {
+        // 图片能力未知且不在 text-only 注册表的模型：媒体剥离不触发
+        let provider = provider(json!({}));
+        let mut body = json!({
+            "model": "gpt-5.4",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "read this" },
+                    { "type": "file", "file": { "filename": "doc.pdf", "file_data": "data:application/pdf;base64,AAA" } }
+                ]
+            }]
+        });
+
+        let count = replace_images_for_text_only_model(&mut body, &provider, true);
+
+        assert_eq!(count, 0);
+        assert_eq!(body["messages"][0]["content"][1]["type"], "file");
+    }
+
+    #[test]
+    fn detects_glm_chinese_field_validation_text_only_error() {
+        // #6151：GLM-5.2 的字段校验错从不提 image/模态
+        let error = ProxyError::UpstreamError {
+            status: 400,
+            body: Some(
+                json!({ "error": { "message": "messages.content.type 参数非法，取值范围 ['text']" } })
+                    .to_string(),
+            ),
+        };
+        assert!(is_unsupported_image_error(&error));
     }
 
     #[test]
