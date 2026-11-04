@@ -432,6 +432,10 @@ jobs:
 
       - name: Build Tauri App (Linux)
         if: runner.os == 'Linux'
+        # AppImage 不打包 libwayland-client：目标系统自带且版本不匹配时会崩
+        # （上游 #8723）。linuxdeploy 运行时环境变量，与 tauri cli 版本无关。
+        env:
+          LINUXDEPLOY_EXCLUDED_LIBRARIES: "libwayland-client.so*"
         run: pnpm tauri build --bundles appimage,deb,rpm
 
       # 无桌面（服务器、Ubuntu 20.04 等老发行版）用户的一次性配置工具。
