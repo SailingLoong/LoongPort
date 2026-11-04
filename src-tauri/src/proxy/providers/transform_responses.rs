@@ -2089,6 +2089,38 @@ fn map_tool_choice_to_responses(
     }
 }
 
+/// xAI Responses 的 `ModelToolChoice` 不接受 `{"type":"web_search"}`。
+/// 强制托管搜索时改成 `"required"`，并去掉其它工具，否则 required 可能落到本地函数上。
+/// 字符串选择和函数选择不动。没有存活的 web_search 工具时删掉这条 choice，避免空工具列表配 required。
+pub(crate) fn rewrite_xai_hosted_web_search_tool_choice(body: &mut Value) -> bool {
+    let is_hosted_choice = body
+        .get("tool_choice")
+        .and_then(Value::as_object)
+        .and_then(|choice| choice.get("type"))
+        .and_then(Value::as_str)
+        == Some("web_search");
+    if !is_hosted_choice {
+        return false;
+    }
+    let Some(obj) = body.as_object_mut() else {
+        return false;
+    };
+    if let Some(tools) = obj.get_mut("tools").and_then(Value::as_array_mut) {
+        tools.retain(|tool| tool.get("type").and_then(Value::as_str) == Some("web_search"));
+    }
+    let has_search = obj
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| !tools.is_empty());
+    if has_search {
+        obj.insert("tool_choice".to_string(), json!("required"));
+    } else {
+        obj.remove("tool_choice");
+        obj.remove("tools");
+    }
+    true
+}
+
 pub(crate) fn map_responses_stop_reason(
     status: Option<&str>,
     has_tool_use: bool,
@@ -3473,6 +3505,53 @@ mod tests {
         assert_eq!(result["tool_choice"], json!({"type": "web_search"}));
         assert_eq!(result["include"], json!(["web_search_call.action.sources"]));
         assert!(result["tools"][0].get("external_web_access").is_none());
+    }
+
+    #[test]
+    fn xai_hosted_web_search_choice_becomes_required_and_drops_other_tools() {
+        let mut body = json!({
+            "model": "grok-4.5",
+            "tools": [
+                {"type": "function", "name": "Bash"},
+                {"type": "web_search"}
+            ],
+            "tool_choice": {"type": "web_search"}
+        });
+
+        assert!(rewrite_xai_hosted_web_search_tool_choice(&mut body));
+        assert_eq!(body["tool_choice"], json!("required"));
+        assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(body["tools"][0]["type"], json!("web_search"));
+
+        // 已改写过（choice 现为字符串）再跑一遍是幂等 no-op
+        assert!(!rewrite_xai_hosted_web_search_tool_choice(&mut body));
+    }
+
+    #[test]
+    fn xai_hosted_web_search_choice_without_search_tool_drops_both() {
+        let mut body = json!({
+            "model": "grok-4.5",
+            "tools": [{"type": "function", "name": "Bash"}],
+            "tool_choice": {"type": "web_search"}
+        });
+
+        assert!(rewrite_xai_hosted_web_search_tool_choice(&mut body));
+        assert!(body.get("tool_choice").is_none());
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn xai_rewrite_leaves_string_and_function_choices_alone() {
+        for choice in [json!("auto"), json!({"type": "function", "name": "Bash"})] {
+            let mut body = json!({
+                "model": "grok-4.5",
+                "tools": [{"type": "function", "name": "Bash"}],
+                "tool_choice": choice
+            });
+            let before = body.clone();
+            assert!(!rewrite_xai_hosted_web_search_tool_choice(&mut body));
+            assert_eq!(body, before);
+        }
     }
 
     #[test]
