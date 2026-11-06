@@ -496,22 +496,44 @@ fn map_reasoning_effort<'a>(
 
 /// MiniMax 严格要求 messages 中只能首条出现 `role=system`，
 /// 否则返回 `invalid params, chat content has invalid message role: system (2013)`。
-/// 把所有 system 消息合并到首位，避免中间 system（如 Codex 的 `developer` 指令）触发该约束；
-/// 该重排对 OpenAI / DeepSeek 等宽松兼容层也是无损的。
+/// 所以 messages 里最多只留首条 system：
+/// - 开头连续的 system（instructions 与首批 developer 指令）合并成首条。
+/// - 会话中途、后面（只隔 system）紧接 user 的 system——Codex 在新回合开头插的
+///   developer 指令（权限、协作模式、模型切换等）——原位改成 user 消息。拼进首条会
+///   改动已经发过的前缀，上游前缀缓存从第一条消息断开，整段对话重算。
+/// - 其余中途 system（夹在工具调用循环里，如图片缩放提示）仍拼进首条：原位插 user
+///   会把一次工具循环拆成两个回合，影响 DeepSeek / Kimi 等的推理连续性。
 fn collapse_system_messages_to_head(messages: Vec<Value>) -> Vec<Value> {
+    // 每条消息之后第一条非 system 消息是否为 user。
+    let mut followed_by_user = vec![false; messages.len()];
+    let mut next_is_user = false;
+    for (idx, msg) in messages.iter().enumerate().rev() {
+        followed_by_user[idx] = next_is_user;
+        if !is_hoistable_system_message(msg) {
+            next_is_user = msg.get("role").and_then(Value::as_str) == Some("user");
+        }
+    }
+
     let mut system_chunks: Vec<String> = Vec::new();
     let mut rest: Vec<Value> = Vec::with_capacity(messages.len());
+    let mut seen_non_system = false;
 
-    for msg in messages {
-        if msg.get("role").and_then(|v| v.as_str()) == Some("system") {
-            if let Some(text) = msg.get("content").and_then(|v| v.as_str()) {
-                let trimmed = text.trim();
-                if !trimmed.is_empty() {
+    for (msg, followed_by_user) in messages.into_iter().zip(followed_by_user) {
+        if is_hoistable_system_message(&msg) {
+            let text = msg
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !text.trim().is_empty() {
+                if seen_non_system && followed_by_user {
+                    rest.push(json!({"role": "user", "content": text}));
+                } else {
                     system_chunks.push(text.to_string());
                 }
-                continue;
             }
+            continue;
         }
+        seen_non_system = true;
         rest.push(msg);
     }
 
@@ -524,6 +546,13 @@ fn collapse_system_messages_to_head(messages: Vec<Value>) -> Vec<Value> {
     }
     out.extend(rest);
     out
+}
+
+/// 可上拼的 system 消息：role=system 且 content 为纯字符串。
+/// 非字符串 content（如数组部件）的 system 保持原位不动。
+fn is_hoistable_system_message(msg: &Value) -> bool {
+    msg.get("role").and_then(Value::as_str) == Some("system")
+        && msg.get("content").is_some_and(Value::is_string)
 }
 
 fn instruction_text(value: &Value) -> String {
@@ -3148,7 +3177,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_request_to_chat_merges_mid_stream_system_into_head() {
+    fn responses_request_to_chat_keeps_only_head_system_for_minimax() {
         let input = json!({
             "model": "MiniMax-M2.7",
             "instructions": "You are Codex.",
@@ -3180,7 +3209,15 @@ mod tests {
         let head_content = messages[0]["content"].as_str().unwrap();
         assert!(head_content.contains("You are Codex."));
         assert!(head_content.contains("Permissions block"));
-        assert!(head_content.contains("Collaboration Mode: Default"));
+        // 新回合开头的 developer 指令原位转 user：首条（及已发过的前缀）不再变动
+        assert!(!head_content.contains("Collaboration Mode: Default"));
+        let turn_start = messages
+            .iter()
+            .find(|msg| {
+                msg.get("content").and_then(Value::as_str) == Some("Collaboration Mode: Default")
+            })
+            .expect("developer text must survive");
+        assert_eq!(turn_start["role"], "user");
     }
 
     #[test]
@@ -3194,12 +3231,16 @@ mod tests {
         ];
         let out = collapse_system_messages_to_head(input);
 
-        assert_eq!(out.len(), 4);
+        // S2 夹在会话中途且后面紧跟 user：原位转 user（前缀缓存不变），
+        // 不再拼进首条
+        assert_eq!(out.len(), 5);
         assert_eq!(out[0]["role"], "system");
-        assert_eq!(out[0]["content"], "S1\n\nS2");
+        assert_eq!(out[0]["content"], "S1");
         assert_eq!(out[1]["content"], "U1");
         assert_eq!(out[2]["content"], "A1");
-        assert_eq!(out[3]["content"], "U2");
+        assert_eq!(out[3]["role"], "user");
+        assert_eq!(out[3]["content"], "S2");
+        assert_eq!(out[4]["content"], "U2");
     }
 
     #[test]
