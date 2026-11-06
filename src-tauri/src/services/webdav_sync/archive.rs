@@ -281,7 +281,7 @@ fn copy_entry_with_total_limit<R: Read, W: Write>(
 
 #[cfg(test)]
 mod tests {
-    use super::{copy_entry_with_total_limit, mark_visited_dir, zip_dir_recursive};
+    use super::{copy_entry_with_total_limit, mark_visited_dir};
     use std::collections::HashSet;
     use std::io::Cursor;
     use std::path::Path;
@@ -289,6 +289,7 @@ mod tests {
 
     #[cfg(unix)]
     mod zip_symlinks {
+        use super::super::zip_dir_recursive;
         use super::*;
         use std::fs;
         use std::io::Read;
