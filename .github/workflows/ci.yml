@@ -60,9 +60,9 @@ jobs:
       backend: ${{ steps.filter.outputs.backend }}
     steps:
       # On pull_request the filter reads changed files via the API (no checkout);
-      # on push it needs a local git history to diff against.
+      # on push or manual dispatch it needs a local git history to diff against.
       - name: Checkout
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         uses: actions/checkout@v6
 
       - name: Detect changed paths
@@ -172,7 +172,7 @@ jobs:
         # 「只有 macOS 能验的 chatgpt_app.rs AppleScript 分支，维护者本机就是 macOS，
         # 六道闸本来就在本机先跑一遍」。开源后 PR 来自外部贡献者，他们的本机不一定是
         # macOS，「维护者本机会先跑」这个前提不再覆盖所有改动 ⇒ 那条分支必须由 CI 兜住。
-        os: [ubuntu-22.04, windows-latest, macos-14]
+        os: [ubuntu-22.04, windows-latest, macos-15]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -358,7 +358,7 @@ jobs:
     name: Required Checks
     runs-on: ubuntu-latest
     if: always()
-    needs: [frontend, backend, backend-windows-wsl2, workflow-lint]
+    needs: [changes, frontend, backend, backend-windows-wsl2, workflow-lint]
     steps:
       - name: Gate on upstream results
         shell: bash

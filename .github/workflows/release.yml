@@ -74,7 +74,7 @@ jobs:
           - os: windows-2022
           - os: windows-11-arm
             arch: arm64
-          - os: macos-14
+          - os: macos-15
           - os: ubuntu-22.04
           # arm64 仍挂起：x64 真机验证过了再放回（连同下面两行一起取消注释）。
           #   - os: ubuntu-22.04-arm

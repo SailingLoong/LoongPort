@@ -119,6 +119,33 @@ describe("ProviderForm Codex catalog helpers", () => {
       ]),
     ).toEqual([{ model: "glm-5.2", reasoningLevels: ["high", "max"] }]);
   });
+
+  it("preserves an explicit relay alias and clears a row back to automatic facts", () => {
+    const levels = ["low", "medium", "high", "xhigh", "max", "ultra"];
+    const alias = mapCodexCatalogModelForForm({
+      model: "gpt-6",
+      reasoningLevels: levels,
+      defaultReasoningLevel: "high",
+    });
+    expect(normalizeCodexCatalogModelsForSave([alias])).toEqual([
+      {
+        model: "gpt-6",
+        reasoningLevels: levels,
+        defaultReasoningLevel: "high",
+      },
+    ]);
+    const automatic = {
+      ...mapCodexCatalogModelForForm({
+        model: "gpt-6.1-sol",
+        reasoningLevels: levels,
+      }),
+      reasoningLevels: undefined,
+      defaultReasoningLevel: undefined,
+    };
+    expect(normalizeCodexCatalogModelsForSave([automatic])).toEqual([
+      { model: "gpt-6.1-sol" },
+    ]);
+  });
 });
 
 describe("reasoning capability editing", () => {

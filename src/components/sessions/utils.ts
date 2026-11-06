@@ -69,12 +69,27 @@ const extractCodexPromptFromIdeContext = (content: string) => {
 export const getSessionKey = (session: SessionMeta) =>
   `${session.providerId}:${session.sessionId}:${session.sourcePath ?? ""}`;
 
+/**
+ * 分组用的目录 key：去掉末尾分隔符；Windows 路径（盘符或 UNC 开头）不分大小写、
+ * `/` 统一成 `\`，`D:\demo` 和 `d:/demo/` 归为同一组。只用来比较，显示仍用原路径。
+ */
+const getProjectDirKey = (projectDir: string) => {
+  const isWindowsPath = /^(?:[A-Za-z]:[\\/]|\\\\[^\\])/.test(projectDir);
+  if (!isWindowsPath) return projectDir.replace(/(.)\/+$/, "$1");
+  return projectDir
+    .replace(/\//g, "\\")
+    .replace(/(.)\\+$/, "$1")
+    .toLowerCase();
+};
+
 export const getSessionDirectoryGroupKey = (
   providerId: string,
   projectDir?: string | null,
 ) => {
   const trimmed = projectDir?.trim();
-  return `${providerId}:${trimmed || UNKNOWN_PROJECT_DIR_KEY}`;
+  return `${providerId}:${
+    trimmed ? getProjectDirKey(trimmed) : UNKNOWN_PROJECT_DIR_KEY
+  }`;
 };
 
 export const getBaseName = (value?: string | null) => {

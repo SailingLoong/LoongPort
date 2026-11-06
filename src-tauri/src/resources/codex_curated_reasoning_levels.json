@@ -176,6 +176,104 @@
         "none",
         "high"
       ]
+    },
+    {
+      "model": "gpt-6-astra",
+      "reasoningLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "defaultReasoningLevel": "low",
+      "source": "openai-codex-rust-v0.162.0-alpha.7"
+    },
+    {
+      "model": "gpt-6.1-sol",
+      "reasoningLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "defaultReasoningLevel": "low",
+      "source": "openai-codex-rust-v0.162.0-alpha.7"
+    },
+    {
+      "model": "gpt-6-sol",
+      "reasoningLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "defaultReasoningLevel": "medium",
+      "source": "openai-codex-rust-v0.162.0-alpha.7"
+    },
+    {
+      "model": "gpt-6-luna",
+      "reasoningLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "defaultReasoningLevel": "medium",
+      "source": "openai-codex-rust-v0.162.0-alpha.7"
+    },
+    {
+      "model": "gpt-5.6-sol",
+      "reasoningLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "defaultReasoningLevel": "low",
+      "source": "openai-codex-rust-v0.162.0-alpha.7"
+    },
+    {
+      "model": "gpt-5.6-terra",
+      "reasoningLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "defaultReasoningLevel": "medium",
+      "source": "openai-codex-rust-v0.162.0-alpha.7"
+    },
+    {
+      "model": "gpt-5.6-luna",
+      "reasoningLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "defaultReasoningLevel": "medium",
+      "source": "openai-codex-rust-v0.162.0-alpha.7"
     }
-  ]
+  ],
+  "sources": {
+    "openai-codex-rust-v0.162.0-alpha.7": {
+      "authority": "openai-codex",
+      "version": "0.162.0-alpha.7",
+      "release": "rust-v0.162.0-alpha.7",
+      "published_at": "2026-10-02T13:48:03Z",
+      "url": "https://github.com/openai/codex/blob/rust-v0.162.0-alpha.7/codex-rs/models-manager/models.json"
+    }
+  }
 }

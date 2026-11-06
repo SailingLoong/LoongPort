@@ -82,7 +82,8 @@ pub(crate) fn declared_capabilities(row: &Value) -> Option<ReasoningCapabilities
 }
 
 pub(crate) fn native_capabilities(entry: &Value) -> Option<ReasoningCapabilities> {
-    let levels = entry.get("supported_reasoning_levels")?.as_array()?;
+    let raw_levels = entry.get("supported_reasoning_levels")?.as_array()?;
+    let levels = raw_levels;
     let levels = canonical_levels(
         &levels
             .iter()
@@ -90,7 +91,7 @@ pub(crate) fn native_capabilities(entry: &Value) -> Option<ReasoningCapabilities
             .map(str::to_string)
             .collect::<Vec<_>>(),
     );
-    if levels.is_empty() {
+    if levels.is_empty() && !raw_levels.is_empty() {
         return None;
     }
     let default_level = entry
@@ -130,6 +131,42 @@ pub(crate) fn curated_capabilities(model: &str) -> Option<ReasoningCapabilities>
         .and_then(declared_capabilities)
 }
 
+/// Seed facts from a real versioned official release. The loader compares this
+/// version with installed CLI/cache sources without inventing model-family rules.
+pub(crate) fn seed_official_model_facts() -> Vec<Value> {
+    let catalog: Value = serde_json::from_str(include_str!(
+        "resources/codex_curated_reasoning_levels.json"
+    ))
+    .expect("bundled reasoning capabilities must be valid JSON");
+    let Some(rows) = catalog.get("models").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter_map(|row| {
+            let source = catalog.get("sources")?.get(row.get("source")?.as_str()?)?;
+            if source.get("authority").and_then(Value::as_str) != Some("openai-codex") {
+                return None;
+            }
+            let model = row.get("model")?.as_str()?;
+            let capabilities = declared_capabilities(row)?;
+            let levels: Vec<_> = capabilities
+                .levels
+                .iter()
+                .map(|effort| {
+                    serde_json::json!({
+                        "effort": effort, "description": format!("{effort} reasoning")
+                    })
+                })
+                .collect();
+            Some(serde_json::json!({
+                "slug": model, "supported_reasoning_levels": levels,
+                "default_reasoning_level": capabilities.default_level,
+                "loongport_reasoning_source": source
+            }))
+        })
+        .collect()
+}
+
 /// Explicit model facts win over official/curated facts. Transport restrictions still win:
 /// a model capability does not authorize parameters its gateway explicitly does not support.
 pub(crate) fn resolve(
@@ -148,7 +185,15 @@ pub(crate) fn resolve(
     };
     let mut capabilities = declared
         .and_then(normalize)
-        .or_else(|| official.and_then(normalize))
+        .or_else(|| {
+            official.map(|mut capabilities| {
+                capabilities.levels = canonical_levels(&capabilities.levels);
+                capabilities.default_level = capabilities
+                    .default_level
+                    .filter(|value| capabilities.levels.contains(value));
+                capabilities
+            })
+        })
         .or_else(|| curated_capabilities(model));
     let Some(transport) = transport else {
         return capabilities;
