@@ -420,13 +420,9 @@ async fn send_raw_request(
             .map_err(RawRequestError::BeforeWrite)?
     } else {
         ProxyStream::Tcp(
-            tokio::net::TcpStream::connect((host, port))
+            connect_direct(host, port)
                 .await
-                .map_err(|e| {
-                    RawRequestError::BeforeWrite(ProxyError::ForwardFailed(format!(
-                        "TCP connect failed: {e}"
-                    )))
-                })?,
+                .map_err(RawRequestError::BeforeWrite)?,
         )
     };
 
@@ -473,6 +469,32 @@ where
     do_hyper_response(WriteFilter::new(stream), method)
         .await
         .map_err(RawRequestError::PossiblyWritten)
+}
+
+/// Open a direct TCP connection to `host:port` with Happy Eyeballs.
+///
+/// `TcpStream::connect` tries every resolved address one after another and only
+/// moves on when the OS gives up on the current one（macOS 每地址约 75s、Windows
+/// 约 21s）。把不可达的 AAAA 记录排在 IPv4 前面的域名（如部分国内网关双 IPv6
+/// 地址后跟可用 IPv4）会让每个请求在发出首字节前卡几分钟。复用 hyper-util 的
+/// 连接器：300ms 后竞速另一地址族，与 curl/浏览器一致。
+async fn connect_direct(host: &str, port: u16) -> Result<tokio::net::TcpStream, ProxyError> {
+    use tower::Service;
+
+    // `host` 来自 `http::Uri::host()`，IPv6 字面量带方括号原样传入。
+    let dst: http::Uri = format!("http://{host}:{port}/")
+        .parse()
+        .map_err(|e| ProxyError::ForwardFailed(format!("Invalid upstream address: {e}")))?;
+    let mut connector = hyper_util::client::legacy::connect::HttpConnector::new();
+    connector.enforce_http(false);
+    std::future::poll_fn(|cx| connector.poll_ready(cx))
+        .await
+        .map_err(|e| ProxyError::ForwardFailed(format!("TCP connect failed: {e}")))?;
+    let io = connector
+        .call(dst)
+        .await
+        .map_err(|e| ProxyError::ForwardFailed(format!("TCP connect failed: {e}")))?;
+    Ok(io.into_inner())
 }
 
 /// Establish a connection through an HTTP CONNECT proxy tunnel.
@@ -1179,6 +1201,28 @@ mod tests {
         });
 
         (port, written_report)
+    }
+
+    #[tokio::test]
+    async fn connect_direct_reaches_ipv4_and_bracketed_ipv6_hosts() {
+        let v4 = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let v4_port = v4.local_addr().unwrap().port();
+        let stream = connect_direct("127.0.0.1", v4_port).await.unwrap();
+        assert_eq!(stream.peer_addr().unwrap().port(), v4_port);
+
+        // `http::Uri::host()` 交出的 IPv6 字面量带方括号
+        let Ok(v6) = tokio::net::TcpListener::bind(("[::1]", 0)).await else {
+            return; // 本机无 IPv6 回环
+        };
+        let v6_port = v6.local_addr().unwrap().port();
+        let uri: http::Uri = format!("https://[::1]:{v6_port}/v1/messages")
+            .parse()
+            .unwrap();
+        let bracketed = uri.host().unwrap();
+        let stream = connect_direct(bracketed, v6_port).await.unwrap();
+        assert_eq!(stream.peer_addr().unwrap().port(), v6_port);
     }
 
     /// 客户端断开到服务器写入失败之间有时延（loopback 缓冲区会再吞一部分），
