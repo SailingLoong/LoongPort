@@ -212,6 +212,17 @@ pub fn get() -> Client {
         })
 }
 
+/// 不跟随重定向的探测客户端：与 [`get`] 同一套代理/TLS 设置，唯一区别是
+/// 收到 3xx 原样返回。探测类请求（可达性检查）把 3xx 本身当「可达」证据；
+/// 跟随反而会被 `/v1` ↔ `/v1/` 互跳之类的服务端配置拖进重定向循环、误判不可达。
+pub fn get_no_redirect() -> Result<Client, String> {
+    let proxy_url = CURRENT_PROXY_URL
+        .get()
+        .and_then(|lock| lock.read().ok())
+        .and_then(|guard| guard.clone());
+    build_client_with_redirect(proxy_url.as_deref(), reqwest::redirect::Policy::none())
+}
+
 /// Client for requests carrying credentials, including provider-specific headers.
 /// Redirects may retain credentials only within the original scheme/host/port.
 /// Never fall back to an unrestricted client after a configuration/lock failure.
