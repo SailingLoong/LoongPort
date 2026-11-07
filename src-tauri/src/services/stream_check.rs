@@ -195,11 +195,9 @@ impl StreamCheckService {
             None => Self::resolve_base_url(app_type, provider)?,
         };
 
-        let client = if crate::proxy::http_client::url_has_credentials(&base_url) {
-            crate::proxy::http_client::get_authenticated().map_err(AppError::Message)?
-        } else {
-            crate::proxy::http_client::get()
-        };
+        // 探测不跟随重定向：3xx 本身就是 HTTP 响应，已证明可达。跟随反而会被
+        // `/v1` ↔ `/v1/` 互跳之类的服务端配置拖进重定向循环，误判为不可达。
+        let client = crate::proxy::http_client::get_no_redirect().map_err(AppError::Message)?;
         let timeout = std::time::Duration::from_secs(config.timeout_secs);
         let ua = Self::custom_user_agent(provider);
 
@@ -552,7 +550,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn authenticated_redirect_stream_check_userinfo_error_is_redacted() {
+    async fn redirect_response_is_reachable_and_credentials_not_forwarded() {
         use crate::proxy::redirect_test_support::MockServer;
         let source = MockServer::spawn().await;
         let target = MockServer::spawn().await;
@@ -574,26 +572,55 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(!result.success);
-        assert!(result.message.contains("redirect"));
-        for canary in [
-            "fake-path-canary",
-            "fake-query-canary",
-            "fake-location-canary",
-            "fake-user",
-            "fake-password",
-        ] {
-            assert!(
-                !result.message.contains(canary),
-                "URL credential in final result: {}",
-                result.message
-            );
-        }
+        // 探测不跟随重定向：3xx 本身就是可达证据
+        assert!(result.success, "{}", result.message);
+        assert_eq!(result.http_status, Some(302));
+        // 不跟随 → 凭据只发给了原源站，重定向目标一个请求都收不到
         assert!(source.received()[0].headers["authorization"]
             .to_str()
             .unwrap()
             .starts_with("Basic "));
         assert!(target.received().is_empty());
+    }
+
+    /// 回归 #5747：网关 `/v1` ↔ `/v1/` 互相 301。探测若跟随重定向会撞上限报错、
+    /// 误判不可达；收到第一个 3xx 就应判为可达。
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_redirect_loop_is_reachable() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let target = if req.starts_with("GET /v1/ ") {
+                    "/v1"
+                } else {
+                    "/v1/"
+                };
+                let resp = format!(
+                    "HTTP/1.1 301 Moved Permanently\r\nlocation: http://{addr}{target}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                );
+                let _ = socket.write_all(resp.as_bytes()).await;
+            }
+        });
+        let provider = make_provider(serde_json::json!({
+            "env": { "ANTHROPIC_BASE_URL": format!("http://{addr}/v1") }
+        }));
+        let result = StreamCheckService::check_once(
+            &AppType::Claude,
+            &provider,
+            &StreamCheckConfig::default(),
+            Some(format!("http://{addr}/v1")),
+            Instant::now(),
+        )
+        .await
+        .unwrap();
+        assert!(result.success, "{}", result.message);
+        assert_eq!(result.http_status, Some(301));
     }
 
     #[tokio::test]
