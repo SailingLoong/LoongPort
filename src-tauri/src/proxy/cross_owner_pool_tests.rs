@@ -258,14 +258,15 @@ async fn cross_owner_tcp_fallback_persists_next_turn_and_restores_native_files()
             .count(),
         1
     );
-    assert_eq!(
-        f.usage_rows(2)
-            .await
-            .iter()
-            .map(|row| (row.1.as_str(), row.2, row.3))
-            .collect::<Vec<_>>(),
-        vec![("synthetic-b", 3, 5), ("synthetic-b", 4, 6)]
-    );
+    // usage_rows 的行序没有契约保证（并发插入/查询计划可换序），按值排序后断言：
+    // 同一行序抖动已在三个不相关 PR 的 CI 上三连现（#760/#780/#781）。
+    let usage_rows = f.usage_rows(2).await;
+    let mut rows = usage_rows
+        .iter()
+        .map(|row| (row.1.as_str(), row.2, row.3))
+        .collect::<Vec<_>>();
+    rows.sort();
+    assert_eq!(rows, vec![("synthetic-b", 3, 5), ("synthetic-b", 4, 6)]);
     app.proxy_service
         .set_takeover_for_app("codex", false)
         .await
