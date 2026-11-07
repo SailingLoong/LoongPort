@@ -31,13 +31,29 @@ export function RepoManagerPanel({
   const savingRef = useRef(false);
   const draftRevision = useRef(0);
 
-  const getSkillCount = (repo: SkillRepo) =>
-    skills.filter(
+  // 发现结果里的 `repoBranch` 是实际下载成功的分支，不一定等于配置的分支：
+  // 后端依次试「配置分支 → main → master」（`HEAD` / 空串表示默认分支，直接从
+  // main 开始试）。按同一张候选表匹配，否则配成 HEAD 或默认分支是 master 的
+  // 仓库会显示 0 个（上游 #9273）。
+  const resolvableBranches = (branch: string | undefined): string[] => {
+    const configured = branch ?? "";
+    const branches =
+      configured && configured.toUpperCase() !== "HEAD" ? [configured] : [];
+    for (const fallback of ["main", "master"]) {
+      if (!branches.includes(fallback)) branches.push(fallback);
+    }
+    return branches;
+  };
+
+  const getSkillCount = (repo: SkillRepo) => {
+    const branches = resolvableBranches(repo.branch);
+    return skills.filter(
       (skill) =>
         skill.repoOwner === repo.owner &&
         skill.repoName === repo.name &&
-        (skill.repoBranch || "main") === (repo.branch || "main"),
+        branches.includes(skill.repoBranch || "main"),
     ).length;
+  };
 
   const parseRepoUrl = (
     url: string,
