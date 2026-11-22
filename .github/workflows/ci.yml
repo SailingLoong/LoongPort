@@ -437,7 +437,7 @@ jobs:
           tool: cargo-nextest@${{ env.NEXTEST_VERSION }}
 
       - name: Download same-run platform test archive
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: nextest-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}-${{ matrix.os }}-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/nextest-artifact
